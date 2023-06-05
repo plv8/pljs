@@ -1,0 +1,7 @@
+*.o
+results
+regression.diffs
+regression.out
+
+.clangd
+.depend

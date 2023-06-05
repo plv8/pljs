@@ -1,0 +1,7 @@
+comment = 'PL/JS trusted procedural language'
+
+default_version = '0.1.0'
+module_pathname = '$libdir/pljs'
+relocatable = false
+schema = pg_catalog
+superuser = true

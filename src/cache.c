@@ -1,136 +1,188 @@
 #include "postgres.h"
 
+#include "access/xlog_internal.h"
 #include "catalog/pg_proc.h"
+#include "common/hashfn.h"
 #include "funcapi.h"
 #include "miscadmin.h"
-#include "utils/syscache.h"
+#include "utils/builtins.h"
 #include "utils/hsearch.h"
+#include "utils/syscache.h"
 
 #include "pljs.h"
 
-extern HTAB* pljs_HashTable;
+// hash table for storing caches
+HTAB *pljs_context_HashTable = NULL;
+HTAB *pljs_function_HashTable = NULL;
 
-static pljs_cache_key* create_cache_key(Oid fn_oid) {
-  static pljs_cache_key key = {0};
+// initialization the caches
+void pljs_cache_init(void) {
+  // initialize context cache
+  HASHCTL context_ctl = {0};
 
-  memset(&key, 0, sizeof(pljs_cache_key));
+  // key size for contexts
+  context_ctl.keysize = sizeof(pljs_context_cache_key);
 
-  if (fn_oid == InvalidOid) {
-    elog(NOTICE, "invalid oid");
-    key.fn_oid = fn_oid;
-    key.user_id = GetUserId();
-    key.nargs = 0;
+  context_ctl.entrysize = sizeof(pljs_cache_value);
+  context_ctl.hcxt = TopMemoryContext;
+  // context_ctl.hash = uint32_hash;
 
-    return &key;
-  }
+  pljs_context_HashTable =
+      hash_create("pljs context cache",
+                  128, // arbitrary guess at number of users/roles
+                  &context_ctl, HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
 
-  HeapTuple proctuple;
-  Form_pg_proc pg_proc_entry;
-  int nargs;
-  char** arguments;
-  Oid* argtypes;
-  char* argmodes;
+  HASHCTL function_ctl = {0};
 
-  proctuple = SearchSysCache(PROCOID, ObjectIdGetDatum(fn_oid), 0, 0, 0);
+  // key size for functions
+  function_ctl.keysize = sizeof(pljs_function_cache_key);
+  function_ctl.entrysize = sizeof(pljs_cache_value);
+  function_ctl.hcxt = TopMemoryContext;
+  function_ctl.hash = tag_hash;
+
+  pljs_function_HashTable =
+      hash_create("pljs function cache",
+                  128, // arbitrary guess at functions per user
+                  &function_ctl, HASH_ELEM | HASH_FUNCTION | HASH_CONTEXT);
+}
+
+// create the hash key for the function Oid and the JSContext *
+static pljs_function_cache_key *create_cache_key(Oid fn_oid) {
+  // switch to the top memory context
+  MemoryContext oldcontext = MemoryContextSwitchTo(TopMemoryContext);
+
+  pljs_function_cache_key *key =
+      (pljs_function_cache_key *)palloc(sizeof(pljs_function_cache_key));
+
+  // switch back to the original context.
+  MemoryContextSwitchTo(oldcontext);
+
+  char **arguments;
+  Oid *argtypes;
+  char *argmodes;
+
+  HeapTuple proctuple =
+      SearchSysCache(PROCOID, ObjectIdGetDatum(fn_oid), 0, 0, 0);
 
   if (!HeapTupleIsValid(proctuple)) {
     elog(ERROR, "cache lookup failed for function %u", fn_oid);
   }
 
-  nargs = get_func_arg_info(proctuple, &argtypes, &arguments, &argmodes);
+  Form_pg_proc pg_proc_entry = (Form_pg_proc)GETSTRUCT(proctuple);
 
-  pg_proc_entry = (Form_pg_proc)GETSTRUCT(proctuple);
+  key->nargs = get_func_arg_info(proctuple, &argtypes, &arguments, &argmodes);
+  memcpy(key->argtypes, argtypes, sizeof(Oid) * key->nargs);
+
+  key->user_id = GetUserId();
+  strncpy(key->proname, pg_proc_entry->proname.data, NAMEDATALEN);
+
+  key->trigger = false;
+
+  elog(NOTICE, "hash key => { %s, %d, %d, %d, %d }", key->proname, key->trigger,
+       key->user_id, key->rettype, key->nargs);
 
   ReleaseSysCache(proctuple);
 
-  key.trigger = false;
-  key.nargs = nargs;
-  memcpy(key.argtypes, argtypes, sizeof(Oid) * nargs);
-
-  elog(NOTICE, "key: %x, %x, %d", fn_oid, key.user_id, nargs);
-  return &key;
+  return key;
 }
 
-pljs_cache_entry* pljs_hash_table_search(Oid fn_oid) {
-  pljs_cache_key* key;
-  pljs_cache_entry* entry;
-
-  key = create_cache_key(fn_oid);
-  entry = (pljs_cache_entry*)hash_search(pljs_HashTable, (void*)key, HASH_FIND,
-                                         NULL);
-
-  return entry;
-}
-
-void pljs_hash_table_create(Oid fn_oid, JSContext* ctx, JSValue jsfunc) {
-  HeapTuple proctuple;
-  Form_pg_proc pg_proc_entry;
-  int nargs;
-  char** arguments;
-  Oid* argtypes;
-  char* argmodes;
-
-  pljs_cache_key* key = create_cache_key(fn_oid);
-
-  pljs_cache_entry* hentry;
+void pljs_cache_context_add(Oid user_id, JSContext *ctx) {
   bool found;
 
-  MemoryContext oldcontext = MemoryContextSwitchTo(TopMemoryContext);
+  // elog(NOTICE, "pljs_cache_context_add: user_id => %d", user_id);
 
-  // search for the entry
-  hentry = (pljs_cache_entry*)hash_search(pljs_HashTable, (void*)key,
-                                          HASH_ENTER, &found);
+  pljs_context_cache_key key = {
+      user_id}; //(pljs_context_cache_key*)palloc(sizeof(pljs_context_cache_key));
+  // key->user_id = user_id;
+
+  pljs_cache_value *hvalue = (pljs_cache_value *)hash_search(
+      pljs_context_HashTable, (void *)&key, HASH_ENTER, &found);
 
   // if it exists, that's probably a bad sign
   if (found) {
-    elog(WARNING, "trying to insert a function that already exists");
+    elog(WARNING, "trying to add a context that already exists");
   }
 
-  MemSet(&hentry->fn, 0, sizeof(pljs_function));
-
-  hentry->fn.fn_oid = fn_oid;
-  hentry->fn.ctx = ctx;
-
-  if (fn_oid != InvalidOid) {
-    proctuple = SearchSysCache(PROCOID, ObjectIdGetDatum(fn_oid), 0, 0, 0);
-
-    if (!HeapTupleIsValid(proctuple)) {
-      elog(ERROR, "cache lookup failed for function %u", fn_oid);
-    }
-
-    nargs = get_func_arg_info(proctuple, &argtypes, &arguments, &argmodes);
-
-    pg_proc_entry = (Form_pg_proc)GETSTRUCT(proctuple);
-
-    strcpy(hentry->fn.proname, NameStr(pg_proc_entry->proname));
-    hentry->fn.nargs = nargs;
-    hentry->fn.func = jsfunc;
-
-    ReleaseSysCache(proctuple);
-  }
-
-  hash_update_hash_key(pljs_HashTable, hentry, key);
-
-  MemoryContextSwitchTo(oldcontext);
+  // hvalue->key = (void*) key;
+  hvalue->ctx = ctx;
 }
 
-
-void pljs_hash_table_remove(Oid fn_oid) {
-  pljs_cache_key* key = create_cache_key(fn_oid);
-
+void pljs_cache_context_remove(Oid user_id) {
   bool found;
 
-  MemoryContext oldcontext = MemoryContextSwitchTo(TopMemoryContext);
+  pljs_context_cache_key key = {user_id};
 
-  // search for the entry
-  hash_search(pljs_HashTable, (void*)key,
-                                          HASH_REMOVE, &found);
+  pljs_cache_value *hvalue = (pljs_cache_value *)hash_search(
+      pljs_context_HashTable, (void *)&key, HASH_REMOVE, &found);
 
-  if (found) {
+  if (hvalue) {
+    pfree(hvalue->key);
     elog(NOTICE, "found entry to remove");
   } else {
     elog(NOTICE, "no entry found to remove");
   }
+}
 
-  MemoryContextSwitchTo(oldcontext);
+pljs_cache_value *pljs_cache_context_find(Oid user_id) {
+  // elog(NOTICE, "pljs_cache_context_find: user_id => %d", user_id);
+
+  pljs_context_cache_key key = {user_id};
+  pljs_cache_value *value = (pljs_cache_value *)hash_search(
+      pljs_context_HashTable, (void *)&key, HASH_FIND, NULL);
+
+  return value;
+}
+
+void pljs_cache_function_add(Oid fn_oid, JSContext *ctx, JSValue fn) {
+  bool found;
+  elog(NOTICE, "in pljs_cache_function_add");
+
+  pljs_function_cache_key *key = create_cache_key(fn_oid);
+  // pljs_function_cache_key* nkey =
+  // (pljs_function_cache_key*)palloc(sizeof(pljs_function_cache_key));
+  // memcpy(nkey, key, sizeof(pljs_function_cache_key));
+
+  pljs_cache_value *hvalue = (pljs_cache_value *)hash_search(
+      pljs_function_HashTable, (void *)key, HASH_ENTER, &found);
+
+  // if it exists, that's probably a bad sign
+  if (found) {
+    elog(WARNING, "trying to add a context that already exists");
+  }
+
+  elog(NOTICE, "adding hash entry");
+  hvalue->key = (void *)key;
+  hvalue->ctx = ctx;
+  hvalue->fn = fn;
+}
+
+void pljs_cache_function_remove(Oid fn_oid) {
+  // create the key
+  pljs_function_cache_key *key = create_cache_key(fn_oid);
+
+  pljs_cache_value *hvalue = (pljs_cache_value *)hash_search(
+      pljs_function_HashTable, (void *)key, HASH_REMOVE, NULL);
+
+  if (hvalue) {
+    elog(NOTICE, "found entry to remove");
+    // if (hvalue->key) {
+    //   pfree(hvalue->key);
+    // }
+  } else {
+    elog(NOTICE, "no entry found to remove");
+  }
+}
+
+pljs_cache_value *pljs_cache_function_find(Oid fn_oid) {
+  pljs_function_cache_key *key = create_cache_key(fn_oid);
+
+  bool found;
+  pljs_cache_value *value = (pljs_cache_value *)hash_search(
+      pljs_function_HashTable, (void *)key, HASH_FIND, &found);
+
+  if (!found) {
+    elog(NOTICE, "function not found");
+  }
+
+  return value;
 }

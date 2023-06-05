@@ -1,0 +1,85 @@
+CREATE FUNCTION return_void() RETURNS void AS $$ $$ LANGUAGE pljs;
+SELECT return_void();
+ return_void 
+-------------
+ 
+(1 row)
+
+CREATE FUNCTION return_null() RETURNS text AS $$ return null; $$ LANGUAGE pljs;
+SELECT r, r IS NULL AS isnull FROM return_null() AS r;
+ r | isnull 
+---+--------
+   | t
+(1 row)
+
+-- TYPE CONVERTIONS
+CREATE FUNCTION int2_to_int4(x int2) RETURNS int4 AS $$ return x; $$ LANGUAGE pljs;
+SELECT int2_to_int4(24::int2);
+ int2_to_int4 
+--------------
+           24
+(1 row)
+
+CREATE FUNCTION int4_to_int2(x int4) RETURNS int2 AS $$ return x; $$ LANGUAGE pljs;
+SELECT int4_to_int2(42);
+ int4_to_int2 
+--------------
+           42
+(1 row)
+
+CREATE FUNCTION int4_to_int8(x int4) RETURNS int8 AS $$ return x; $$ LANGUAGE pljs;
+SELECT int4_to_int8(48);
+ int4_to_int8 
+--------------
+           48
+(1 row)
+
+CREATE FUNCTION int8_to_int4(x int8) RETURNS int4 AS $$ return x; $$ LANGUAGE pljs;
+SELECT int8_to_int4(84);
+ int8_to_int4 
+--------------
+           84
+(1 row)
+
+CREATE FUNCTION float8_to_numeric(x float8) RETURNS numeric AS $$ return x; $$ LANGUAGE pljs;
+SELECT float8_to_numeric(1.5);
+ float8_to_numeric 
+-------------------
+               1.5
+(1 row)
+
+CREATE FUNCTION numeric_to_int8(x numeric) RETURNS int8 AS $$ return x; $$ LANGUAGE pljs;
+SELECT numeric_to_int8(1234.56);
+ numeric_to_int8 
+-----------------
+            1234
+(1 row)
+
+CREATE FUNCTION int4_to_text(x int4) RETURNS text AS $$ return x; $$ LANGUAGE pljs;
+SELECT int4_to_text(123);
+ int4_to_text 
+--------------
+ 123
+(1 row)
+
+CREATE FUNCTION text_to_int4(x text) RETURNS int4 AS $$ return x; $$ LANGUAGE pljs;
+SELECT text_to_int4('123');
+ text_to_int4 
+--------------
+          123
+(1 row)
+
+SELECT text_to_int4('abc');
+ text_to_int4 
+--------------
+            0
+(1 row)
+
+-- ARRAYS
+CREATE FUNCTION return_array() RETURNS TEXT[] AS $$ return ["foo", "bar"]; $$LANGUAGE pljs;
+SELECT return_array();
+ return_array 
+--------------
+ {foo,bar}
+(1 row)
+

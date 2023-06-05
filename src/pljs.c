@@ -1,41 +1,53 @@
+#include "deps/quickjs/quickjs.h"
 #include "postgres.h"
 
+#include "access/xlog_internal.h"
 #include "catalog/pg_proc.h"
+#include "catalog/pg_type_d.h"
 #include "commands/trigger.h"
 #include "common/hashfn.h"
+#include "executor/spi.h"
 #include "funcapi.h"
+#include "miscadmin.h"
+#include "nodes/parsenodes.h"
 #include "utils/builtins.h"
 #include "utils/guc.h"
 #include "utils/jsonb.h"
+#include "utils/palloc.h"
 #include "utils/syscache.h"
 
 #include "pljs.h"
 
-JSValue js_json_stringify(JSContext* ctx, JSValueConst this_val, int argc,
-                          JSValueConst* argv);
+Datum pljs_call_handler(PG_FUNCTION_ARGS);
+Datum pljs_call_validator(PG_FUNCTION_ARGS);
+Datum pljs_inline_handler(PG_FUNCTION_ARGS);
 
 PG_MODULE_MAGIC;
 
 PG_FUNCTION_INFO_V1(pljs_call_handler);
 PG_FUNCTION_INFO_V1(pljs_call_validator);
+PG_FUNCTION_INFO_V1(pljs_inline_handler);
 
-Datum pljs_call_handler(PG_FUNCTION_ARGS);
-Datum pljs_call_validator(PG_FUNCTION_ARGS);
-
-#if PG_VERSION_NUM >= 90000
-// PG_FUNCTION_INFO_V1(pljs_inline_handler);
-// Datum pljs_inline_handler(PG_FUNCTION_ARGS);
-#endif
-
-static char* dump_error(JSContext* ctx) {
+static char *dump_error(JSContext *ctx) {
   JSValue exception_val, val;
-  const char* stack;
-  const char* str;
+  const char *stack;
+  const char *str;
   bool is_error;
-  char* ret = NULL;
+  char *ret = NULL;
   size_t s1, s2;
 
   exception_val = JS_GetException(ctx);
+
+  /* In the case of OOM, a null exception is thrown. */
+  if (JS_IsNull(exception_val)) {
+    char *oom = palloc(14);
+    strcpy(oom, "out of memory");
+
+    JS_FreeValue(ctx, exception_val);
+
+    return oom;
+  }
+
   is_error = JS_IsError(ctx, exception_val);
   str = JS_ToCStringLen(ctx, &s1, exception_val);
 
@@ -45,7 +57,7 @@ static char* dump_error(JSContext* ctx) {
   }
 
   if (!is_error) {
-    ret = (char*)palloc((s1 + 8) * sizeof(char));
+    ret = (char *)palloc((s1 + 8) * sizeof(char));
     sprintf(ret, "Throw:\n%s", str);
   } else {
     val = JS_GetPropertyStr(ctx, exception_val, "stack");
@@ -53,10 +65,11 @@ static char* dump_error(JSContext* ctx) {
     if (!JS_IsUndefined(val)) {
       stack = JS_ToCStringLen(ctx, &s2, val);
 
-      ret = (char*)palloc((s1 + s2 + 2) * sizeof(char));
+      ret = (char *)palloc((s1 + s2 + 2) * sizeof(char));
       sprintf(ret, "%s\n%s", str, stack);
       JS_FreeCString(ctx, stack);
     }
+
     JS_FreeValue(ctx, val);
   }
 
@@ -66,41 +79,81 @@ static char* dump_error(JSContext* ctx) {
   return ret;
 }
 
-JSRuntime* rt = NULL;
+JSRuntime *rt = NULL;
+static uint64_t os_pending_signals = 0;
 
-// hash table for storing caches
-HTAB* pljs_HashTable = NULL;
+pljs_configuration configuration = {0};
+
+static void signal_handler(int sig_num) {
+  os_pending_signals |= ((uint64_t)1 << sig_num);
+}
+
+static int interrupt_handler(JSRuntime *rt, void *opaque) {
+  return (os_pending_signals >> SIGINT) & 1;
+}
 
 // initialization function
 void _PG_init(void) {
+  signal(SIGINT, signal_handler);
+  signal(SIGTERM, signal_handler);
+  signal(SIGABRT, signal_handler);
+
   // initialize cache
-  HASHCTL ctl = {0};
+  pljs_cache_init();
 
-  ctl.keysize = sizeof(pljs_cache_key);
-  ctl.entrysize = sizeof(pljs_cache_entry);
-  ctl.hash = oid_hash;
-  pljs_HashTable =
-      hash_create("pljs function cache",
-                  512, // arbitrary guess at number of functions per user
-                  &ctl, HASH_ELEM | HASH_BLOBS);
+  // initialize the GUCs
+  pljs_guc_init();
 
+  // set up the quickjs runtime
   rt = JS_NewRuntime();
+
+  // set up a memory limit if it exists
+  if (configuration.memory_limit) {
+    JS_SetMemoryLimit(rt, configuration.memory_limit * 1024 * 1024);
+  }
+}
+
+// sets up the configuration of the extension
+void pljs_guc_init() {
+#ifdef EXECUTION_TIMEOUT
+  DefineCustomIntVariable(
+      "pljs.execution_timeout", gettext_noop("Javascriot execution timeout."),
+      gettext_noop(
+          "The default value is 300 seconds."
+          "This allows you to override the default execution timeout."),
+      &configuration.execution_timeout, 300, 1, 65536, PGC_USERSET, 0, NULL,
+      NULL, NULL);
+#endif
+
+  DefineCustomIntVariable("pljs.memory_limit",
+                          gettext_noop("Runtime limit in MBytes"),
+                          gettext_noop("The default value is 256 MB"),
+                          (int *)&configuration.memory_limit, 256, 256, 3096,
+                          PGC_SUSET, 0, NULL, NULL, NULL);
+
+  DefineCustomStringVariable(
+      "pljs.start_proc",
+      gettext_noop("PLJS function to run once when PLJS is first used."), NULL,
+      &configuration.start_proc, NULL, PGC_USERSET, 0, NULL, NULL, NULL);
 }
 
 Datum pljs_call_handler(PG_FUNCTION_ARGS) {
   Oid fn_oid = fcinfo->flinfo->fn_oid;
   HeapTuple proctuple;
   Form_pg_proc pg_proc_entry = NULL;
-  const char* sourcecode;
-  char** arguments;
-  Oid* argtypes = NULL;
-  char* argmodes;
+  const char *sourcecode;
+  char **arguments;
+  Oid *argtypes = NULL;
+  char *argmodes;
   int nargs = 0;
   Datum prosrcdatum;
   bool isnull;
-  JSContext* ctx;
+  JSContext *ctx;
   Datum retval;
   JSValue func;
+  bool nonatomic = fcinfo->context && IsA(fcinfo->context, CallContext) &&
+                   !castNode(CallContext, fcinfo->context)->atomic;
+  ;
 
   proctuple = SearchSysCache(PROCOID, ObjectIdGetDatum(fn_oid), 0, 0, 0);
 
@@ -118,30 +171,28 @@ Datum pljs_call_handler(PG_FUNCTION_ARGS) {
   pg_proc_entry = (Form_pg_proc)GETSTRUCT(proctuple);
   nargs = get_func_arg_info(proctuple, &argtypes, &arguments, &argmodes);
 
-  pljs_cache_entry* entry = pljs_hash_table_search(fn_oid);
+  pljs_cache_value *entry = NULL; // pljs_cache_function_find(fn_oid);
   if (entry) {
-    elog(NOTICE, "function found");
-    ctx = entry->fn.ctx;
-    func = entry->fn.func;
+    // elog(NOTICE, "function found");
+    ctx = entry->ctx;
+    func = entry->fn;
   } else {
-    elog(NOTICE, "no function found");
-    // check to see if a context exists in the cache for this user
-    entry = pljs_hash_table_search(InvalidOid);
+    // elog(NOTICE, "no function found");
+    //  check to see if a context exists in the cache for this user
+    entry = pljs_cache_context_find(GetUserId());
 
     if (entry) {
-      elog(NOTICE, "context found");
-      ctx = entry->fn.ctx;
+      ctx = entry->ctx;
     } else {
-      elog(NOTICE, "no context found");
       // create a new execution context.
       ctx = JS_NewContext(rt);
 
-      // set up the namespace, globals and functions available inside the context.
+      // set up the namespace, globals and functions available inside the
+      // context.
       pljs_setup_namespace(ctx);
 
-      JSValue empty = { 0 };
-      // save the context 
-      pljs_hash_table_create(InvalidOid, ctx, empty);
+      // save the context
+      pljs_cache_context_add(GetUserId(), ctx);
     }
 
     sourcecode = DatumGetCString(DirectFunctionCall1(textout, prosrcdatum));
@@ -149,12 +200,16 @@ Datum pljs_call_handler(PG_FUNCTION_ARGS) {
     func = pljs_compile_function(ctx, NameStr(pg_proc_entry->proname),
                                  sourcecode, nargs, arguments);
     if (JS_IsUndefined(func)) {
-      JS_FreeContext(ctx);
+      // JS_FreeContext(ctx);
       PG_RETURN_VOID();
     }
 
-    // no current context, create one and use it.
-    pljs_hash_table_create(fn_oid, ctx, func);
+    // create the cache entry for the function.
+    // pljs_cache_function_add(fn_oid, ctx, func);
+  }
+
+  if (SPI_connect_ext(nonatomic ? SPI_OPT_NONATOMIC : 0) != SPI_OK_CONNECT) {
+    elog(ERROR, "could not connect to spi manager");
   }
 
   // do the logic
@@ -166,16 +221,57 @@ Datum pljs_call_handler(PG_FUNCTION_ARGS) {
 
   ReleaseSysCache(proctuple);
 
+  SPI_finish();
+
   return retval;
+}
+
+Datum pljs_inline_handler(PG_FUNCTION_ARGS) {
+  pljs_cache_value *entry = pljs_cache_context_find(GetUserId());
+
+  InlineCodeBlock *code_block =
+      (InlineCodeBlock *)DatumGetPointer(PG_GETARG_DATUM(0));
+  char *sourcecode = code_block->source_text;
+
+  HeapTuple proctuple;
+  Form_pg_proc pg_proc_entry = NULL;
+  JSContext *ctx = NULL;
+  bool nonatomic = fcinfo->context && IsA(fcinfo->context, CallContext) &&
+                   !castNode(CallContext, fcinfo->context)->atomic;
+
+  if (entry) {
+    ctx = entry->ctx;
+  } else {
+    // create a new execution context.
+    ctx = JS_NewContext(rt);
+
+    // set up the namespace, globals and functions available inside the
+    // context.
+    pljs_setup_namespace(ctx);
+
+    // save the context
+    pljs_cache_context_add(GetUserId(), ctx);
+  }
+
+  if (SPI_connect_ext(nonatomic ? SPI_OPT_NONATOMIC : 0) != SPI_OK_CONNECT) {
+    elog(ERROR, "could not connect to spi manager");
+  }
+
+  // do the logic
+  pljs_call_anonymous_function(ctx, sourcecode);
+
+  SPI_finish();
+
+  PG_RETURN_VOID();
 }
 
 Datum pljs_call_validator(PG_FUNCTION_ARGS) {
   Oid fn_oid = fcinfo->flinfo->fn_oid;
   HeapTuple proctuple;
-  const char* sourcecode;
+  const char *sourcecode;
   Datum prosrcdatum;
   bool isnull;
-  JSContext* ctx;
+  JSContext *ctx;
 
   if (fcinfo->flinfo->fn_extra) {
     elog(NOTICE, "fn_extra on validate");
@@ -194,12 +290,8 @@ Datum pljs_call_validator(PG_FUNCTION_ARGS) {
   }
 
   sourcecode = TextDatumGetCString(prosrcdatum);
-  // sourcecode = DatumGetCString(DirectFunctionCall1(textout, prosrcdatum));
-  // elog(NOTICE, "sourcecode: %s", sourcecode);
 
   ctx = JS_NewContext(rt);
-
-  //  elog(NOTICE, "preparing to compile");
 
   JSValue val = JS_Eval(ctx, sourcecode, strlen(sourcecode), "<function>",
                         JS_EVAL_FLAG_COMPILE_ONLY);
@@ -214,14 +306,11 @@ Datum pljs_call_validator(PG_FUNCTION_ARGS) {
 
   ReleaseSysCache(proctuple);
 
-  // delete any old entries that might be cached
-  pljs_hash_table_remove(fn_oid);
-
   PG_RETURN_VOID();
 }
 
-JSValue pljs_compile_function(JSContext* ctx, char* name, const char* source,
-                              int nargs, char* arguments[]) {
+JSValue pljs_compile_function(JSContext *ctx, char *name, const char *source,
+                              int nargs, char *arguments[]) {
   StringInfoData src;
   int i;
 
@@ -245,6 +334,14 @@ JSValue pljs_compile_function(JSContext* ctx, char* name, const char* source,
     }
   }
 
+  // append the other postgres-specific variables as well
+  if (nargs) {
+    appendStringInfo(&src, ", ");
+  }
+
+  appendStringInfo(&src, "NEW, OLD, TG_NAME, TG_WHEN, TG_LEVEL, TG_OP, "
+                         "TG_RELID, TG_TABLE_NAME, TG_TABLE_SCHEMA, TG_ARGV");
+
   appendStringInfo(&src, ") {\n%s\n}\n %s;\n", source, name);
 
   JSValue val = JS_Eval(ctx, src.data, strlen(src.data), "<function>", 0);
@@ -261,245 +358,71 @@ JSValue pljs_compile_function(JSContext* ctx, char* name, const char* source,
   }
 }
 
-static Datum call_function(FunctionCallInfo fcinfo, JSContext* ctx,
-                           JSValue func, int nargs, Oid* argtypes,
-                           Oid rettype) {
-  char* str;
-  Jsonb* jb;
+void pljs_call_anonymous_function(JSContext *ctx, const char *source) {
+  StringInfoData src;
 
-  JSValueConst* argv = (JSValueConst*)palloc(sizeof(JSValueConst) * nargs);
+  initStringInfo(&src);
+
+  // generate the function as javascript with all of its arguments
+  appendStringInfo(&src, "(function () {\n%s\n})();", source);
+
+  JS_SetInterruptHandler(JS_GetRuntime(ctx), interrupt_handler, NULL);
+  os_pending_signals &= ~((uint64_t)1 << SIGINT);
+
+  JSValue val = JS_Eval(ctx, src.data, strlen(src.data), "<function>", 0);
+
+  if (!JS_IsException(val)) {
+    pfree(src.data);
+  } else {
+
+    ereport(ERROR,
+            (errmsg("execution error"), errdetail("%s", dump_error(ctx))));
+  }
+}
+
+static Datum call_function(FunctionCallInfo fcinfo, JSContext *ctx,
+                           JSValue func, int nargs, Oid *argtypes,
+                           Oid rettype) {
+  JSValueConst *argv = (JSValueConst *)palloc(sizeof(JSValueConst) * nargs);
+
+  MemoryContext old_context = CurrentMemoryContext;
+  MemoryContext execution_context = AllocSetContextCreate(
+      CurrentMemoryContext, "PLJS Memory Context", ALLOCSET_SMALL_SIZES);
 
   for (int i = 0; i < nargs; i++) {
     if (fcinfo->args[i].isnull == 1) {
       argv[i] = JS_NULL;
-      continue;
-    }
-
-    switch (argtypes[i]) {
-    case OIDOID:
-      argv[i] = JS_NewInt64(ctx, fcinfo->args[i].value);
-      break;
-
-    case BOOLOID:
-      argv[i] = JS_NewBool(ctx, DatumGetBool(fcinfo->args[i].value));
-      break;
-
-    case INT2OID:
-      argv[i] = JS_NewInt32(ctx, DatumGetInt16(fcinfo->args[i].value));
-      break;
-
-    case INT4OID:
-      argv[i] = JS_NewInt32(ctx, DatumGetInt32(fcinfo->args[i].value));
-      break;
-
-    case INT8OID:
-      argv[i] = JS_NewInt64(ctx, DatumGetInt64(fcinfo->args[i].value));
-      break;
-
-    case FLOAT4OID:
-      argv[i] = JS_NewFloat64(ctx, DatumGetFloat4(fcinfo->args[i].value));
-      break;
-
-    case FLOAT8OID:
-      argv[i] = JS_NewFloat64(ctx, DatumGetFloat8(fcinfo->args[i].value));
-      break;
-
-    case NUMERICOID:
-      argv[i] = JS_NewFloat64(ctx, DatumGetFloat8(DirectFunctionCall1(
-                                       numeric_float8, fcinfo->args[i].value)));
-      break;
-
-    case TEXTOID:
-    case VARCHAROID:
-    case BPCHAROID:
-    case XMLOID:
-      // get a copy of the string
-      str = dup_pgtext(PG_GETARG_TEXT_P(i));
-
-      argv[i] = JS_NewString(ctx, str);
-
-      // free the memory allocated
-      pfree(str);
-      break;
-
-    case JSONOID:
-      // get a copy of the string
-      str = dup_pgtext(PG_GETARG_TEXT_P(i));
-
-      argv[i] = JS_ParseJSON(ctx, str, strlen(str), NULL);
-
-      // free the memory allocated
-      pfree(str);
-      break;
-
-    case JSONBOID:
-      // get the datum
-      jb = PG_GETARG_JSONB_P(i);
-      // convert it to a string (takes some casting, but JsonbContainer is also
-      // a varlena)
-      str = JsonbToCString(NULL, (JsonbContainer*)VARDATA(jb), VARSIZE(jb));
-
-      argv[i] = JS_ParseJSON(ctx, str, strlen(str), NULL);
-
-      // free the memory allocated
-      pfree(str);
-      break;
-
-    default:
-      elog(NOTICE, "Unknown type: %d", argtypes[i]);
-      argv[i] = JS_NULL;
+    } else {
+      argv[i] = pljs_datum_to_jsvalue(fcinfo->args[i].value, argtypes[i], ctx);
     }
   }
 
+  JS_SetInterruptHandler(JS_GetRuntime(ctx), interrupt_handler, NULL);
+  os_pending_signals &= ~((uint64_t)1 << SIGINT);
+
   JSValue ret = JS_Call(ctx, func, JS_UNDEFINED, nargs, argv);
+
   if (JS_IsException(ret)) {
     ereport(ERROR,
             (errmsg("execution error"), errdetail("%s", dump_error(ctx))));
 
     JS_FreeValue(ctx, ret);
 
+    CurrentMemoryContext = old_context;
     PG_RETURN_VOID();
   } else {
-    Datum d = ctx_to_datum(fcinfo, ctx, ret, rettype);
+    Datum d = pljs_jsvalue_to_datum(ret, rettype, ctx, fcinfo, NULL);
     JS_FreeValue(ctx, ret);
 
+    CurrentMemoryContext = old_context;
     return d;
   }
 }
 
-// allocate memory and copy data from the varlena text representation
-static char* dup_pgtext(text* what) {
-  size_t len = VARSIZE(what) - VARHDRSZ;
-  char* dup = palloc(len + 1);
+JSValue js_throw(JSContext *ctx, const char *message) {
+  JSValue error = JS_NewError(ctx);
+  JSValue message_value = JS_NewString(ctx, message);
+  JS_SetPropertyStr(ctx, error, "message", message_value);
 
-  memcpy(dup, VARDATA(what), len);
-  dup[len] = 0;
-
-  return dup;
-}
-
-static Datum ctx_to_datum(FunctionCallInfo fcinfo, JSContext* ctx, JSValue val,
-                          Oid rettype) {
-  switch (rettype) {
-  case VOIDOID:
-    PG_RETURN_VOID();
-    break;
-
-  case OIDOID: {
-    int64_t in;
-    JS_ToInt64(ctx, &in, val);
-
-    PG_RETURN_OID(in);
-    break;
-  }
-
-  case BOOLOID: {
-    int8_t in = JS_ToBool(ctx, val);
-    PG_RETURN_BOOL(in);
-    break;
-  }
-
-  case INT2OID: {
-    int32_t in;
-    JS_ToInt32(ctx, &in, val);
-
-    PG_RETURN_INT16((int16_t)in);
-    break;
-  }
-
-  case INT4OID: {
-    int32_t in;
-    JS_ToInt32(ctx, &in, val);
-    PG_RETURN_INT32(in);
-    break;
-  }
-
-  case INT8OID: {
-    int64_t in;
-    JS_ToInt64(ctx, &in, val);
-
-    PG_RETURN_INT64(in);
-    break;
-  }
-
-  case FLOAT4OID: {
-    double in;
-    JS_ToFloat64(ctx, &in, val);
-
-    PG_RETURN_FLOAT4((float4)in);
-    break;
-  }
-
-  case FLOAT8OID: {
-    double in;
-    JS_ToFloat64(ctx, &in, val);
-
-    PG_RETURN_FLOAT8(in);
-    break;
-  }
-
-  case NUMERICOID: {
-    double in;
-    JS_ToFloat64(ctx, &in, val);
-
-    return DirectFunctionCall1(float8_numeric, Float8GetDatum((float8)in));
-    break;
-  }
-
-  case TEXTOID:
-  case VARCHAROID:
-  case BPCHAROID:
-  case XMLOID: {
-    size_t plen;
-    const char* str = JS_ToCStringLen(ctx, &plen, val);
-
-    text* t = (text*)palloc(plen + VARHDRSZ);
-    SET_VARSIZE(t, plen + VARHDRSZ);
-    memcpy(VARDATA(t), str, plen);
-    JS_FreeCString(ctx, str);
-
-    PG_RETURN_TEXT_P(t);
-    break;
-  }
-
-  case JSONOID: {
-    JSValueConst* argv = &val;
-    JSValue js = JS_JSONStringify(ctx, argv[0], argv[1], argv[2]);
-    size_t plen;
-    const char* str = JS_ToCStringLen(ctx, &plen, js);
-
-    text* t = (text*)palloc(plen + VARHDRSZ);
-    SET_VARSIZE(t, plen + VARHDRSZ);
-    memcpy(VARDATA(t), str, plen);
-    JS_FreeCString(ctx, str);
-
-    // return it as a CStringTextDatum
-    return CStringGetTextDatum(str);
-    break;
-  }
-
-  case JSONBOID: {
-    JSValueConst* argv = &val;
-    JSValue js = JS_JSONStringify(ctx, argv[0], argv[1], argv[2]);
-    size_t plen;
-    const char* str = JS_ToCStringLen(ctx, &plen, js);
-
-    text* t = (text*)palloc(plen + VARHDRSZ);
-    SET_VARSIZE(t, plen + VARHDRSZ);
-    memcpy(VARDATA(t), str, plen);
-    JS_FreeCString(ctx, str);
-
-    // return it as a Datum, since there is no direct CStringGetJsonb exposed
-    return (Datum)DatumGetJsonbP(
-        DirectFunctionCall1(jsonb_in, (Datum)(char*)str));
-    break;
-  }
-
-  default:
-    elog(NOTICE, "Unknown type: %d", rettype);
-    PG_RETURN_NULL();
-  }
-
-  // shut up compiler
-  PG_RETURN_VOID();
+  return JS_Throw(ctx, error);
 }
