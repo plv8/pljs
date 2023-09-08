@@ -108,14 +108,16 @@ typedef struct pljs_plan {
   pljs_param_state *parstate;
 } pljs_plan;
 
-JSValue pljs_datum_to_jsvalue(Datum, Oid, JSContext *);
-JSValue pljs_datum_to_array(Datum, pljs_type *, JSContext *);
+JSValue pljs_datum_to_jsvalue(Datum arg, Oid type, JSContext *ctx);
+JSValue pljs_datum_to_array(Datum arg, pljs_type *type, JSContext *ctx);
+JSValue pljs_datum_to_object(Datum arg, pljs_type *type, JSContext *ctx);
+
 Datum pljs_jsvalue_to_array(JSValue, pljs_type *, JSContext *,
                             FunctionCallInfo);
 Datum pljs_jsvalue_to_datum(JSValue, Oid, JSContext *, FunctionCallInfo,
                             bool *);
-Datum pljs_jsvalue_to_record(JSValue, pljs_type *, JSContext *,
-                             FunctionCallInfo, bool *);
+Datum pljs_jsvalue_to_record(JSValue val, pljs_type *type, JSContext *ctx,
+                             bool *is_null);
 JSValue values_to_array(JSContext *, JSValue *, int, int);
 JSValue tuple_to_jsvalue(JSContext *ctx, TupleDesc, HeapTuple);
 JSValue spi_result_to_jsvalue(JSContext *, int);

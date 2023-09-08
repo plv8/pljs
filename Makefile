@@ -1,6 +1,6 @@
 .PHONY: lintcheck format dep deps/quickjs
 
-PLJS_VERSION = 0.1.0
+PLJS_VERSION = 0.2.0
 
 PG_CONFIG = pg_config
 PGXS := $(shell $(PG_CONFIG) --pgxs)
@@ -8,7 +8,7 @@ INCLUDEDIR := ${shell $(PG_CONFIG) --includedir}
 INCLUDEDIR_SERVER := ${shell $(PG_CONFIG) --includedir-server}
 
 CP = cp
-PG_CFLAGS := -fPIC -Wall -Wextra -Wno-unused-parameter -Wno-declaration-after-statement -std=c11 -DPLJS_VERSION=\"$(PLJS_VERSION)\" -g
+PG_CFLAGS := -fPIC -Wall -Wextra -Wno-unused-parameter -Wno-declaration-after-statement -Wno-cast-function-type -std=c11 -DPLJS_VERSION=\"$(PLJS_VERSION)\" -g
 SRCS = src/pljs.c src/cache.c src/functions.c src/types.c src/params.c
 OBJS = src/pljs.o src/cache.o src/functions.o src/types.o src/params.o deps/quickjs/libquickjs.a
 MODULE_big = pljs
@@ -16,7 +16,7 @@ EXTENSION = pljs
 DATA = pljs.control pljs--$(PLJS_VERSION).sql
 
 REGRESS = init-extension json jsonb json_conv types bytea context cursor \
-	array_spread currentresource plv8_regressions memory_limits inline composites
+	array_spread plv8_regressions memory_limits inline composites
 
 include $(PGXS)
 

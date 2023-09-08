@@ -19,7 +19,6 @@ It compiles, and is on track to match functionality of [PLV8](https://github.com
 Missing:
 
 - Triggers
-- Composite Types
 - Windows
 - return_next()
 - startup functions

@@ -153,7 +153,6 @@ Datum pljs_call_handler(PG_FUNCTION_ARGS) {
   JSValue func;
   bool nonatomic = fcinfo->context && IsA(fcinfo->context, CallContext) &&
                    !castNode(CallContext, fcinfo->context)->atomic;
-  ;
 
   proctuple = SearchSysCache(PROCOID, ObjectIdGetDatum(fn_oid), 0, 0, 0);
 
@@ -385,9 +384,9 @@ static Datum call_function(FunctionCallInfo fcinfo, JSContext *ctx,
                            Oid rettype) {
   JSValueConst *argv = (JSValueConst *)palloc(sizeof(JSValueConst) * nargs);
 
-  MemoryContext old_context = CurrentMemoryContext;
   MemoryContext execution_context = AllocSetContextCreate(
       CurrentMemoryContext, "PLJS Memory Context", ALLOCSET_SMALL_SIZES);
+  MemoryContext old_context = MemoryContextSwitchTo(execution_context);
 
   for (int i = 0; i < nargs; i++) {
     if (fcinfo->args[i].isnull == 1) {
@@ -408,13 +407,13 @@ static Datum call_function(FunctionCallInfo fcinfo, JSContext *ctx,
 
     JS_FreeValue(ctx, ret);
 
-    CurrentMemoryContext = old_context;
+    MemoryContextSwitchTo(old_context);
     PG_RETURN_VOID();
   } else {
     Datum d = pljs_jsvalue_to_datum(ret, rettype, ctx, fcinfo, NULL);
     JS_FreeValue(ctx, ret);
 
-    CurrentMemoryContext = old_context;
+    MemoryContextSwitchTo(old_context);
     return d;
   }
 }

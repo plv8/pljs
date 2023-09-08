@@ -78,11 +78,8 @@ static JSValue pljs_elog(JSContext *ctx, JSValueConst this_val, int argc,
                          JSValueConst *argv) {
   if (argc) {
     int32_t level;
-    const char *message;
 
     JS_ToInt32(ctx, &level, argv[0]);
-
-    message = JS_ToCString(ctx, argv[1]);
 
     switch (level) {
     case DEBUG5:
@@ -109,7 +106,7 @@ static JSValue pljs_elog(JSContext *ctx, JSValueConst this_val, int argc,
       }
 
       JSValue str = JS_ToString(ctx, argv[i]);
-      char *cstr = JS_ToCString(ctx, str);
+      const char *cstr = JS_ToCString(ctx, str);
 
       appendStringInfo(&msg, "%s", cstr);
     }
@@ -121,7 +118,6 @@ static JSValue pljs_elog(JSContext *ctx, JSValueConst this_val, int argc,
     { elog(level, "%s", full_message); }
     PG_CATCH();
     {
-      MemoryContextSwitchTo(ctx);
       ErrorData *edata = CopyErrorData();
       JSValue error = js_throw(ctx, edata->message);
       FlushErrorState();
@@ -160,6 +156,8 @@ static JSValue pljs_execute(JSContext *ctx, JSValueConst this_val, int argc,
   }
 
   nparam = js_array_length(ctx, params);
+  m_resowner = CurrentResourceOwner;
+  m_mcontext = CurrentMemoryContext;
 
   PG_TRY();
   {
@@ -167,9 +165,6 @@ static JSValue pljs_execute(JSContext *ctx, JSValueConst this_val, int argc,
       ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
                       errmsg("transaction lock failure")));
     }
-
-    m_resowner = CurrentResourceOwner;
-    m_mcontext = CurrentMemoryContext;
 
     BeginInternalSubTransaction(NULL);
     MemoryContextSwitchTo(m_mcontext);
@@ -323,9 +318,13 @@ static JSValue pljs_plan_execute(JSContext *ctx, JSValueConst this_val,
     JSValue param = JS_GetPropertyUint32(ctx, params, i);
     bool is_null;
 
-    values[i] = pljs_jsvalue_to_datum(param, plan->parstate->param_types[i],
-                                      ctx, NULL, &is_null);
+    values[i] = pljs_jsvalue_to_datum(
+        param, plan->parstate ? plan->parstate->param_types[i] : 0, ctx, NULL,
+        &is_null);
   }
+
+  m_resowner = CurrentResourceOwner;
+  m_mcontext = CurrentMemoryContext;
 
   PG_TRY();
   {
@@ -333,9 +332,6 @@ static JSValue pljs_plan_execute(JSContext *ctx, JSValueConst this_val,
       ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
                       errmsg("transaction lock failure")));
     }
-
-    m_resowner = CurrentResourceOwner;
-    m_mcontext = CurrentMemoryContext;
 
     BeginInternalSubTransaction(NULL);
     MemoryContextSwitchTo(m_mcontext);
@@ -530,7 +526,7 @@ static JSValue pljs_plan_cursor(JSContext *ctx, JSValueConst this_val, int argc,
 
     initStringInfo(&buf);
     appendStringInfo(&buf, "plan unexpectedly null");
-    ereport(ERROR, buf.data);
+    ereport(ERROR, errcode(ERRCODE_UNDEFINED_OBJECT), errmsg("%s", buf.data));
 
     return JS_UNDEFINED;
   }
@@ -566,8 +562,9 @@ static JSValue pljs_plan_cursor(JSContext *ctx, JSValueConst this_val, int argc,
     JSValue param = JS_GetPropertyUint32(ctx, params, i);
     bool is_null;
 
-    values[i] = pljs_jsvalue_to_datum(param, plan->parstate->param_types[i],
-                                      ctx, NULL, &is_null);
+    values[i] = pljs_jsvalue_to_datum(
+        param, plan->parstate ? plan->parstate->param_types[i] : 0, ctx, NULL,
+        &is_null);
   }
 
   PG_TRY();

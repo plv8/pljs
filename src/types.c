@@ -49,6 +49,11 @@ inline static bool Is_SharedArrayBuffer(JSValueConst obj) {
   return NULL != JS_GetOpaque(obj, JS_CLASS_SHARED_ARRAY_BUFFER);
 }
 
+// if this is an actual object of any sort.
+inline static bool Is_Object(JSValueConst obj) {
+  return NULL != JS_GetOpaque(obj, JS_CLASS_OBJECT);
+}
+
 // allocate memory and copy data from the varlena text representation.
 static char *dup_pgtext(text *what) {
   size_t len = VARSIZE(what) - VARHDRSZ;
@@ -131,10 +136,63 @@ void pljs_type_fill(pljs_type *type, Oid typid) {
   }
 }
 
+JSValue pljs_datum_to_object(Datum arg, pljs_type *type, JSContext *ctx) {
+  JSValue obj;
+
+  HeapTupleHeader rec = DatumGetHeapTupleHeader(arg);
+  Oid tupType;
+  int32 tupTypmod;
+  TupleDesc tupdesc = NULL;
+  HeapTupleData tuple;
+
+  PG_TRY();
+  {
+    /* Extract type info from the tuple itself. */
+    tupType = HeapTupleHeaderGetTypeId(rec);
+    tupTypmod = HeapTupleHeaderGetTypMod(rec);
+    tupdesc = lookup_rowtype_tupdesc(tupType, tupTypmod);
+  }
+  PG_CATCH();
+  { elog(WARNING, "caught error"); }
+  PG_END_TRY();
+
+  obj = JS_NewObject(ctx);
+
+  if (tupdesc) {
+    for (int16 i = 0; i < tupdesc->natts; i++) {
+      Datum datum;
+      bool isnull = false;
+
+      if (TupleDescAttr(tupdesc, i)->attisdropped) {
+        continue;
+      }
+
+      char *colname = NameStr(TupleDescAttr(tupdesc, i)->attname);
+      tuple.t_len = HeapTupleHeaderGetDatumLength(rec);
+      ItemPointerSetInvalid(&(tuple.t_self));
+      tuple.t_tableOid = InvalidOid;
+      tuple.t_data = rec;
+
+      datum = heap_getattr(&tuple, i + 1, tupdesc, &isnull);
+
+      if (isnull) {
+        JS_SetPropertyStr(ctx, obj, colname, JS_NULL);
+      } else {
+        JS_SetPropertyStr(
+            ctx, obj, colname,
+            pljs_datum_to_jsvalue(datum, tupdesc->attrs[i].atttypid, ctx));
+      }
+    }
+
+    ReleaseTupleDesc(tupdesc);
+  }
+
+  return obj;
+}
+
 // convert a datum to a quickjs array.
 JSValue pljs_datum_to_array(Datum arg, pljs_type *type, JSContext *ctx) {
   JSValue array = JS_NewArray(ctx);
-
   Datum *values;
   bool *nulls;
   int nelems;
@@ -165,11 +223,14 @@ JSValue pljs_datum_to_jsvalue(Datum arg, Oid argtype, JSContext *ctx) {
   Jsonb *jb;
 
   pljs_type type;
-
   pljs_type_fill(&type, argtype);
 
   if (type.category == TYPCATEGORY_ARRAY) {
     return pljs_datum_to_array(arg, &type, ctx);
+  }
+
+  if (type.is_composite) {
+    return pljs_datum_to_object(arg, &type, ctx);
   }
 
   switch (type.typid) {
@@ -280,19 +341,18 @@ Datum pljs_jsvalue_to_array(JSValue val, pljs_type *type, JSContext *ctx,
 
   values = (Datum *)palloc(sizeof(Datum) * array_length);
   nulls = (bool *)palloc(sizeof(bool) * array_length);
+  memset(nulls, 0, sizeof(bool) * array_length);
+
   ndims[0] = array_length;
+
   for (int i = 0; i < array_length; i++) {
     JSValue elem = JS_GetPropertyUint32(ctx, val, i);
 
     if (JS_IsNull(elem)) {
       nulls[i] = true;
     } else {
-      if (type->is_composite) {
-        elog(ERROR, "Compound types not yet implemented");
-      } else {
-        values[i] = pljs_jsvalue_to_datum(JS_GetPropertyUint32(ctx, val, i),
-                                          type->typid, ctx, fcinfo, NULL);
-      }
+      values[i] =
+          pljs_jsvalue_to_datum(elem, type->typid, ctx, fcinfo, &nulls[i]);
     }
   }
 
@@ -302,6 +362,53 @@ Datum pljs_jsvalue_to_array(JSValue val, pljs_type *type, JSContext *ctx,
   pfree(nulls);
 
   return PointerGetDatum(result);
+}
+
+Datum pljs_jsvalue_to_record(JSValue val, pljs_type *type, JSContext *ctx,
+                             bool *is_null) {
+  TupleDesc tupdesc = NULL;
+  Datum result = 0;
+  Oid rettype = type->typid;
+
+  if (JS_IsNull(val) || JS_IsUndefined(val)) {
+    *is_null = true;
+    return (Datum)0;
+  }
+
+  PG_TRY();
+  { tupdesc = lookup_rowtype_tupdesc(rettype, -1); }
+  PG_CATCH();
+  { elog(WARNING, "in catch"); }
+  PG_END_TRY();
+
+  if (tupdesc != NULL) {
+    Datum *values = (Datum *)palloc(sizeof(Datum) * tupdesc->natts);
+    bool *nulls = (bool *)palloc(sizeof(bool) * tupdesc->natts);
+    memset(nulls, 0, sizeof(bool) * tupdesc->natts);
+
+    for (int16 c = 0; c < tupdesc->natts; c++) {
+      if (TupleDescAttr(tupdesc, c)->attisdropped) {
+        nulls[c] = true;
+        continue;
+      }
+
+      char *colname = NameStr(TupleDescAttr(tupdesc, c)->attname);
+      JSValue o = JS_GetPropertyStr(ctx, val, colname);
+
+      if (JS_IsNull(o) || JS_IsUndefined(o)) {
+        nulls[c] = true;
+        continue;
+      }
+
+      values[c] = pljs_jsvalue_to_datum(o, tupdesc->attrs[c].atttypid, ctx,
+                                        NULL, &nulls[c]);
+    }
+
+    result = HeapTupleGetDatum(heap_form_tuple(tupdesc, values, nulls));
+    ReleaseTupleDesc(tupdesc);
+  }
+
+  return result;
 }
 
 // Convert a quickjs value to a datum.
@@ -314,6 +421,10 @@ Datum pljs_jsvalue_to_datum(JSValue val, Oid rettype, JSContext *ctx,
 
   if (type.typid != JSONOID && type.typid != JSONBOID && JS_IsArray(ctx, val)) {
     return pljs_jsvalue_to_array(val, &type, ctx, fcinfo);
+  }
+
+  if (type.is_composite) {
+    return pljs_jsvalue_to_record(val, &type, ctx, isnull);
   }
 
   if (JS_VALUE_GET_TAG(val) == JS_TAG_NULL) {
