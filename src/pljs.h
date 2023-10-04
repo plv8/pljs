@@ -11,6 +11,7 @@
 
 #include "deps/quickjs/quickjs-libc.h"
 #include "deps/quickjs/quickjs.h"
+#include "utils/palloc.h"
 
 #define STORAGE_HASH_LEN 32
 #ifndef PLJS_VERSION
@@ -26,12 +27,7 @@ typedef struct pljs_configuration {
 
 extern pljs_configuration configuration;
 
-// static functions in pljs.c
-static Datum call_function(PG_FUNCTION_ARGS, JSContext *, JSValue, int, Oid *,
-                           Oid);
-
-JSValue pljs_compile_function(JSContext *, char *, const char *, int, char *[]);
-void pljs_call_anonymous_function(JSContext *, const char *);
+// functions in pljs.c
 JSValue js_throw(JSContext *, const char *);
 
 // other functions
@@ -96,17 +92,45 @@ typedef struct pljs_type {
   FmgrInfo fn_output;
 } pljs_type;
 
-uint32_t js_array_length(JSContext *, JSValue);
-
-void pljs_type_fill(pljs_type *, Oid);
-
-void pljs_setup_namespace(JSContext *);
-
 // plan for prepared statements
 typedef struct pljs_plan {
   SPIPlanPtr plan;
   pljs_param_state *parstate;
 } pljs_plan;
+
+// context and information for the function to be called
+typedef struct pljs_func {
+  Oid fn_oid; // function's OID
+
+  char proname[NAMEDATALEN]; // the function name
+  char *prosrc;              // a copy of its source
+
+  TransactionId fn_xmin;
+  ItemPointerData fn_tid;
+  Oid user_id; // the user id
+
+  int nargs;                   // the number of arguments
+  bool is_srf;                 // are we a set returning function?
+  Oid rettype;                 // the return type
+  Oid argtypes[FUNC_MAX_ARGS]; // the types of the argument passed
+} pljs_func;
+
+typedef struct pljs_context {
+  JSContext *ctx;
+  JSValue *argv;
+  JSValue js_function; // the function itself
+
+  char *arguments[FUNC_MAX_ARGS];
+  MemoryContext memory_context;
+  pljs_func *function;
+} pljs_context;
+
+uint32_t js_array_length(JSContext *, JSValue);
+
+void pljs_type_fill(pljs_type *, Oid);
+
+void pljs_setup_namespace(JSContext *);
+JSValue pljs_compile_function(pljs_context *context, bool is_trigger);
 
 JSValue pljs_datum_to_jsvalue(Datum arg, Oid type, JSContext *ctx);
 JSValue pljs_datum_to_array(Datum arg, pljs_type *type, JSContext *ctx);

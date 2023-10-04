@@ -423,6 +423,10 @@ Datum pljs_jsvalue_to_datum(JSValue val, Oid rettype, JSContext *ctx,
     return pljs_jsvalue_to_array(val, &type, ctx, fcinfo);
   }
 
+  if (type.category == TYPCATEGORY_ARRAY && !JS_IsArray(ctx, val)) {
+    elog(ERROR, "value is not an Array");
+  }
+
   if (type.is_composite) {
     return pljs_jsvalue_to_record(val, &type, ctx, isnull);
   }

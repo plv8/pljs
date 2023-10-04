@@ -2,16 +2,19 @@
 #include "postgres.h"
 
 #include "access/xact.h"
+#include "catalog/pg_database.h"
 #include "executor/spi.h"
 #include "nodes/params.h"
 #include "parser/parse_type.h"
 #include "utils/elog.h"
 #include "utils/fmgrprotos.h"
 #include "utils/jsonb.h"
+#include "utils/syscache.h"
 
 #include "pljs.h"
 #include "utils/palloc.h"
 #include "utils/resowner.h"
+#include <sys/_types/_null.h>
 
 // local only functions for injecting into pljs
 static JSValue pljs_elog(JSContext *, JSValueConst, int, JSValueConst *);
@@ -36,8 +39,6 @@ static JSValue pljs_plan_free(JSContext *, JSValueConst, int, JSValueConst *);
 static JSValue pljs_plan_to_string(JSContext *, JSValueConst, int,
                                    JSValueConst *);
 
-static JSValue pljs_return_next(JSContext *, JSValueConst, int, JSValueConst *);
-
 void pljs_setup_namespace(JSContext *ctx) {
   // get a copy of the global object.
   JSValue global_obj = JS_GetGlobalObject(ctx);
@@ -52,9 +53,6 @@ void pljs_setup_namespace(JSContext *ctx) {
 
   JS_SetPropertyStr(ctx, pljs, "prepare",
                     JS_NewCFunction(ctx, pljs_prepare, "prepare", 2));
-
-  JS_SetPropertyStr(ctx, pljs, "return_next",
-                    JS_NewCFunction(ctx, pljs_return_next, "return_next", 0));
 
   JS_SetPropertyStr(ctx, global_obj, "pljs", pljs);
 
@@ -462,7 +460,6 @@ static JSValue pljs_prepare(JSContext *ctx, JSValueConst this_val, int argc,
 
   PG_TRY();
   {
-
     if (argc > 1) {
       parstate = palloc0(sizeof(pljs_param_state));
       parstate->memory_context = CurrentMemoryContext;
@@ -718,28 +715,4 @@ static JSValue pljs_plan_cursor_to_string(JSContext *ctx, JSValueConst this_val,
 static JSValue pljs_plan_to_string(JSContext *ctx, JSValueConst this_val,
                                    int argc, JSValueConst *argv) {
   return JS_NewString(ctx, "[object Plan]");
-}
-
-static JSValue pljs_return_next(JSContext *cts, JSValueConst this_val, int argc,
-                                JSValueConst *argv) {
-#if 0
-	Handle<v8::Object>	self = args.This();
-	Handle<v8::Value>	conv_value = self->GetInternalField(PLV8_INTNL_CONV);
-
-	if (!conv_value->IsExternal())
-		throw js_error("return_next called in context that cannot accept a set");
-
-	Converter *conv = static_cast<Converter *>(
-			Handle<External>::Cast(conv_value)->Value());
-
-	Tuplestorestate *tupstore = static_cast<Tuplestorestate *>(
-			Handle<External>::Cast(
-				self->GetInternalField(PLV8_INTNL_TUPSTORE))->Value());
-
-	conv->ToDatum(args[0], tupstore);
-
-	args.GetReturnValue().Set(Undefined(args.GetIsolate()));
-#endif
-
-  return JS_UNDEFINED;
 }

@@ -12,18 +12,34 @@ PostgreSQL: 14+
 
 ### Current Status
 
-Very early.
+Close to initial release.
 
 It compiles, and is on track to match functionality of [PLV8](https://github.com/plv8/plv8).
 
 Missing:
 
-- Triggers
 - Windows
-- return_next()
+- SRF
 - startup functions
 
 Also, WASM will likely never be added to this extension.
+
+## Building
+
+Building is meant to be easy, but not all platforms have been worked out as far as the build instructions. Please use this as an example of how to build in the meantime.
+
+## MacOS
+
+### Requirements
+
+- XCode
+- git
+
+### Building
+
+```
+$ make install
+```
 
 ## FAQ
 
