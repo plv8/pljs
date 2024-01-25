@@ -1,0 +1,20 @@
+name: CI
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  schedule:
+    - cron:  '0 12 15 * *' # Monthly at noon on the 15th
+jobs:
+  build:
+    strategy:
+      matrix:
+        pg: [16, 15, 14]
+    name: 🐘 PostgreSQL ${{ matrix.pg }}
+    runs-on: ubuntu-latest
+    container: pgxn/pgxn-tools
+    steps:
+      - run: pg-start ${{ matrix.pg }}
+      - uses: actions/checkout@v4
+      - run: git submodule update --init --recursive
+      - run: pg-build-test
