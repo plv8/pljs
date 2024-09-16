@@ -1,4 +1,4 @@
-.PHONY: lintcheck format dep deps/quickjs
+.PHONY: lintcheck format dep deps/quickjs cleandepend docs
 
 PLJS_VERSION = 0.8.0
 
@@ -8,7 +8,7 @@ INCLUDEDIR := ${shell $(PG_CONFIG) --includedir}
 INCLUDEDIR_SERVER := ${shell $(PG_CONFIG) --includedir-server}
 
 CP = cp
-PG_CFLAGS := -fPIC -Wall -Wextra -Wno-unused-parameter -Wno-declaration-after-statement -Wno-cast-function-type -std=c11 -DPLJS_VERSION=\"$(PLJS_VERSION)\" -g -O0
+PG_CFLAGS += -fPIC -Wall -Wextra -Wno-unused-parameter -Wno-declaration-after-statement -Wno-cast-function-type -std=c11 -DPLJS_VERSION=\"$(PLJS_VERSION)\" -g -O0
 SRCS = src/pljs.c src/cache.c src/functions.c src/types.c src/params.c
 OBJS = src/pljs.o src/cache.o src/functions.o src/types.o src/params.o deps/quickjs/libquickjs.a
 MODULE_big = pljs
@@ -47,3 +47,11 @@ lintcheck:
 	   -I$(PWD) -MM -MT $(SRC:.c=.o) $(SRC) >> .depend;)
 
 include .depend
+
+clean: cleandepend
+
+cleandepend:
+	$(RM) -f .depend
+
+docs:
+	doxygen src/Doxyfile

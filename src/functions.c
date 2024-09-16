@@ -614,7 +614,11 @@ static JSValue pljs_plan_cursor_fetch(JSContext *ctx, JSValueConst this_val,
   PG_TRY();
   { SPI_cursor_fetch(cursor, forward, nfetch); }
   PG_CATCH();
-  { return js_throw(ctx, "Unable to fetch"); }
+  {
+    SPI_rollback();
+    SPI_finish();
+    return js_throw(ctx, "Unable to fetch");
+  }
   PG_END_TRY();
 
   if (SPI_processed > 0) {
@@ -699,7 +703,11 @@ static JSValue pljs_plan_cursor_close(JSContext *ctx, JSValueConst this_val,
   PG_TRY();
   { SPI_cursor_close(cursor); }
   PG_CATCH();
-  { return js_throw(ctx, "Unable to close cursor"); }
+  {
+    SPI_rollback();
+    SPI_finish();
+    return js_throw(ctx, "Unable to close cursor");
+  }
   PG_END_TRY();
 
   JSValue ret = JS_NewInt32(ctx, cursor ? 1 : 0);

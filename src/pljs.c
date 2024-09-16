@@ -1,4 +1,3 @@
-#include "deps/quickjs/quickjs.h"
 #include "postgres.h"
 
 #include "access/xlog_internal.h"
@@ -17,6 +16,8 @@
 #include "utils/palloc.h"
 #include "utils/rel.h"
 #include "utils/syscache.h"
+
+#include "deps/quickjs/quickjs.h"
 
 #include "pljs.h"
 
@@ -86,6 +87,7 @@ static char *dump_error(JSContext *ctx) {
   return ret;
 }
 
+/** \brief QuickJS Runtime */
 JSRuntime *rt = NULL;
 static uint64_t os_pending_signals = 0;
 
@@ -99,7 +101,12 @@ static int interrupt_handler(JSRuntime *rt, void *opaque) {
   return (os_pending_signals >> SIGINT) & 1;
 }
 
-// initialization function
+/**
+ * @brief PostgreSQL extension initialization function.
+ *
+ * Initialize the extension, setting up the cache, GUCs, and QuickJS
+ * runtime.
+ */
 void _PG_init(void) {
   signal(SIGINT, signal_handler);
   signal(SIGTERM, signal_handler);
@@ -120,7 +127,11 @@ void _PG_init(void) {
   }
 }
 
-// sets up the configuration of the extension
+/**
+ * @brief Set up the GUCs.
+ *
+ * Sets up the GUCs that help define the behavior of the interpreter.
+ */
 void pljs_guc_init() {
 #ifdef EXECUTION_TIMEOUT
   DefineCustomIntVariable(
@@ -144,6 +155,12 @@ void pljs_guc_init() {
       &configuration.start_proc, NULL, PGC_USERSET, 0, NULL, NULL, NULL);
 }
 
+/**
+ * @brief Set up the pljs_context.
+ *
+ * Sets up the pljs_context with the function and any needed contexts.
+ * @returns @c bool of success for failure.
+ */
 static bool setup_function(FunctionCallInfo fcinfo, HeapTuple proctuple,
                            pljs_context *context) {
   Oid fn_oid = fcinfo->flinfo->fn_oid;
@@ -160,7 +177,8 @@ static bool setup_function(FunctionCallInfo fcinfo, HeapTuple proctuple,
       SysCacheGetAttr(PROCOID, proctuple, Anum_pg_proc_prosrc, &isnull);
 
   if (isnull) {
-    elog(ERROR, "null prosrc");
+    ereport(ERROR, errcode(ERRCODE_INTERNAL_ERROR),
+            errmsg("unable to find prosrc"));
 
     return false;
   }
@@ -229,6 +247,16 @@ static bool setup_function(FunctionCallInfo fcinfo, HeapTuple proctuple,
   return true;
 }
 
+/**
+ * @brief Call Javascript from PostgreSQL.
+ *
+ * Calls Javascript in some form from PostgreSQL, returning the result on
+ * success, or throwing an error on exception.  Calls can be of types
+ * `function`, `procedure`, `do`, or `trigger`, and are dispatched from this
+ * entry point.
+ * @param PG_FUNCTION_ARGS Pointer to struct FunctionCallInfoBaseData
+ * @returns @c #Datum of the result.
+ */
 Datum pljs_call_handler(PG_FUNCTION_ARGS) {
   Oid fn_oid = fcinfo->flinfo->fn_oid;
   HeapTuple proctuple;
@@ -251,9 +279,8 @@ Datum pljs_call_handler(PG_FUNCTION_ARGS) {
   proctuple = SearchSysCache(PROCOID, ObjectIdGetDatum(fn_oid), 0, 0, 0);
 
   if (!HeapTupleIsValid(proctuple)) {
-    elog(ERROR, "cache lookup failed for function %u", fn_oid);
-
-    return NULL;
+    ereport(ERROR, errcode(ERRCODE_INTERNAL_ERROR),
+            errmsg("cache lookup failed for function %u", fn_oid));
   }
 
   pljs_cache_value *entry = NULL; // pljs_cache_function_find(fn_oid);
@@ -355,6 +382,13 @@ Datum pljs_inline_handler(PG_FUNCTION_ARGS) {
   PG_RETURN_VOID();
 }
 
+/**
+ * @brief Call a Javascript function.
+ *
+ * Calls a Javascript function returning the result on success, or throwing
+ * an error on exception.
+ * @returns @c #Datum of the result.
+ */
 Datum pljs_call_validator(PG_FUNCTION_ARGS) {
   Oid fn_oid = fcinfo->flinfo->fn_oid;
   HeapTuple proctuple;
@@ -588,6 +622,13 @@ static Datum pljs_call_trigger(FunctionCallInfo fcinfo, pljs_context *context) {
   }
 }
 
+/**
+ * @brief Call a Javascript function.
+ *
+ * Calls a Javascript function returning the result on success, or throwing
+ * an error on exception.
+ * @returns @c #Datum of the result.
+ */
 static Datum pljs_call_function(FunctionCallInfo fcinfo,
                                 pljs_context *context) {
   MemoryContext execution_context = AllocSetContextCreate(
@@ -601,23 +642,32 @@ static Datum pljs_call_function(FunctionCallInfo fcinfo,
                         context->function->nargs, context->argv);
 
   if (JS_IsException(ret)) {
-    ereport(ERROR, (errmsg("execution error"),
-                    errdetail("%s", dump_error(context->ctx))));
+    char *error_message = dump_error(context->ctx);
 
     JS_FreeValue(context->ctx, ret);
 
-    MemoryContextSwitchTo(old_context);
+    ereport(ERROR, (errmsg("execution error"), errdetail("%s", error_message)));
+
+    /* Shuts up the compiler, since ereports of ERROR stop execution. */
     PG_RETURN_VOID();
   } else {
-    Datum d = pljs_jsvalue_to_datum(ret, context->function->rettype,
-                                    context->ctx, fcinfo, NULL);
+    Datum datum = pljs_jsvalue_to_datum(ret, context->function->rettype,
+                                        context->ctx, fcinfo, NULL);
     JS_FreeValue(context->ctx, ret);
 
     MemoryContextSwitchTo(old_context);
-    return d;
+    return datum;
   }
 }
 
+/**
+ * @brief Throws a Javascript exception.
+ *
+ * Throws a Javascript exception and fills it with the message passed, along
+ * with as much context as it can derive from the current state of Postgres
+ * when the exception is called.
+ * @returns @c #JSValue of the exception.
+ */
 JSValue js_throw(JSContext *ctx, const char *message) {
   JSValue error = JS_NewError(ctx);
   JSValue message_value = JS_NewString(ctx, message);
