@@ -1,22 +1,15 @@
 #include "postgres.h"
 
-#include "access/xlog_internal.h"
-#include "catalog/pg_proc.h"
 #include "catalog/pg_type_d.h"
-#include "commands/trigger.h"
-#include "common/hashfn.h"
 #include "executor/spi.h"
 #include "fmgr.h"
 #include "funcapi.h"
-#include "miscadmin.h"
 #include "parser/parse_coerce.h"
 #include "utils/array.h"
 #include "utils/builtins.h"
-#include "utils/guc.h"
 #include "utils/jsonb.h"
 #include "utils/lsyscache.h"
 #include "utils/palloc.h"
-#include "utils/syscache.h"
 #include "utils/typcache.h"
 
 #include "deps/quickjs/quickjs.h"
@@ -309,7 +302,6 @@ JSValue pljs_datum_to_jsvalue(Datum arg, Oid argtype, JSContext *ctx) {
     break;
 
   case BYTEAOID: {
-    uint8_t g[5] = {1, 2, 3, 4, 5};
     void *p = PG_DETOAST_DATUM_COPY(arg);
     char *buf = palloc(VARSIZE_ANY_EXHDR(p) + 1);
     memcpy(buf, VARDATA(p), VARSIZE_ANY_EXHDR(p));
@@ -560,8 +552,6 @@ Datum pljs_jsvalue_to_datum(JSValue val, Oid rettype, JSContext *ctx,
 
   case BYTEAOID: {
     size_t psize;
-    size_t pbyte_offset = 0;
-    size_t pbyte_length = 0;
     size_t pbytes_per_element = 0;
 
     uint8_t *buffer;
@@ -735,12 +725,7 @@ JSValue spi_result_to_jsvalue(JSContext *ctx, int status) {
   case SPI_OK_DELETE_RETURNING:
   case SPI_OK_UPDATE_RETURNING: {
     int nrows = SPI_processed;
-    TupleDesc tupdesc;
-    bool m_is_scalar;
-    int natts;
-    MemoryContext m_memory_context;
-
-    tupdesc = SPI_tuptable->tupdesc;
+    TupleDesc tupdesc = SPI_tuptable->tupdesc;
 
     JSValue obj = JS_NewArray(ctx);
 

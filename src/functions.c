@@ -196,25 +196,6 @@ static JSValue pljs_execute(JSContext *ctx, JSValueConst this_val, int argc,
   return spi_result_to_jsvalue(ctx, status);
 }
 
-static Datum value_get_datum(JSValue val, Oid typid, char *isnull,
-                             JSContext *ctx) {
-  pljs_type typinfo = {.typid = 0};
-  bool is_null;
-
-  if (JS_IsUndefined(val) || JS_IsNull(val)) {
-    *isnull = 'n';
-
-    return (Datum)0;
-  }
-
-  pljs_type_fill(&typinfo, typid);
-
-  Datum datum = pljs_jsvalue_to_datum(val, typid, ctx, NULL, &is_null);
-  *isnull = is_null ? 'n' : ' ';
-
-  return datum;
-}
-
 static int pljs_execute_params(const char *sql, JSValue params,
                                JSContext *ctx) {
   int nparams = js_array_length(ctx, params);
@@ -555,7 +536,7 @@ static JSValue pljs_plan_cursor(JSContext *ctx, JSValueConst this_val, int argc,
     nulls = palloc((sizeof(char) * nparams));
   }
 
-  for (uint32_t i = 0; i < nparams; i++) {
+  for (int i = 0; i < nparams; i++) {
     JSValue param = JS_GetPropertyUint32(ctx, params, i);
     bool is_null;
 
@@ -662,7 +643,7 @@ static JSValue pljs_plan_cursor_move(JSContext *ctx, JSValueConst this_val,
   JSValue name = JS_GetPropertyStr(ctx, this_val, "name");
   const char *cursor_name = JS_ToCString(ctx, name);
   int nmove = 1;
-  bool forward = true, wantarray = false;
+  bool forward = true;
 
   Portal cursor = SPI_cursor_find(cursor_name);
 
