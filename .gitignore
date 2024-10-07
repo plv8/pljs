@@ -8,3 +8,4 @@ regression.out
 .clangd
 .depend
 docs
+pljs--*.sql

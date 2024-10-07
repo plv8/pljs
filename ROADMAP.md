@@ -25,6 +25,7 @@ Current Release Version: `0.8`
 
 ## Major Features
 
+- [x] caching of contexts and functions
 - [ ] set returning functions
 - [ ] windows
 - [ ] startup functions

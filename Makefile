@@ -1,6 +1,6 @@
-.PHONY: lintcheck format dep deps/quickjs cleandepend docs
+.PHONY: lintcheck format dep deps/quickjs cleandepend cleansql docs
 
-PLJS_VERSION = 0.8.0
+PLJS_VERSION = 0.8.1
 
 PG_CONFIG = pg_config
 PGXS := $(shell $(PG_CONFIG) --pgxs)
@@ -34,7 +34,7 @@ format:
 
 %.o: %.c pljs.h deps/quickjs/libquickjs.a
 
-%--$(PLJS_VERSION).sql: pljs.sql
+pljs--$(PLJS_VERSION).sql: pljs.sql
 	$(CP) pljs.sql pljs--$(PLJS_VERSION).sql
 
 
@@ -48,10 +48,15 @@ lintcheck:
 
 include .depend
 
-clean: cleandepend
+all: pljs--$(PLJS_VERSION).sql
+
+clean: cleandepend cleansql
 
 cleandepend:
 	$(RM) -f .depend
+
+cleansql:
+	$(RM) -f pljs--$(PLJS_VERSION).sql
 
 docs:
 	doxygen src/Doxyfile
