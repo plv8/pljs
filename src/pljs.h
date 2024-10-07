@@ -2,6 +2,7 @@
 
 #include "postgres.h"
 
+#include "access/heapam.h"
 #include "access/htup.h"
 #include "access/tupdesc.h"
 #include "executor/spi.h"
@@ -18,61 +19,39 @@
 #define PLJS_VERSION "unknown"
 #endif
 
-// pljs current runtime configuration
+// pljs current runtime configuration.
 typedef struct pljs_configuration {
   size_t memory_limit;
   char *start_proc;
   int execution_timeout;
 } pljs_configuration;
 
+// Global #pljs_configuration configuration.
 extern pljs_configuration configuration;
 
-// functions in pljs.c
-JSValue js_throw(JSContext *, const char *);
-
-// other functions
-void _PG_init(void);
-void pljs_guc_init(void);
-
-// quickjs runtime
+// quickjs runtime.
 extern JSRuntime *rt;
 
-// function cache key
-typedef struct pljs_function_cache_key {
-  char proname[NAMEDATALEN];
-  bool trigger;
+// Cpntext cache value definition.
+typedef struct pljs_context_cache_value {
   Oid user_id;
-  Oid rettype;
-  int nargs;
-  Oid argtypes[FUNC_MAX_ARGS];
-} pljs_function_cache_key;
+  JSContext *ctx;
+  MemoryContext function_memory_context;
+  HTAB *function_hash_table;
+} pljs_context_cache_value;
 
-// context_cache_key
-typedef struct pljs_context_cache_key {
-  Oid user_id;
-} pljs_context_cache_key;
-
-// cache value definition
-typedef struct pljs_cache_value {
+// Function cache value defition.
+typedef struct pljs_function_cache_value {
+  Oid fn_oid;
   JSValue fn;
   JSContext *ctx;
-  void *key;
-} pljs_cache_value;
-
-// initialize
-void pljs_cache_init(void);
-
-// add
-void pljs_cache_context_add(Oid, JSContext *);
-void pljs_cache_function_add(Oid, JSContext *, JSValue);
-
-// remove
-void pljs_cache_context_remove(Oid);
-void pljs_cache_function_remove(Oid);
-
-// search
-pljs_cache_value *pljs_cache_context_find(Oid);
-pljs_cache_value *pljs_cache_function_find(Oid);
+  bool trigger;
+  Oid user_id;
+  int nargs;
+  char proname[NAMEDATALEN];
+  Oid argtypes[FUNC_MAX_ARGS];
+  char *prosrc;
+} pljs_function_cache_value;
 
 typedef struct pljs_param_state {
   Oid *param_types;
@@ -80,6 +59,7 @@ typedef struct pljs_param_state {
   MemoryContext memory_context;
 } pljs_param_state;
 
+// Expanded type definitions for pljs.
 typedef struct pljs_type {
   Oid typid;
   Oid ioparam;
@@ -92,13 +72,13 @@ typedef struct pljs_type {
   FmgrInfo fn_output;
 } pljs_type;
 
-// plan for prepared statements
+// Plan for prepared statements.
 typedef struct pljs_plan {
   SPIPlanPtr plan;
   pljs_param_state *parstate;
 } pljs_plan;
 
-// context and information for the function to be called
+// Context and information for the function to be called.
 typedef struct pljs_func {
   Oid fn_oid; // function's OID
 
@@ -109,6 +89,7 @@ typedef struct pljs_func {
   ItemPointerData fn_tid;
   Oid user_id; // the user id
 
+  bool trigger;
   int nargs;                   // the number of arguments
   bool is_srf;                 // are we a set returning function?
   Oid rettype;                 // the return type
@@ -117,7 +98,6 @@ typedef struct pljs_func {
 
 typedef struct pljs_context {
   JSContext *ctx;
-  JSValue *argv;
   JSValue js_function; // the function itself
 
   char *arguments[FUNC_MAX_ARGS];
@@ -125,13 +105,30 @@ typedef struct pljs_context {
   pljs_func *function;
 } pljs_context;
 
-uint32_t js_array_length(JSContext *, JSValue);
-
-void pljs_type_fill(pljs_type *, Oid);
-
+// Functions in pljs.c
+JSValue js_throw(JSContext *, const char *);
+void _PG_init(void);
+void pljs_guc_init(void);
+void pljs_cache_init(void);
 void pljs_setup_namespace(JSContext *);
 JSValue pljs_compile_function(pljs_context *context, bool is_trigger);
 
+// Functions in cache.c
+void pljs_cache_context_add(Oid, JSContext *);
+void pljs_cache_context_remove(Oid);
+pljs_function_cache_value *pljs_cache_function_find(Oid user_id, Oid fn_oid);
+void pljs_cache_function_add(pljs_context *context);
+void pljs_cache_function_remove(Oid user_id, Oid fn_oid);
+pljs_context_cache_value *pljs_cache_context_find(Oid user_id);
+
+void pljs_function_cache_to_context(pljs_context *,
+                                    pljs_function_cache_value *);
+void pljs_context_to_function_cache(pljs_function_cache_value *function_entry,
+                                    pljs_context *context);
+
+// Functions in type.c
+uint32_t js_array_length(JSContext *, JSValue);
+void pljs_type_fill(pljs_type *, Oid);
 JSValue pljs_datum_to_jsvalue(Datum arg, Oid type, JSContext *ctx);
 JSValue pljs_datum_to_array(Datum arg, pljs_type *type, JSContext *ctx);
 JSValue pljs_datum_to_object(Datum arg, pljs_type *type, JSContext *ctx);

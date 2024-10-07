@@ -31,7 +31,8 @@ PG_FUNCTION_INFO_V1(pljs_call_handler);
 PG_FUNCTION_INFO_V1(pljs_call_validator);
 PG_FUNCTION_INFO_V1(pljs_inline_handler);
 
-static Datum pljs_call_function(PG_FUNCTION_ARGS, pljs_context *context);
+static Datum pljs_call_function(PG_FUNCTION_ARGS, pljs_context *context,
+                                JSValueConst *argv);
 
 static void pljs_call_anonymous_function(JSContext *, const char *);
 static Datum pljs_call_trigger(FunctionCallInfo fcinfo, pljs_context *context);
@@ -132,7 +133,7 @@ void _PG_init(void) {
  *
  * Sets up the GUCs that help define the behavior of the interpreter.
  */
-void pljs_guc_init() {
+void pljs_guc_init(void) {
 #ifdef EXECUTION_TIMEOUT
   DefineCustomIntVariable(
       "pljs.execution_timeout", gettext_noop("Javascriot execution timeout."),
@@ -163,7 +164,6 @@ void pljs_guc_init() {
  */
 static bool setup_function(FunctionCallInfo fcinfo, HeapTuple proctuple,
                            pljs_context *context) {
-  Oid fn_oid = fcinfo->flinfo->fn_oid;
   Datum prosrcdatum;
   bool isnull;
   Form_pg_proc pg_proc_entry = NULL;
@@ -201,8 +201,6 @@ static bool setup_function(FunctionCallInfo fcinfo, HeapTuple proctuple,
     pljs_function->rettype = pg_proc_entry->prorettype;
   }
 
-  JSValueConst *argv = (JSValueConst *)palloc(sizeof(JSValueConst) * nargs);
-
   int inargs = 0;
   for (int i = 0; i < nargs; i++) {
     Oid argtype = argtypes[i];
@@ -228,6 +226,50 @@ static bool setup_function(FunctionCallInfo fcinfo, HeapTuple proctuple,
       argtype = get_fn_expr_argtype(fcinfo->flinfo, i);
     }
 
+    pljs_function->argtypes[inargs] = argtype;
+    inargs++;
+  }
+
+  pljs_function->nargs = inargs;
+
+  context->function = pljs_function;
+  context->function->user_id = GetUserId();
+  context->function->fn_oid = fcinfo->flinfo->fn_oid;
+
+  return true;
+}
+
+static JSValueConst *convert_arguments_to_javascript(FunctionCallInfo fcinfo,
+                                                     HeapTuple proctuple,
+                                                     pljs_context *context) {
+  char **arguments;
+  Oid *argtypes = NULL;
+  char *argmodes;
+  int nargs;
+
+  nargs = get_func_arg_info(proctuple, &argtypes, &arguments, &argmodes);
+
+  JSValueConst *argv = (JSValueConst *)palloc(sizeof(JSValueConst) * nargs);
+
+  int inargs = 0;
+  for (int i = 0; i < nargs; i++) {
+    Oid argtype = argtypes[i];
+    char argmode = argmodes ? argmodes[i] : PROARGMODE_IN;
+
+    switch (argmode) {
+    case PROARGMODE_IN:
+    case PROARGMODE_INOUT:
+    case PROARGMODE_VARIADIC:
+      break;
+    default:
+      continue;
+    }
+
+    /* Resolve polymorphic types, if this is an actual call context. */
+    if (fcinfo && IsPolymorphicType(argtype)) {
+      argtype = get_fn_expr_argtype(fcinfo->flinfo, i);
+    }
+
     if (fcinfo->args[i].isnull == 1) {
       argv[inargs] = JS_NULL;
     } else {
@@ -235,16 +277,10 @@ static bool setup_function(FunctionCallInfo fcinfo, HeapTuple proctuple,
                                            context->ctx);
     }
 
-    pljs_function->argtypes[inargs] = argtype;
     inargs++;
   }
 
-  pljs_function->nargs = inargs;
-
-  context->argv = argv;
-  context->function = pljs_function;
-
-  return true;
+  return argv;
 }
 
 /**
@@ -261,16 +297,8 @@ Datum pljs_call_handler(PG_FUNCTION_ARGS) {
   Oid fn_oid = fcinfo->flinfo->fn_oid;
   HeapTuple proctuple;
   Form_pg_proc pg_proc_entry = NULL;
-  const char *sourcecode;
-  char arguments[FUNC_MAX_ARGS][NAMEDATALEN];
-  Oid *argtypes = NULL;
-  char *argmodes;
-  int nargs = 0;
-  Datum prosrcdatum;
-  bool isnull;
   JSContext *ctx;
   Datum retval;
-  JSValue func;
   bool nonatomic = fcinfo->context && IsA(fcinfo->context, CallContext) &&
                    !castNode(CallContext, fcinfo->context)->atomic;
   bool is_trigger = CALLED_AS_TRIGGER(fcinfo);
@@ -283,58 +311,65 @@ Datum pljs_call_handler(PG_FUNCTION_ARGS) {
             errmsg("cache lookup failed for function %u", fn_oid));
   }
 
-  pljs_cache_value *entry = NULL; // pljs_cache_function_find(fn_oid);
-  if (entry) {
-    // elog(NOTICE, "function found");
-    ctx = entry->ctx;
-    func = entry->fn;
+  // First search for a cached copy of the context.
+  pljs_function_cache_value *function_entry =
+      pljs_cache_function_find(GetUserId(), fn_oid);
+
+  if (function_entry) {
+    ctx = function_entry->ctx;
+
+    // Make a copy of the function entry to the pljs context.
+    pljs_function_cache_to_context(&context, function_entry);
   } else {
-    // elog(NOTICE, "no function found");
-    //  check to see if a context exists in the cache for this user
-    entry = pljs_cache_context_find(GetUserId());
+    // Check to see if a context exists in the cache for this user.
+    pljs_context_cache_value *entry = pljs_cache_context_find(GetUserId());
 
     if (entry) {
       ctx = entry->ctx;
     } else {
-      // create a new execution context.
+      // Create a new execution context.
       ctx = JS_NewContext(rt);
 
-      // set up the namespace, globals and functions available inside the
+      // Set up the namespace, globals and functions available inside the
       // context.
       pljs_setup_namespace(ctx);
 
-      // save the context
+      // Save the context in the cache for this user id.
       pljs_cache_context_add(GetUserId(), ctx);
     }
 
     context.ctx = ctx;
 
+    // Set up a copy of all of the function data.
     setup_function(fcinfo, proctuple, &context);
 
+    // Compile the function.
     context.js_function = pljs_compile_function(&context, is_trigger);
-    if (JS_IsUndefined(func)) {
-      // JS_FreeContext(ctx);
+
+    // If there was a problem creating the function, we'll just return VOID.
+    if (JS_IsUndefined(context.js_function)) {
       PG_RETURN_VOID();
     }
 
-    // create the cache entry for the function.
-    // pljs_cache_function_add(fn_oid, ctx, func);
+    // Create the cache entry for the function.
+    pljs_cache_function_add(&context);
   }
 
+  // Connect to the SPI manager for any calls.
   if (SPI_connect_ext(nonatomic ? SPI_OPT_NONATOMIC : 0) != SPI_OK_CONNECT) {
     elog(ERROR, "could not connect to spi manager");
   }
 
-  // do the logic
   if (is_trigger) {
+    // Call in the context of a trigger.
     context.function->rettype = pg_proc_entry->prorettype;
     retval = pljs_call_trigger(fcinfo, &context);
   } else {
-    retval = pljs_call_function(fcinfo, &context);
+    // Call as a function.
+    JSValueConst *argv =
+        convert_arguments_to_javascript(fcinfo, proctuple, &context);
+    retval = pljs_call_function(fcinfo, &context, argv);
   }
-
-  // do not destroy the context, it will get reused
-  // JS_FreeContext(ctx);
 
   ReleaseSysCache(proctuple);
 
@@ -344,14 +379,12 @@ Datum pljs_call_handler(PG_FUNCTION_ARGS) {
 }
 
 Datum pljs_inline_handler(PG_FUNCTION_ARGS) {
-  pljs_cache_value *entry = pljs_cache_context_find(GetUserId());
+  pljs_context_cache_value *entry = pljs_cache_context_find(GetUserId());
 
   InlineCodeBlock *code_block =
       (InlineCodeBlock *)DatumGetPointer(PG_GETARG_DATUM(0));
   char *sourcecode = code_block->source_text;
 
-  HeapTuple proctuple;
-  Form_pg_proc pg_proc_entry = NULL;
   JSContext *ctx = NULL;
   bool nonatomic = fcinfo->context && IsA(fcinfo->context, CallContext) &&
                    !castNode(CallContext, fcinfo->context)->atomic;
@@ -519,9 +552,6 @@ static Datum pljs_call_trigger(FunctionCallInfo fcinfo, pljs_context *context) {
                             ALLOCSET_SMALL_SIZES);
   MemoryContext old_context = MemoryContextSwitchTo(execution_context);
 
-  bool nonatomic = fcinfo->context && IsA(fcinfo->context, CallContext) &&
-                   !castNode(CallContext, fcinfo->context)->atomic;
-
   if (TRIGGER_FIRED_FOR_ROW(event)) {
     TupleDesc tupdesc = RelationGetDescr(rel);
 
@@ -629,17 +659,30 @@ static Datum pljs_call_trigger(FunctionCallInfo fcinfo, pljs_context *context) {
  * an error on exception.
  * @returns @c #Datum of the result.
  */
-static Datum pljs_call_function(FunctionCallInfo fcinfo,
-                                pljs_context *context) {
+static Datum pljs_call_function(FunctionCallInfo fcinfo, pljs_context *context,
+                                JSValueConst *argv) {
   MemoryContext execution_context = AllocSetContextCreate(
       CurrentMemoryContext, "PLJS Memory Context", ALLOCSET_SMALL_SIZES);
   MemoryContext old_context = MemoryContextSwitchTo(execution_context);
+
+  Oid fn_oid = fcinfo->flinfo->fn_oid;
+  HeapTuple proctuple =
+      SearchSysCache(PROCOID, ObjectIdGetDatum(fn_oid), 0, 0, 0);
+  ;
+  Oid rettype;
+  Form_pg_proc pg_proc_entry = (Form_pg_proc)GETSTRUCT(proctuple);
+
+  if (fcinfo && IsPolymorphicType(pg_proc_entry->prorettype)) {
+    rettype = get_fn_expr_rettype(fcinfo->flinfo);
+  } else {
+    rettype = pg_proc_entry->prorettype;
+  }
 
   JS_SetInterruptHandler(JS_GetRuntime(context->ctx), interrupt_handler, NULL);
   os_pending_signals &= ~((uint64_t)1 << SIGINT);
 
   JSValue ret = JS_Call(context->ctx, context->js_function, JS_UNDEFINED,
-                        context->function->nargs, context->argv);
+                        context->function->nargs, argv);
 
   if (JS_IsException(ret)) {
     char *error_message = dump_error(context->ctx);
@@ -651,11 +694,13 @@ static Datum pljs_call_function(FunctionCallInfo fcinfo,
     /* Shuts up the compiler, since ereports of ERROR stop execution. */
     PG_RETURN_VOID();
   } else {
-    Datum datum = pljs_jsvalue_to_datum(ret, context->function->rettype,
-                                        context->ctx, fcinfo, NULL);
+    Datum datum =
+        pljs_jsvalue_to_datum(ret, rettype, context->ctx, fcinfo, NULL);
     JS_FreeValue(context->ctx, ret);
 
     MemoryContextSwitchTo(old_context);
+    ReleaseSysCache(proctuple);
+
     return datum;
   }
 }
