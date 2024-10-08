@@ -49,11 +49,21 @@ void pljs_cache_init(void) {
 }
 
 /**
+ * @brief Clears all caches and recreates them.
+ */
+void pljs_cache_reset(void) {
+  hash_destroy(pljs_context_HashTable);
+  MemoryContextDelete(cache_memory_context);
+  pljs_cache_init();
+}
+
+/**
  * @brief Adds a #pljs_context_cache_value for a `user_id`.
  *
  * Creates a #pljs_context_cache_value and fills it with the
  * javascript context and #HTAB storing #pljs_function_cache_value
- * entries by `fn_oid`.*/
+ * entries by `fn_oid`.
+ */
 void pljs_cache_context_add(Oid user_id, JSContext *ctx) {
   bool found;
 
@@ -185,14 +195,14 @@ void pljs_cache_function_remove(Oid user_id, Oid fn_oid) {
       (pljs_context_cache_value *)hash_search(pljs_context_HashTable, &user_id,
                                               HASH_FIND, &found);
 
-  // If the context does not exists, that's probably a bad sign.
+  // If the context does not exists, then in this case it's safe to just return.
   if (!found) {
-    ereport(ERROR, errcode(ERRCODE_INTERNAL_ERROR),
-            errmsg("unable to find context for user %d", user_id));
+    return;
   }
 
   // Remove the value, which deletes its memory context.
-  hash_search(ctx_hvalue->function_hash_table, &fn_oid, HASH_REMOVE, &found);
+  pljs_function_cache_value *value = hash_search(
+      ctx_hvalue->function_hash_table, &fn_oid, HASH_REMOVE, &found);
 }
 
 /**

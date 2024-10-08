@@ -113,6 +113,7 @@ JSValue js_throw(JSContext *, const char *);
 void _PG_init(void);
 void pljs_guc_init(void);
 void pljs_cache_init(void);
+void pljs_cache_reset(void);
 void pljs_setup_namespace(JSContext *);
 JSValue pljs_compile_function(pljs_context *context, bool is_trigger);
 

@@ -464,6 +464,10 @@ Datum pljs_call_validator(PG_FUNCTION_ARGS) {
 
   ReleaseSysCache(proctuple);
 
+  // We also clear the caches.  It is safest to just clear up any instances of
+  // the function or procedure.
+  pljs_cache_reset();
+
   PG_RETURN_VOID();
 }
 
