@@ -15,6 +15,7 @@
 #include "deps/quickjs/quickjs.h"
 
 #include "pljs.h"
+#include <sys/syslimits.h>
 
 // helper functions that should really exist as part of quickjs.
 static JSClassID JS_CLASS_OBJECT = 1;
@@ -357,8 +358,7 @@ Datum pljs_jsvalue_to_array(JSValue val, pljs_type *type, JSContext *ctx,
 }
 
 Datum pljs_jsvalue_to_record(JSValue val, pljs_type *type, JSContext *ctx,
-                             bool *is_null) {
-  TupleDesc tupdesc = NULL;
+                             bool *is_null, TupleDesc tupdesc) {
   Datum result = 0;
   Oid rettype = type->typid;
 
@@ -367,8 +367,14 @@ Datum pljs_jsvalue_to_record(JSValue val, pljs_type *type, JSContext *ctx,
     return (Datum)0;
   }
 
+  bool cleanup_tupdesc = false;
   PG_TRY();
-  { tupdesc = lookup_rowtype_tupdesc(rettype, -1); }
+  {
+    if (tupdesc == NULL) {
+      tupdesc = lookup_rowtype_tupdesc(rettype, -1);
+      cleanup_tupdesc = true;
+    }
+  }
   PG_CATCH();
   { elog(WARNING, "in catch"); }
   PG_END_TRY();
@@ -397,7 +403,10 @@ Datum pljs_jsvalue_to_record(JSValue val, pljs_type *type, JSContext *ctx,
     }
 
     result = HeapTupleGetDatum(heap_form_tuple(tupdesc, values, nulls));
-    ReleaseTupleDesc(tupdesc);
+
+    if (cleanup_tupdesc) {
+      ReleaseTupleDesc(tupdesc);
+    }
   }
 
   return result;
@@ -420,7 +429,7 @@ Datum pljs_jsvalue_to_datum(JSValue val, Oid rettype, JSContext *ctx,
   }
 
   if (type.is_composite) {
-    return pljs_jsvalue_to_record(val, &type, ctx, isnull);
+    return pljs_jsvalue_to_record(val, &type, ctx, isnull, NULL);
   }
 
   if (JS_VALUE_GET_TAG(val) == JS_TAG_NULL) {
@@ -696,9 +705,16 @@ JSValue tuple_to_jsvalue(JSContext *ctx, TupleDesc tuple,
 
     bool isnull;
     Datum datum = heap_getattr(heap_tuple, i + 1, tuple, &isnull);
+
     char *name = NameStr(tuple_attrs->attname);
-    JS_SetPropertyStr(ctx, obj, name,
-                      pljs_datum_to_jsvalue(datum, tuple_attrs->atttypid, ctx));
+
+    if (isnull) {
+      JS_SetPropertyStr(ctx, obj, name, JS_NULL);
+    } else {
+      JS_SetPropertyStr(
+          ctx, obj, name,
+          pljs_datum_to_jsvalue(datum, tuple_attrs->atttypid, ctx));
+    }
   }
 
   return obj;

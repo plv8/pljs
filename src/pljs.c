@@ -362,7 +362,11 @@ Datum pljs_call_handler(PG_FUNCTION_ARGS) {
 
   if (is_trigger) {
     // Call in the context of a trigger.
-    context.function->rettype = pg_proc_entry->prorettype;
+    Form_pg_proc procStruct;
+
+    procStruct = (Form_pg_proc)GETSTRUCT(proctuple);
+
+    context.function->rettype = procStruct->prorettype;
     retval = pljs_call_trigger(fcinfo, &context);
   } else {
     // Call as a function.
@@ -642,14 +646,27 @@ static Datum pljs_call_trigger(FunctionCallInfo fcinfo, pljs_context *context) {
 
     MemoryContextSwitchTo(old_context);
     PG_RETURN_VOID();
-  } else {
-    Datum d = pljs_jsvalue_to_datum(ret, context->function->rettype,
-                                    context->ctx, fcinfo, NULL);
-    JS_FreeValue(context->ctx, ret);
-
-    MemoryContextSwitchTo(old_context);
-    return d;
   }
+
+  if (JS_IsNull(ret) || !TRIGGER_FIRED_FOR_ROW(event)) {
+    result = PointerGetDatum(NULL);
+  } else if (!JS_IsUndefined(ret)) {
+
+    TupleDesc tupdesc = RelationGetDescr(rel);
+
+    pljs_type type;
+    pljs_type_fill(&type, context->function->rettype);
+    Datum d = pljs_jsvalue_to_record(ret, &type, context->ctx, NULL, tupdesc);
+
+    HeapTupleHeader header = DatumGetHeapTupleHeader(d);
+
+    result = PointerGetDatum((char *)header - HEAPTUPLESIZE);
+  }
+
+  JS_FreeValue(context->ctx, ret);
+
+  MemoryContextSwitchTo(old_context);
+  return result;
 }
 
 /**

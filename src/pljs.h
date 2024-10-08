@@ -138,7 +138,7 @@ Datum pljs_jsvalue_to_array(JSValue, pljs_type *, JSContext *,
 Datum pljs_jsvalue_to_datum(JSValue, Oid, JSContext *, FunctionCallInfo,
                             bool *);
 Datum pljs_jsvalue_to_record(JSValue val, pljs_type *type, JSContext *ctx,
-                             bool *is_null);
+                             bool *is_null, TupleDesc);
 JSValue values_to_array(JSContext *, JSValue *, int, int);
 JSValue tuple_to_jsvalue(JSContext *ctx, TupleDesc, HeapTuple);
 JSValue spi_result_to_jsvalue(JSContext *, int);

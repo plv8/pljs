@@ -16,7 +16,8 @@ EXTENSION = pljs
 DATA = pljs.control pljs--$(PLJS_VERSION).sql
 
 REGRESS = init-extension function json jsonb json_conv types bytea context \
-	cursor array_spread plv8_regressions memory_limits inline composites
+	cursor array_spread plv8_regressions memory_limits inline composites \
+	trigger
 
 include $(PGXS)
 
