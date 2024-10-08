@@ -16,6 +16,7 @@
 #include "utils/palloc.h"
 #include "utils/rel.h"
 #include "utils/syscache.h"
+#include "utils/typcache.h"
 
 #include "deps/quickjs/quickjs.h"
 
@@ -206,19 +207,10 @@ static bool setup_function(FunctionCallInfo fcinfo, HeapTuple proctuple,
     Oid argtype = argtypes[i];
     char argmode = argmodes ? argmodes[i] : PROARGMODE_IN;
 
-    switch (argmode) {
-    case PROARGMODE_IN:
-    case PROARGMODE_INOUT:
-    case PROARGMODE_VARIADIC:
-      break;
-    default:
-      continue;
-    }
-
     if (arguments && arguments[i]) {
-      context->arguments[inargs] = arguments[i];
+      context->arguments[i] = arguments[i];
     } else {
-      context->arguments[inargs] = NULL;
+      context->arguments[i] = NULL;
     }
 
     /* Resolve polymorphic types, if this is an actual call context. */
@@ -226,11 +218,17 @@ static bool setup_function(FunctionCallInfo fcinfo, HeapTuple proctuple,
       argtype = get_fn_expr_argtype(fcinfo->flinfo, i);
     }
 
-    pljs_function->argtypes[inargs] = argtype;
-    inargs++;
+    pljs_function->argtypes[i] = argtype;
+    pljs_function->argmodes[i] = argmode;
+
+    if (argmode == PROARGMODE_IN || argmode == PROARGMODE_INOUT ||
+        argmode == PROARGMODE_VARIADIC) {
+      inargs++;
+    }
   }
 
-  pljs_function->nargs = inargs;
+  pljs_function->inargs = inargs;
+  pljs_function->nargs = nargs;
 
   context->function = pljs_function;
   context->function->user_id = GetUserId();
@@ -269,7 +267,6 @@ static JSValueConst *convert_arguments_to_javascript(FunctionCallInfo fcinfo,
     if (fcinfo && IsPolymorphicType(argtype)) {
       argtype = get_fn_expr_argtype(fcinfo->flinfo, i);
     }
-
     if (fcinfo->args[i].isnull == 1) {
       argv[inargs] = JS_NULL;
     } else {
@@ -296,7 +293,6 @@ static JSValueConst *convert_arguments_to_javascript(FunctionCallInfo fcinfo,
 Datum pljs_call_handler(PG_FUNCTION_ARGS) {
   Oid fn_oid = fcinfo->flinfo->fn_oid;
   HeapTuple proctuple;
-  Form_pg_proc pg_proc_entry = NULL;
   JSContext *ctx;
   Datum retval;
   bool nonatomic = fcinfo->context && IsA(fcinfo->context, CallContext) &&
@@ -372,6 +368,7 @@ Datum pljs_call_handler(PG_FUNCTION_ARGS) {
     // Call as a function.
     JSValueConst *argv =
         convert_arguments_to_javascript(fcinfo, proctuple, &context);
+
     retval = pljs_call_function(fcinfo, &context, argv);
   }
 
@@ -479,9 +476,13 @@ JSValue pljs_compile_function(pljs_context *context, bool is_trigger) {
   // generate the function as javascript with all of its arguments
   appendStringInfo(&src, "function %s (", context->function->proname);
 
+  int inarg = 0;
   for (i = 0; i < context->function->nargs; i++) {
+    if (context->function->argmodes[i] == PROARGMODE_OUT) {
+      continue;
+    }
     // commas between arguments
-    if (i > 0) {
+    if (inarg > 0) {
       appendStringInfoChar(&src, ',');
     }
 
@@ -490,12 +491,14 @@ JSValue pljs_compile_function(pljs_context *context, bool is_trigger) {
       appendStringInfoString(&src, context->arguments[i]);
     } else {
       // otherwise append it as an unnamed argument with a number
-      appendStringInfo(&src, "$%d", i + 1);
+      appendStringInfo(&src, "$%d", inarg + 1);
     }
+
+    inarg++;
   }
 
   // append the other postgres-specific variables as well
-  if (context->function->nargs && is_trigger) {
+  if (context->function->inargs && is_trigger) {
     appendStringInfo(&src, ", ");
   }
 
@@ -699,7 +702,7 @@ static Datum pljs_call_function(FunctionCallInfo fcinfo, pljs_context *context,
   os_pending_signals &= ~((uint64_t)1 << SIGINT);
 
   JSValue ret = JS_Call(context->ctx, context->js_function, JS_UNDEFINED,
-                        context->function->nargs, argv);
+                        context->function->inargs, argv);
 
   if (JS_IsException(ret)) {
     char *error_message = dump_error(context->ctx);
@@ -711,8 +714,23 @@ static Datum pljs_call_function(FunctionCallInfo fcinfo, pljs_context *context,
     /* Shuts up the compiler, since ereports of ERROR stop execution. */
     PG_RETURN_VOID();
   } else {
-    Datum datum =
-        pljs_jsvalue_to_datum(ret, rettype, context->ctx, fcinfo, NULL);
+    Datum datum;
+
+    if (rettype == RECORDOID) {
+      Oid rettype;
+      TupleDesc tupdesc;
+      get_call_result_type(fcinfo, &rettype, &tupdesc);
+
+      pljs_type type;
+      pljs_type_fill(&type, rettype);
+
+      datum = pljs_jsvalue_to_record(ret, &type, context->ctx, NULL, tupdesc);
+    } else {
+      bool is_null;
+      datum =
+          pljs_jsvalue_to_datum(ret, rettype, context->ctx, fcinfo, &is_null);
+    }
+
     JS_FreeValue(context->ctx, ret);
 
     MemoryContextSwitchTo(old_context);

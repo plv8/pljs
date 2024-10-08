@@ -62,13 +62,24 @@ SELECT one_inout(5, 'ABC');
 
 CREATE FUNCTION one_out(OUT o text, i integer) AS
 $$
-return 'ABC' + i;
+return "ABC" + i;
 $$
 LANGUAGE pljs;
 SELECT one_out(123);
  one_out 
 ---------
  ABC123
+(1 row)
+
+CREATE FUNCTION two_out(OUT o text, OUT o2 text, i integer) AS
+$$
+return { o: "ABC" + i, o2: i + "ABC" };
+$$
+LANGUAGE pljs;
+SELECT two_out(123);
+     two_out     
+-----------------
+ (ABC123,123ABC)
 (1 row)
 
 -- polymorphic types

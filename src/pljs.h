@@ -50,6 +50,7 @@ typedef struct pljs_function_cache_value {
   int nargs;
   char proname[NAMEDATALEN];
   Oid argtypes[FUNC_MAX_ARGS];
+  char argmodes[FUNC_MAX_ARGS];
   char *prosrc;
 } pljs_function_cache_value;
 
@@ -90,10 +91,12 @@ typedef struct pljs_func {
   Oid user_id; // the user id
 
   bool trigger;
-  int nargs;                   // the number of arguments
-  bool is_srf;                 // are we a set returning function?
-  Oid rettype;                 // the return type
-  Oid argtypes[FUNC_MAX_ARGS]; // the types of the argument passed
+  int inargs;                   // the number of input arguments
+  int nargs;                    // the total number of arguments
+  bool is_srf;                  // are we a set returning function?
+  Oid rettype;                  // the return type
+  Oid argtypes[FUNC_MAX_ARGS];  // the types of the argument passed
+  char argmodes[FUNC_MAX_ARGS]; // mode of each argument
 } pljs_func;
 
 typedef struct pljs_context {

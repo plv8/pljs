@@ -241,9 +241,10 @@ void pljs_function_cache_to_context(pljs_context *context,
   context->function->trigger = function_entry->trigger;
   context->js_function = function_entry->fn;
 
-  context->function->nargs = function_entry->nargs;
+  context->function->inargs = function_entry->nargs;
   for (int i = 0; i < function_entry->nargs; i++) {
     context->function->argtypes[i] = function_entry->argtypes[i];
+    context->function->argmodes[i] = function_entry->argmodes[i];
   }
 
   memcpy(context->function->proname, function_entry->proname, NAMEDATALEN);
@@ -271,9 +272,10 @@ void pljs_context_to_function_cache(pljs_function_cache_value *function_entry,
   function_entry->user_id = context->function->user_id;
   function_entry->trigger = context->function->trigger;
   function_entry->fn = context->js_function;
-  function_entry->nargs = context->function->nargs;
+  function_entry->nargs = context->function->inargs;
   for (int i = 0; i < function_entry->nargs; i++) {
     function_entry->argtypes[i] = context->function->argtypes[i];
+    function_entry->argmodes[i] = context->function->argmodes[i];
   }
 
   memcpy(function_entry->proname, context->function->proname, NAMEDATALEN);

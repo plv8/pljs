@@ -105,7 +105,6 @@ uint32_t js_array_length(JSContext *ctx, JSValueConst obj) {
 // convert an Oid a pljs_type.
 void pljs_type_fill(pljs_type *type, Oid typid) {
   bool is_preferred;
-
   type->typid = typid;
   type->fn_input.fn_mcxt = CurrentMemoryContext;
   type->fn_output.fn_mcxt = CurrentMemoryContext;
@@ -127,6 +126,8 @@ void pljs_type_fill(pljs_type *type, Oid typid) {
     type->typid = elemid;
     type->is_composite = (TypeCategory(elemid) == TYPCATEGORY_COMPOSITE);
     get_typlenbyvalalign(type->typid, &type->len, &type->byval, &type->align);
+  } else if (type->category == TYPCATEGORY_PSEUDOTYPE) {
+    type->is_composite = true;
   }
 }
 

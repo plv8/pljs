@@ -46,10 +46,17 @@ SELECT one_inout(5, 'ABC');
 
 CREATE FUNCTION one_out(OUT o text, i integer) AS
 $$
-return 'ABC' + i;
+return "ABC" + i;
 $$
 LANGUAGE pljs;
 SELECT one_out(123);
+
+CREATE FUNCTION two_out(OUT o text, OUT o2 text, i integer) AS
+$$
+return { o: "ABC" + i, o2: i + "ABC" };
+$$
+LANGUAGE pljs;
+SELECT two_out(123);
 
 -- polymorphic types
 CREATE FUNCTION polymorphic(poly anyarray) returns anyelement AS
