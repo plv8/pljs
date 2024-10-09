@@ -351,6 +351,8 @@ Datum pljs_call_handler(PG_FUNCTION_ARGS) {
     pljs_cache_function_add(&context);
   }
 
+  ReleaseSysCache(proctuple);
+
   // Connect to the SPI manager for any calls.
   if (SPI_connect_ext(nonatomic ? SPI_OPT_NONATOMIC : 0) != SPI_OK_CONNECT) {
     elog(ERROR, "could not connect to spi manager");
@@ -371,8 +373,6 @@ Datum pljs_call_handler(PG_FUNCTION_ARGS) {
 
     retval = pljs_call_function(fcinfo, &context, argv);
   }
-
-  ReleaseSysCache(proctuple);
 
   SPI_finish();
 
@@ -692,7 +692,7 @@ static Datum pljs_call_function(FunctionCallInfo fcinfo, pljs_context *context,
   Oid fn_oid = fcinfo->flinfo->fn_oid;
   HeapTuple proctuple =
       SearchSysCache(PROCOID, ObjectIdGetDatum(fn_oid), 0, 0, 0);
-  ;
+
   Oid rettype;
   Form_pg_proc pg_proc_entry = (Form_pg_proc)GETSTRUCT(proctuple);
 
@@ -701,12 +701,21 @@ static Datum pljs_call_function(FunctionCallInfo fcinfo, pljs_context *context,
   } else {
     rettype = pg_proc_entry->prorettype;
   }
+  ReleaseSysCache(proctuple);
+
+  bool nonatomic = fcinfo->context && IsA(fcinfo->context, CallContext) &&
+                   !castNode(CallContext, fcinfo->context)->atomic;
+  if (SPI_connect_ext(nonatomic ? SPI_OPT_NONATOMIC : 0) != SPI_OK_CONNECT) {
+    elog(ERROR, "could not connect to spi manager");
+  }
 
   JS_SetInterruptHandler(JS_GetRuntime(context->ctx), interrupt_handler, NULL);
   os_pending_signals &= ~((uint64_t)1 << SIGINT);
 
   JSValue ret = JS_Call(context->ctx, context->js_function, JS_UNDEFINED,
                         context->function->inargs, argv);
+
+  SPI_finish();
 
   if (JS_IsException(ret)) {
     char *error_message = dump_error(context->ctx);
@@ -738,7 +747,6 @@ static Datum pljs_call_function(FunctionCallInfo fcinfo, pljs_context *context,
     JS_FreeValue(context->ctx, ret);
 
     MemoryContextSwitchTo(old_context);
-    ReleaseSysCache(proctuple);
 
     return datum;
   }

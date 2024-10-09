@@ -38,6 +38,8 @@ static JSValue pljs_plan_cursor_to_string(JSContext *, JSValueConst, int,
 static JSValue pljs_plan_free(JSContext *, JSValueConst, int, JSValueConst *);
 static JSValue pljs_plan_to_string(JSContext *, JSValueConst, int,
                                    JSValueConst *);
+static JSValue pljs_commit(JSContext *, JSValueConst, int, JSValueConst *);
+static JSValue pljs_rollback(JSContext *, JSValueConst, int, JSValueConst *);
 
 void pljs_setup_namespace(JSContext *ctx) {
   // get a copy of the global object.
@@ -53,6 +55,12 @@ void pljs_setup_namespace(JSContext *ctx) {
 
   JS_SetPropertyStr(ctx, pljs, "prepare",
                     JS_NewCFunction(ctx, pljs_prepare, "prepare", 2));
+
+  JS_SetPropertyStr(ctx, pljs, "commit",
+                    JS_NewCFunction(ctx, pljs_commit, "commit", 0));
+
+  JS_SetPropertyStr(ctx, pljs, "rollback",
+                    JS_NewCFunction(ctx, pljs_rollback, "rollback", 0));
 
   JS_SetPropertyStr(ctx, global_obj, "pljs", pljs);
 
@@ -704,4 +712,34 @@ static JSValue pljs_plan_cursor_to_string(JSContext *ctx, JSValueConst this_val,
 static JSValue pljs_plan_to_string(JSContext *ctx, JSValueConst this_val,
                                    int argc, JSValueConst *argv) {
   return JS_NewString(ctx, "[object Plan]");
+}
+
+static JSValue pljs_commit(JSContext *ctx, JSValueConst this_val, int argc,
+                           JSValueConst *argv) {
+  PG_TRY();
+  {
+    // HoldPinnedPortals();
+    SPI_commit();
+    SPI_start_transaction();
+  }
+  PG_CATCH();
+  { return js_throw(ctx, "Unable to commit"); }
+  PG_END_TRY();
+
+  return JS_UNDEFINED;
+}
+
+static JSValue pljs_rollback(JSContext *ctx, JSValueConst this_val, int argc,
+                             JSValueConst *argv) {
+  PG_TRY();
+  {
+    // HoldPinnedPortals();
+    SPI_rollback();
+    SPI_start_transaction();
+  }
+  PG_CATCH();
+  { return js_throw(ctx, "Unable to rollback"); }
+  PG_END_TRY();
+
+  return JS_UNDEFINED;
 }

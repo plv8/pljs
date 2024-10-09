@@ -29,7 +29,7 @@ Current Release Version: `0.8`
 - [ ] set returning functions
 - [ ] windows
 - [ ] startup functions
-- [ ] procedures/transactions
+- [x] procedures/transactions
 - [ ] find function
 - [ ] `BigInt`
 - [ ] full PLV8 parity
