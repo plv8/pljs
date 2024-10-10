@@ -116,6 +116,7 @@ void pljs_cache_init(void);
 void pljs_cache_reset(void);
 void pljs_setup_namespace(JSContext *);
 JSValue pljs_compile_function(pljs_context *context, bool is_trigger);
+JSValue pljs_find_js_function(Oid fn_oid);
 
 // Functions in cache.c
 void pljs_cache_context_add(Oid, JSContext *);

@@ -1,6 +1,7 @@
 #include "postgres.h"
 
 #include "access/xlog_internal.h"
+#include "catalog/pg_database.h"
 #include "catalog/pg_proc.h"
 #include "catalog/pg_type_d.h"
 #include "commands/trigger.h"
@@ -232,7 +233,10 @@ static bool setup_function(FunctionCallInfo fcinfo, HeapTuple proctuple,
 
   context->function = pljs_function;
   context->function->user_id = GetUserId();
-  context->function->fn_oid = fcinfo->flinfo->fn_oid;
+
+  if (fcinfo) {
+    context->function->fn_oid = fcinfo->flinfo->fn_oid;
+  }
 
   return true;
 }
@@ -527,6 +531,8 @@ JSValue pljs_compile_function(pljs_context *context, bool is_trigger) {
 
     return JS_UNDEFINED;
   }
+
+  return val;
 }
 
 static void pljs_call_anonymous_function(JSContext *ctx, const char *source) {
@@ -766,4 +772,67 @@ JSValue js_throw(JSContext *ctx, const char *message) {
   JS_SetPropertyStr(ctx, error, "message", message_value);
 
   return JS_Throw(ctx, error);
+}
+
+JSValue pljs_find_js_function(Oid fn_oid) {
+  Form_pg_proc proc;
+  Oid prolang;
+  NameData langname = {.data = "pljs"};
+  JSValue func = JS_UNDEFINED;
+
+  HeapTuple functuple =
+      SearchSysCache(PROCOID, ObjectIdGetDatum(fn_oid), 0, 0, 0);
+  if (!HeapTupleIsValid(functuple)) {
+    elog(ERROR, "cache lookup failed for function %u", fn_oid);
+  }
+
+  proc = (Form_pg_proc)GETSTRUCT(functuple);
+  prolang = proc->prolang;
+
+  /* Should not happen? */
+  if (!OidIsValid(prolang)) {
+    return func;
+  }
+
+  /* See if the function language is a compatible one */
+  HeapTuple langtuple =
+      SearchSysCache(LANGNAME, NameGetDatum(&langname), 0, 0, 0);
+  if (HeapTupleIsValid(langtuple)) {
+    Form_pg_database datForm = (Form_pg_database)GETSTRUCT(langtuple);
+    Oid langtupoid = datForm->oid;
+
+    ReleaseSysCache(langtuple);
+
+    if (langtupoid != prolang) {
+      return func;
+    }
+  }
+
+  pljs_context context;
+
+  pljs_function_cache_value *function_entry =
+      pljs_cache_function_find(GetUserId(), fn_oid);
+
+  if (function_entry) {
+    pljs_function_cache_to_context(&context, function_entry);
+
+    func = context.js_function;
+  } else {
+    pljs_context_cache_value *context_entry =
+        pljs_cache_context_find(GetUserId());
+
+    context.ctx = context_entry->ctx;
+    setup_function(NULL, functuple, &context);
+
+    func = pljs_compile_function(&context, false);
+
+    ReleaseSysCache(functuple);
+  }
+
+  // If there was a problem creating the function, we'll just return VOID.
+  if (JS_IsUndefined(func)) {
+    return JS_UNDEFINED;
+  }
+
+  return func;
 }

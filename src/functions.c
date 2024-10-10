@@ -41,6 +41,9 @@ static JSValue pljs_plan_to_string(JSContext *, JSValueConst, int,
 static JSValue pljs_commit(JSContext *, JSValueConst, int, JSValueConst *);
 static JSValue pljs_rollback(JSContext *, JSValueConst, int, JSValueConst *);
 
+static JSValue pljs_find_function(JSContext *, JSValueConst, int,
+                                  JSValueConst *);
+
 void pljs_setup_namespace(JSContext *ctx) {
   // get a copy of the global object.
   JSValue global_obj = JS_GetGlobalObject(ctx);
@@ -61,6 +64,10 @@ void pljs_setup_namespace(JSContext *ctx) {
 
   JS_SetPropertyStr(ctx, pljs, "rollback",
                     JS_NewCFunction(ctx, pljs_rollback, "rollback", 0));
+
+  JS_SetPropertyStr(
+      ctx, pljs, "find_function",
+      JS_NewCFunction(ctx, pljs_find_function, "find_function", 1));
 
   JS_SetPropertyStr(ctx, global_obj, "pljs", pljs);
 
@@ -742,4 +749,75 @@ static JSValue pljs_rollback(JSContext *ctx, JSValueConst this_val, int argc,
   PG_END_TRY();
 
   return JS_UNDEFINED;
+}
+
+static JSValue pljs_find_function(JSContext *ctx, JSValueConst this_val,
+                                  int argc, JSValueConst *argv) {
+  if (argc < 1) {
+    return JS_UNDEFINED;
+  }
+  const char *signature = JS_ToCString(ctx, argv[0]);
+  JSValue func = JS_UNDEFINED;
+
+  // Stack-allocate FunctionCallInfoBaseData with
+  // space for 2 arguments:
+  LOCAL_FCINFO(fake_fcinfo, 2);
+
+  FmgrInfo flinfo;
+
+  char perm[16];
+  strcpy(perm, "EXECUTE");
+  text *arg = (text *)palloc(8 + VARHDRSZ);
+  memcpy(VARDATA(arg), perm, 8);
+  SET_VARSIZE(arg, 8 + VARHDRSZ);
+  Oid funcoid;
+
+  PG_TRY();
+  {
+    if (strchr(signature, '(') == NULL) {
+      funcoid = DatumGetObjectId(
+          DirectFunctionCall1(regprocin, CStringGetDatum(signature)));
+    } else {
+      funcoid = DatumGetObjectId(
+          DirectFunctionCall1(regprocedurein, CStringGetDatum(signature)));
+    }
+
+    MemSet(&flinfo, 0, sizeof(flinfo));
+    fake_fcinfo->flinfo = &flinfo;
+    flinfo.fn_oid = InvalidOid;
+    flinfo.fn_mcxt = CurrentMemoryContext;
+    fake_fcinfo->nargs = 2;
+    fake_fcinfo->args[0].value = ObjectIdGetDatum(funcoid);
+    fake_fcinfo->args[1].value = PointerGetDatum(arg);
+
+    Datum ret = has_function_privilege_id(fake_fcinfo);
+
+    if (ret == 0) {
+      elog(WARNING, "failed to find or no permission for js function %s",
+           signature);
+      return func;
+    } else {
+      if (DatumGetBool(ret)) {
+        func = pljs_find_js_function(funcoid);
+
+        if (JS_IsUndefined(func)) {
+          elog(ERROR, "javascript function is not found for \"%s\"", signature);
+        }
+      } else {
+        elog(WARNING, "no permission to execute js function %s", signature);
+      }
+    }
+  }
+  PG_CATCH();
+  {
+    StringInfoData str;
+    initStringInfo(&str);
+    appendStringInfo(&str, "javascript function is not found for \"%s\"",
+                     signature);
+
+    return js_throw(ctx, str.data);
+  }
+  PG_END_TRY();
+
+  return func;
 }

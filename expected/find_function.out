@@ -1,0 +1,61 @@
+CREATE FUNCTION callee(a int) RETURNS int AS $$ return a * a $$ LANGUAGE pljs;
+CREATE FUNCTION sqlf(int) RETURNS int AS $$ SELECT $1 * $1 $$ LANGUAGE sql;
+CREATE FUNCTION caller(a int, t int) RETURNS int AS $$
+  var func;
+  if (t == 1) {
+    func = pljs.find_function("callee");
+  } else if (t == 2) {
+    func = pljs.find_function("callee(int)");
+  } else if (t == 3) {
+    func = pljs.find_function("sqlf");
+  } else if (t == 4) {
+    func = pljs.find_function("callee(int, int)");
+  } else if (t == 5) {
+    try{
+      func = pljs.find_function("caller()");
+    }catch(e){
+      func = function(a){ return a };
+    }
+  }
+  return func(a);
+$$ LANGUAGE pljs;
+SELECT caller(10, 1);
+ caller 
+--------
+    100
+(1 row)
+
+SELECT caller(10, 2);
+ caller 
+--------
+    100
+(1 row)
+
+SELECT caller(10, 3);
+ERROR:  execution error
+DETAIL:  Error: javascript function is not found for "sqlf"
+    at caller (<function>:9)
+
+SELECT caller(10, 4);
+ERROR:  execution error
+DETAIL:  Error: javascript function is not found for "callee(int, int)"
+    at caller (<function>:11)
+
+SELECT caller(10, 5);
+ caller 
+--------
+     10
+(1 row)
+
+-- test find_function permissions failure
+CREATE FUNCTION perm() RETURNS void AS $$ pljs.elog(NOTICE, 'nope'); $$ LANGUAGE pljs;
+CREATE ROLE someone_else;
+REVOKE EXECUTE ON FUNCTION perm() FROM public;
+SET ROLE TO someone_else;
+DO $$ const func = pljs.find_function('perm') $$ LANGUAGE pljs;
+WARNING:  failed to find or no permission for js function perm
+DO $$ const func = pljs.find_function('perm()') $$ LANGUAGE pljs;
+WARNING:  failed to find or no permission for js function perm()
+RESET ROLE;
+DROP ROLE someone_else;
+DROP FUNCTION perm();
