@@ -1,23 +1,19 @@
 #include "postgres.h"
 
-#include "access/xlog_internal.h"
 #include "catalog/pg_database.h"
 #include "catalog/pg_proc.h"
 #include "catalog/pg_type_d.h"
 #include "commands/trigger.h"
-#include "common/hashfn.h"
 #include "executor/spi.h"
 #include "funcapi.h"
 #include "miscadmin.h"
 #include "nodes/parsenodes.h"
 #include "utils/builtins.h"
 #include "utils/guc.h"
-#include "utils/jsonb.h"
 #include "utils/lsyscache.h"
 #include "utils/palloc.h"
 #include "utils/rel.h"
 #include "utils/syscache.h"
-#include "utils/typcache.h"
 
 #include "deps/quickjs/quickjs.h"
 
@@ -39,6 +35,14 @@ static Datum pljs_call_function(PG_FUNCTION_ARGS, pljs_context *context,
 static void pljs_call_anonymous_function(JSContext *, const char *);
 static Datum pljs_call_trigger(FunctionCallInfo fcinfo, pljs_context *context);
 
+/**
+ * @brief Converts a javascript error into a string.
+ *
+ * Takes a javascript context and converts it into a string,
+ * allocating the memory needed in the currect memory context.
+ *
+ * @returns @c char * as an error message.
+ */
 static char *dump_error(JSContext *ctx) {
   JSValue exception_val, val;
   const char *stack;
@@ -63,7 +67,7 @@ static char *dump_error(JSContext *ctx) {
   str = JS_ToCStringLen(ctx, &s1, exception_val);
 
   if (!str) {
-    elog(NOTICE, "error thrown but no error message");
+    elog(DEBUG3, "error thrown but no error message");
     return NULL;
   }
 
@@ -115,16 +119,16 @@ void _PG_init(void) {
   signal(SIGTERM, signal_handler);
   signal(SIGABRT, signal_handler);
 
-  // initialize cache
+  // Initialize cache.
   pljs_cache_init();
 
-  // initialize the GUCs
+  // Initialize the GUCs.
   pljs_guc_init();
 
-  // set up the quickjs runtime
+  // Set up the quickjs runtime.
   rt = JS_NewRuntime();
 
-  // set up a memory limit if it exists
+  // Set up a memory limit if it exists.
   if (configuration.memory_limit) {
     JS_SetMemoryLimit(rt, configuration.memory_limit * 1024 * 1024);
   }
@@ -162,6 +166,11 @@ void pljs_guc_init(void) {
  * @brief Set up the pljs_context.
  *
  * Sets up the pljs_context with the function and any needed contexts.
+ * @param fcinfo #FunctionCallInfo - optional, allows for the `fn_oid` to be
+ * added
+ * @param proctuple #HeapTuple - information pointer for the source and argument
+ * information
+ * @param context #pljs_context - context to set up the function into
  * @returns @c bool of success for failure.
  */
 static bool setup_function(FunctionCallInfo fcinfo, HeapTuple proctuple,
@@ -175,9 +184,11 @@ static bool setup_function(FunctionCallInfo fcinfo, HeapTuple proctuple,
   char *argmodes;
   int nargs;
 
+  // Search for the system cache entry for the source of the procedure.
   prosrcdatum =
       SysCacheGetAttr(PROCOID, proctuple, Anum_pg_proc_prosrc, &isnull);
 
+  // If we fail, all is lost already, might as well give up hope.
   if (isnull) {
     ereport(ERROR, errcode(ERRCODE_INTERNAL_ERROR),
             errmsg("unable to find prosrc"));
@@ -185,29 +196,38 @@ static bool setup_function(FunctionCallInfo fcinfo, HeapTuple proctuple,
     return false;
   }
 
-  pg_proc_entry = (Form_pg_proc)GETSTRUCT(proctuple);
-
   pljs_function = palloc0(sizeof(pljs_func));
 
-  nargs = get_func_arg_info(proctuple, &argtypes, &arguments, &argmodes);
+  // Make a copy of the source available for later compilation.
   pljs_function->prosrc =
       DatumGetCString(DirectFunctionCall1(textout, prosrcdatum));
 
+  pg_proc_entry = (Form_pg_proc)GETSTRUCT(proctuple);
+
+  // Get the actual name of the procedure.
   strlcpy(pljs_function->proname, NameStr(pg_proc_entry->proname), NAMEDATALEN);
 
+  // Are we building a set-returning function?  If so, a special case.
   pljs_function->is_srf = pg_proc_entry->proretset;
 
+  // Figure out the return type, we care about this when we are calling directly
+  // from postgres.
   if (fcinfo && IsPolymorphicType(pg_proc_entry->prorettype)) {
     pljs_function->rettype = get_fn_expr_rettype(fcinfo->flinfo);
   } else {
     pljs_function->rettype = pg_proc_entry->prorettype;
   }
 
+  // Get all of the argument information.
+  nargs = get_func_arg_info(proctuple, &argtypes, &arguments, &argmodes);
+
   int inargs = 0;
   for (int i = 0; i < nargs; i++) {
     Oid argtype = argtypes[i];
     char argmode = argmodes ? argmodes[i] : PROARGMODE_IN;
 
+    // Get a copy of the arguments themselves, we use them for creating the
+    // function.
     if (arguments && arguments[i]) {
       context->arguments[i] = arguments[i];
     } else {
@@ -222,6 +242,7 @@ static bool setup_function(FunctionCallInfo fcinfo, HeapTuple proctuple,
     pljs_function->argtypes[i] = argtype;
     pljs_function->argmodes[i] = argmode;
 
+    // We differentiate input arguments from output only.
     if (argmode == PROARGMODE_IN || argmode == PROARGMODE_INOUT ||
         argmode == PROARGMODE_VARIADIC) {
       inargs++;
@@ -232,8 +253,13 @@ static bool setup_function(FunctionCallInfo fcinfo, HeapTuple proctuple,
   pljs_function->nargs = nargs;
 
   context->function = pljs_function;
+
+  // Functions are scoped to a user, in postgres this is a one-to-many
+  // relationship, but in the extension we assign it to a context, which
+  // is a single context per user.
   context->function->user_id = GetUserId();
 
+  // If we have the function call info, we set the function OID.
   if (fcinfo) {
     context->function->fn_oid = fcinfo->flinfo->fn_oid;
   }
@@ -241,6 +267,11 @@ static bool setup_function(FunctionCallInfo fcinfo, HeapTuple proctuple,
   return true;
 }
 
+/**
+ * @brief Converts all function call arguments from postgres to javascript.
+ *
+ * Allocates and creates an array of arguments as javascript values.
+ */
 static JSValueConst *convert_arguments_to_javascript(FunctionCallInfo fcinfo,
                                                      HeapTuple proctuple,
                                                      pljs_context *context) {
@@ -383,6 +414,13 @@ Datum pljs_call_handler(PG_FUNCTION_ARGS) {
   return retval;
 }
 
+/**
+ * #brief Execute an inline javascript call.
+ *
+ * Executes whatever is passed as a `DO` call in postgres, does
+ * not accept any arguments to the call, nor allow for any returned
+ * data.
+ */
 Datum pljs_inline_handler(PG_FUNCTION_ARGS) {
   pljs_context_cache_value *entry = pljs_cache_context_find(GetUserId());
 
@@ -394,17 +432,19 @@ Datum pljs_inline_handler(PG_FUNCTION_ARGS) {
   bool nonatomic = fcinfo->context && IsA(fcinfo->context, CallContext) &&
                    !castNode(CallContext, fcinfo->context)->atomic;
 
+  // An inline handler is called separately, so there may not be a
+  // context created at this point.
   if (entry) {
     ctx = entry->ctx;
   } else {
-    // create a new execution context.
+    // Create a new execution context.
     ctx = JS_NewContext(rt);
 
-    // set up the namespace, globals and functions available inside the
+    // Set up the namespace, globals and functions available inside the
     // context.
     pljs_setup_namespace(ctx);
 
-    // save the context
+    // Save the context
     pljs_cache_context_add(GetUserId(), ctx);
   }
 
@@ -412,7 +452,7 @@ Datum pljs_inline_handler(PG_FUNCTION_ARGS) {
     elog(ERROR, "could not connect to spi manager");
   }
 
-  // do the logic
+  // Call the function.
   pljs_call_anonymous_function(ctx, sourcecode);
 
   SPI_finish();
@@ -475,6 +515,17 @@ Datum pljs_call_validator(PG_FUNCTION_ARGS) {
   PG_RETURN_VOID();
 }
 
+/**
+ * @brief Compile a javascript function and return a pointer to it.
+ *
+ * Sets up the arguments and code of a javascript function, compiles
+ * it, and returns the function itself for use.
+ * @param context #pljs_context - context to compile it into, which
+ * also has the current function
+ * @param is_trigger #bool - whether it is to be called as a trigger
+ * or not, this determines arguments
+ * @returns function #JSValue of the function.
+ */
 JSValue pljs_compile_function(pljs_context *context, bool is_trigger) {
   StringInfoData src;
   int i;
@@ -535,6 +586,9 @@ JSValue pljs_compile_function(pljs_context *context, bool is_trigger) {
   return val;
 }
 
+/**
+ * @brief Compile and call an anonymous function.
+ */
 static void pljs_call_anonymous_function(JSContext *ctx, const char *source) {
   StringInfoData src;
 
@@ -557,6 +611,13 @@ static void pljs_call_anonymous_function(JSContext *ctx, const char *source) {
   }
 }
 
+/**
+ * @brief Call a trigger.
+ *
+ * Sets up all of the function arguments for a trigger, and calls
+ * a trigger function.  This also determines the result type and
+ * generates a resulting return Datum for postgres to injest.
+ */
 static Datum pljs_call_trigger(FunctionCallInfo fcinfo, pljs_context *context) {
   TriggerData *trig = (TriggerData *)fcinfo->context;
   Relation rel = trig->tg_relation;

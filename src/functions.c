@@ -626,22 +626,7 @@ static JSValue pljs_plan_cursor_fetch(JSContext *ctx, JSValueConst this_val,
       return value;
     } else {
       JSValue obj = spi_result_to_jsvalue(ctx, SPI_processed);
-      /*
-            JSValue obj = JS_NewArray(ctx);
 
-            for (uint32 r = 0; r < SPI_processed; r++) {
-              JSValue value =
-                  tuple_to_jsvalue(ctx, SPI_tuptable->tupdesc,
-         SPI_tuptable->vals[r]);
-
-              JS_SetPropertyUint32(ctx, obj, r, value);
-            }
-
-            SPI_freetuptable(SPI_tuptable);
-
-            JSValue length = JS_NewInt32(ctx, SPI_processed);
-            JS_SetPropertyStr(ctx, obj, "length", length);
-      */
       SPI_freetuptable(SPI_tuptable);
 
       return obj;
