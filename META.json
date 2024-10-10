@@ -1,0 +1,52 @@
+{
+    "name": "pljs",
+    "abstract": "PL/JS trusted procedural language",
+    "description": "PLJS is a QuickJS-based Javascript Language Extension for \"modern\" PostgreSQL. It is compact, lightweight, and decently fast.",
+    "version": "0.8.0",
+    "maintainer": [
+        "Jerry Sievert <code@legitimatesounding.com>"
+    ],
+    "license": {
+        "PostgreSQL": "http://www.postgresql.org/about/licence"
+    },
+    "release_status": "stable",
+    "prereqs": {
+        "runtime": {
+            "requires": {
+                "PostgreSQL": "14.0.0"
+            }
+        }
+    },
+    "provides": {
+        "pljs": {
+            "file": "pljs--0.8.0.sql",
+            "docfile": "README.md",
+            "version": "0.8.0",
+            "abstract": "PL/JS trusted procedural language"
+        }
+    },
+    "no_index": {
+        "directory": [ "deps" ]
+    },
+    "resources": {
+        "homepage": "https://github.com/plv8/pljs",
+        "bugtracker": {
+            "web": "https://github.com/plv8/pljs/issues"
+        },
+        "repository": {
+            "url": "https://github.com/plv8/pljs",
+            "web": "https://github.com/plv8/pljs.git",
+            "type": "git"
+        }
+    },
+    "meta-spec": {
+        "version": "1.0.0",
+        "url": "http://pgxn.org/meta/spec.txt"
+    },
+    "tags": [
+        "PL",
+        "JavaScript",
+        "QuickJS",
+        "pljs"
+    ]
+}
