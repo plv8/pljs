@@ -179,7 +179,7 @@ static bool setup_function(FunctionCallInfo fcinfo, HeapTuple proctuple,
   bool isnull;
   Form_pg_proc pg_proc_entry = NULL;
   pljs_func *pljs_function = NULL;
-  char **arguments;
+  char **arguments = NULL;
   Oid *argtypes = NULL;
   char *argmodes;
   int nargs;
@@ -347,8 +347,6 @@ Datum pljs_call_handler(PG_FUNCTION_ARGS) {
       pljs_cache_function_find(GetUserId(), fn_oid);
 
   if (function_entry) {
-    ctx = function_entry->ctx;
-
     // Make a copy of the function entry to the pljs context.
     pljs_function_cache_to_context(&context, function_entry);
   } else {
@@ -843,7 +841,7 @@ JSValue pljs_find_js_function(Oid fn_oid) {
 
   HeapTuple functuple =
       SearchSysCache(PROCOID, ObjectIdGetDatum(fn_oid), 0, 0, 0);
-  if (!HeapTupleIsValid(functuple)) {
+  if (!HeapTupleIsValid(functuple)) { // NOLINT
     elog(ERROR, "cache lookup failed for function %u", fn_oid);
   }
 
@@ -851,7 +849,7 @@ JSValue pljs_find_js_function(Oid fn_oid) {
   prolang = proc->prolang;
 
   /* Should not happen? */
-  if (!OidIsValid(prolang)) {
+  if (!OidIsValid(prolang)) { // NOLINT
     return func;
   }
 
@@ -869,12 +867,12 @@ JSValue pljs_find_js_function(Oid fn_oid) {
     }
   }
 
-  pljs_context context;
+  pljs_context context = {0};
 
   pljs_function_cache_value *function_entry =
       pljs_cache_function_find(GetUserId(), fn_oid);
 
-  if (function_entry) {
+  if (function_entry != NULL) {
     pljs_function_cache_to_context(&context, function_entry);
 
     func = context.js_function;

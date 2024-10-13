@@ -123,7 +123,6 @@ void pljs_cache_context_add(Oid, JSContext *);
 void pljs_cache_context_remove(Oid);
 pljs_function_cache_value *pljs_cache_function_find(Oid user_id, Oid fn_oid);
 void pljs_cache_function_add(pljs_context *context);
-void pljs_cache_function_remove(Oid user_id, Oid fn_oid);
 pljs_context_cache_value *pljs_cache_context_find(Oid user_id);
 
 void pljs_function_cache_to_context(pljs_context *,

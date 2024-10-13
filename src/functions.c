@@ -2,19 +2,15 @@
 #include "postgres.h"
 
 #include "access/xact.h"
-#include "catalog/pg_database.h"
 #include "executor/spi.h"
 #include "nodes/params.h"
 #include "parser/parse_type.h"
 #include "utils/elog.h"
 #include "utils/fmgrprotos.h"
-#include "utils/jsonb.h"
-#include "utils/syscache.h"
 
 #include "pljs.h"
 #include "utils/palloc.h"
 #include "utils/resowner.h"
-#include <sys/_types/_null.h>
 
 // local only functions for injecting into pljs
 static JSValue pljs_elog(JSContext *, JSValueConst, int, JSValueConst *);
@@ -284,7 +280,7 @@ static JSValue pljs_plan_execute(JSContext *ctx, JSValueConst this_val,
 
   nparams = js_array_length(ctx, params);
 
-  JSValue ptr = JS_GetPropertyStr(ctx, this_val, "ptr");
+  JSValue ptr = JS_GetPropertyStr(ctx, this_val, "plan");
 
   plan = JS_GetOpaque(ptr, js_prepared_statement_handle_id);
 
@@ -387,7 +383,7 @@ static JSValue pljs_plan_execute(JSContext *ctx, JSValueConst this_val,
 static JSValue pljs_plan_free(JSContext *ctx, JSValueConst this_val, int argc,
                               JSValueConst *argv) {
   pljs_plan *plan;
-  JSValue ptr = JS_GetPropertyStr(ctx, this_val, "ptr");
+  JSValue ptr = JS_GetPropertyStr(ctx, this_val, "plan");
 
   plan = JS_GetOpaque(ptr, js_prepared_statement_handle_id);
 
@@ -403,7 +399,7 @@ static JSValue pljs_plan_free(JSContext *ctx, JSValueConst this_val, int argc,
     pfree(plan);
   }
 
-  JS_SetPropertyStr(ctx, this_val, "ptr", JS_NULL);
+  JS_SetPropertyStr(ctx, this_val, "plan", JS_NULL);
 
   return JS_NewInt32(ctx, 0);
 }
@@ -489,7 +485,7 @@ static JSValue pljs_prepare(JSContext *ctx, JSValueConst this_val, int argc,
 
   JSValue handle = JS_NewObjectClass(ctx, js_prepared_statement_handle_id);
   JS_SetOpaque(handle, plan);
-  JS_SetPropertyStr(ctx, ret, "ptr", handle);
+  JS_SetPropertyStr(ctx, ret, "plan", handle);
 
   return ret;
 }
@@ -510,7 +506,7 @@ static JSValue pljs_plan_cursor(JSContext *ctx, JSValueConst this_val, int argc,
   int argcount;
   Portal cursor;
 
-  JSValue ptr = JS_GetPropertyStr(ctx, this_val, "ptr");
+  JSValue ptr = JS_GetPropertyStr(ctx, this_val, "plan");
 
   plan = JS_GetOpaque(ptr, js_prepared_statement_handle_id);
 

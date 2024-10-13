@@ -182,30 +182,6 @@ void pljs_cache_function_add(pljs_context *context) {
 }
 
 /**
- * @brief Removes a #pljs_function_cache_value for a hash by `user_id`.
- *
- * Removes a cache entry from the cache by `fn_oid`.
- * @param user_id #Oid
- * @param fn_oid #Oid
- */
-void pljs_cache_function_remove(Oid user_id, Oid fn_oid) {
-  bool found;
-
-  pljs_context_cache_value *ctx_hvalue =
-      (pljs_context_cache_value *)hash_search(pljs_context_HashTable, &user_id,
-                                              HASH_FIND, &found);
-
-  // If the context does not exists, then in this case it's safe to just return.
-  if (!found) {
-    return;
-  }
-
-  // Remove the value, which deletes its memory context.
-  pljs_function_cache_value *value = hash_search(
-      ctx_hvalue->function_hash_table, &fn_oid, HASH_REMOVE, &found);
-}
-
-/**
  * @brief Finds a #pljs_function_cache_value for a `user_id` and `fn_oid`.
  *
  * @param user_id #Oid
