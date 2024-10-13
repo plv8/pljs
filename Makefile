@@ -49,7 +49,7 @@ lintcheck:
 
 include .depend
 
-all: pljs--$(PLJS_VERSION).sql
+all: pljs--$(PLJS_VERSION).sql deps/quickjs/libquickjs.a
 
 clean: cleandepend cleansql
 

@@ -1,3 +1,2 @@
 DO $$ pljs.elog(NOTICE, 'this', 'is', 'inline', 'code') $$ LANGUAGE pljs;
 NOTICE:  this is inline code
-DO $$ pljs.return_next(new Object());$$ LANGUAGE pljs;

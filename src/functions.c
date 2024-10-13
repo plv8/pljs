@@ -193,8 +193,6 @@ static JSValue pljs_execute(JSContext *ctx, JSValueConst this_val, int argc,
     MemoryContextSwitchTo(m_mcontext);
     CurrentResourceOwner = m_resowner;
 
-    SPI_pop_conditional(true);
-
     return error;
   }
   PG_END_TRY();
@@ -345,8 +343,6 @@ static JSValue pljs_plan_execute(JSContext *ctx, JSValueConst this_val,
     RollbackAndReleaseCurrentSubTransaction();
     MemoryContextSwitchTo(m_mcontext);
     CurrentResourceOwner = m_resowner;
-
-    SPI_pop_conditional(true);
 
     if (values) {
       pfree(values);
