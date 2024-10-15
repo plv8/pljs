@@ -1,0 +1,14 @@
+diff --git a/deps/quickjs/Makefile b/deps/quickjs/Makefile
+index cf88a72..2643deb 100644
+--- a/deps/quickjs/Makefile
++++ b/deps/quickjs/Makefile
+@@ -56,6 +56,9 @@ CONFIG_BIGNUM=y
+
+ OBJDIR=.obj
+
++# force -fPIC for compilation
++CFLAGS += -fPIC
++
+ ifdef CONFIG_ASAN
+ OBJDIR:=$(OBJDIR)/asan
+ endif

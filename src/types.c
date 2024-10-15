@@ -15,7 +15,6 @@
 #include "deps/quickjs/quickjs.h"
 
 #include "pljs.h"
-#include <sys/syslimits.h>
 
 // helper functions that should really exist as part of quickjs.
 static JSClassID JS_CLASS_OBJECT = 1;
