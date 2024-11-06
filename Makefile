@@ -10,7 +10,7 @@ INCLUDEDIR_SERVER := ${shell $(PG_CONFIG) --includedir-server}
 
 CP = cp
 SRCS = src/pljs.c src/cache.c src/functions.c src/types.c src/params.c
-OBJS = deps/quickjs/libquickjs.a src/pljs.o src/cache.o src/functions.o src/types.o src/params.o
+OBJS = src/pljs.o src/cache.o src/functions.o src/types.o src/params.o deps/quickjs/libquickjs.a
 MODULE_big = pljs
 EXTENSION = pljs
 DATA = pljs.control pljs--$(PLJS_VERSION).sql
@@ -21,20 +21,20 @@ REGRESS = init-extension function json jsonb json_conv types bytea context \
 	cursor array_spread plv8_regressions memory_limits inline composites \
 	trigger procedure find_function
 
+all: deps/quickjs/libquickjs.a pljs--$(PLJS_VERSION).sql
 
 
 include $(PGXS)
 
 
-all: pljs--$(PLJS_VERSION).sql
 
-deps/quickjs/libquickjs.a:
+deps/quickjs/quickjs.h:
 	mkdir -p deps
 	git submodule update --init --recursive
 	patch -p1 <patches/01-shared-lib-build
-	cd deps/quickjs && make libquickjs.a
 
-deps/quickjs/quickjs.h: deps/quickjs/libquickjs.a
+deps/quickjs/libquickjs.a:
+	cd deps/quickjs && make
 
 format:
 	clang-format -i $(SRCS) src/pljs.h
@@ -47,10 +47,11 @@ lintcheck:
 
 .depend: deps/quickjs/quickjs.h
 	$(RM) -f .depend
-	$(foreach SRC,$(SRCS),$(CC) $(CFLAGS) -I$(INCLUDEDIR) -I$(INCLUDEDIR_SERVER) \
+	$(foreach SRC,$(SRCS),$(CC) $(PG_CFLAGS) -I$(INCLUDEDIR) -I$(INCLUDEDIR_SERVER) \
 	   -I$(PWD) -MM -MT $(SRC:.c=.o) $(SRC) >> .depend;)
 
 
+all: deps/quickjs/libquickjs.a pljs--$(PLJS_VERSION).sql
 
 clean: cleandepend cleansql
 
