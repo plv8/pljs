@@ -302,7 +302,7 @@ static JSValueConst *convert_arguments_to_javascript(FunctionCallInfo fcinfo,
     if (fcinfo && IsPolymorphicType(argtype)) {
       argtype = get_fn_expr_argtype(fcinfo->flinfo, i);
     }
-    if (fcinfo->args[i].isnull == 1) {
+    if (fcinfo->args[inargs].isnull == 1) {
       argv[inargs] = JS_NULL;
     } else {
       argv[inargs] = pljs_datum_to_jsvalue(fcinfo->args[inargs].value, argtype,
@@ -386,11 +386,6 @@ Datum pljs_call_handler(PG_FUNCTION_ARGS) {
 
   ReleaseSysCache(proctuple);
 
-  // Connect to the SPI manager for any calls.
-  if (SPI_connect_ext(nonatomic ? SPI_OPT_NONATOMIC : 0) != SPI_OK_CONNECT) {
-    elog(ERROR, "could not connect to spi manager");
-  }
-
   if (is_trigger) {
     // Call in the context of a trigger.
     Form_pg_proc procStruct;
@@ -406,8 +401,6 @@ Datum pljs_call_handler(PG_FUNCTION_ARGS) {
 
     retval = pljs_call_function(fcinfo, &context, argv);
   }
-
-  SPI_finish();
 
   return retval;
 }
@@ -474,7 +467,7 @@ Datum pljs_call_validator(PG_FUNCTION_ARGS) {
   JSContext *ctx;
 
   if (fcinfo->flinfo->fn_extra) {
-    elog(NOTICE, "fn_extra on validate");
+    elog(DEBUG3, "fn_extra on validate");
   }
   proctuple = SearchSysCache(PROCOID, ObjectIdGetDatum(fn_oid), 0, 0, 0);
 

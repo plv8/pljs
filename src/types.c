@@ -307,14 +307,13 @@ JSValue pljs_datum_to_jsvalue(Datum arg, Oid argtype, JSContext *ctx) {
     char *buf = palloc(VARSIZE_ANY_EXHDR(p) + 1);
     memcpy(buf, VARDATA(p), VARSIZE_ANY_EXHDR(p));
 
-    // buf[VARSIZE_ANY_EXHDR(p)] = '\0';
     return_result = JS_NewStringLen(ctx, buf, VARSIZE_ANY_EXHDR(p));
     pfree(buf);
     break;
   }
 
   default:
-    elog(NOTICE, "Unknown type: %d", argtype);
+    elog(DEBUG3, "Unknown type: %d", argtype);
     return_result = JS_NULL;
   }
 
@@ -519,18 +518,16 @@ Datum pljs_jsvalue_to_datum(JSValue val, Oid rettype, JSContext *ctx,
     size_t plen;
     const char *str = JS_ToCStringLen(ctx, &plen, val);
 
-    text *t = (text *)palloc(plen + VARHDRSZ);
-    SET_VARSIZE(t, plen + VARHDRSZ);
-    memcpy(VARDATA(t), str, plen);
+    Datum ret = CStringGetTextDatum(str);
     JS_FreeCString(ctx, str);
 
-    PG_RETURN_TEXT_P(t);
+    return ret;
     break;
   }
 
   case JSONOID: {
     JSValueConst *argv = &val;
-    JSValue js = JS_JSONStringify(ctx, argv[0], argv[1], argv[2]);
+    JSValue js = JS_JSONStringify(ctx, argv[0], JS_UNDEFINED, JS_UNDEFINED);
     size_t plen;
     const char *str = JS_ToCStringLen(ctx, &plen, js);
 
@@ -545,10 +542,9 @@ Datum pljs_jsvalue_to_datum(JSValue val, Oid rettype, JSContext *ctx,
 
   case JSONBOID: {
     JSValueConst *argv = &val;
-    JSValue js = JS_JSONStringify(ctx, argv[0], argv[1], argv[2]);
+    JSValue js = JS_JSONStringify(ctx, argv[0], JS_UNDEFINED, JS_UNDEFINED);
     size_t plen;
     const char *str = JS_ToCStringLen(ctx, &plen, js);
-
     // return it as a Datum, since there is no direct CStringGetJsonb exposed.
     Datum ret = (Datum)DatumGetJsonbP(
         DirectFunctionCall1(jsonb_in, (Datum)(char *)str));
@@ -653,11 +649,11 @@ Datum pljs_jsvalue_to_datum(JSValue val, Oid rettype, JSContext *ctx,
 
       return PointerGetDatum(buffer);
     } else {
-      elog(NOTICE, "Unknown array type, tag: %lld", val.tag);
+      elog(DEBUG3, "Unknown array type, tag: %lld", val.tag);
       for (uint8_t i = 0; i < 255; i++) {
         void *res = JS_GetOpaque(val, i);
         if (res != NULL) {
-          elog(NOTICE, "class_id: %d", i);
+          elog(DEBUG3, "class_id: %d", i);
         }
       }
 
@@ -666,7 +662,7 @@ Datum pljs_jsvalue_to_datum(JSValue val, Oid rettype, JSContext *ctx,
   }
 
   default:
-    elog(NOTICE, "Unknown type: %d", rettype);
+    elog(DEBUG3, "Unknown type: %d", rettype);
     if (fcinfo) {
       PG_RETURN_NULL();
     } else {

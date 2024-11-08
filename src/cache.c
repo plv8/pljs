@@ -235,10 +235,8 @@ void pljs_function_cache_to_context(pljs_context *context,
 
   memcpy(context->function->proname, function_entry->proname, NAMEDATALEN);
 
-  context->function->prosrc =
-      (char *)palloc(strlen(function_entry->prosrc) + 1);
-  memcpy(context->function->prosrc, function_entry->prosrc,
-         strlen(function_entry->prosrc));
+  context->function->prosrc = (char *)palloc(NAMEDATALEN);
+  memcpy(context->function->prosrc, function_entry->prosrc, NAMEDATALEN);
 }
 
 /**
