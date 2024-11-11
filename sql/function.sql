@@ -65,3 +65,29 @@ $$
 $$
 LANGUAGE pljs;
 SELECT polymorphic(ARRAY[10, 11]), polymorphic(ARRAY['foo', 'bar']);
+
+-- RECORD TYPES
+CREATE TYPE rec AS (i integer, t text);
+CREATE FUNCTION scalar_to_record(i integer, t text) RETURNS rec AS
+$$
+	return { "i": i, "t": t };
+$$
+LANGUAGE pljs;
+SELECT scalar_to_record(1, 'a');
+
+CREATE FUNCTION record_to_text(x rec) RETURNS text AS
+$$
+	return JSON.stringify(x);
+$$
+LANGUAGE pljs;
+SELECT record_to_text('(1,a)'::rec);
+
+CREATE FUNCTION return_record(i integer, t text) RETURNS record AS
+$$
+	return { "i": i, "t": t };
+$$
+LANGUAGE pljs;
+SELECT * FROM return_record(1, 'a');
+SELECT * FROM return_record(1, 'a') AS t(j integer, s text);
+SELECT * FROM return_record(1, 'a') AS t(x text, y text);
+SELECT * FROM return_record(1, 'a') AS t(i integer, t text);
