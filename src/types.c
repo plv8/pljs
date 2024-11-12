@@ -245,7 +245,7 @@ JSValue pljs_datum_to_jsvalue(Datum arg, Oid argtype, JSContext *ctx) {
     break;
 
   case INT8OID:
-    return_result = JS_NewInt64(ctx, DatumGetInt64(arg));
+    return_result = JS_NewBigInt64(ctx, DatumGetInt64(arg));
     break;
 
   case FLOAT4OID:
@@ -464,7 +464,15 @@ Datum pljs_jsvalue_to_datum(JSValue val, Oid rettype, JSContext *ctx,
 
   case INT2OID: {
     int32_t in;
-    JS_ToInt32(ctx, &in, val);
+    if (JS_IsBigInt(ctx, val)) {
+      int64_t big_in;
+
+      JS_ToBigInt64(ctx, &big_in, val);
+
+      in = (int32_t)big_in;
+    } else {
+      JS_ToInt32(ctx, &in, val);
+    }
 
     PG_RETURN_INT16((int16_t)in);
     break;
@@ -472,7 +480,15 @@ Datum pljs_jsvalue_to_datum(JSValue val, Oid rettype, JSContext *ctx,
 
   case INT4OID: {
     int32_t in;
-    JS_ToInt32(ctx, &in, val);
+    if (JS_IsBigInt(ctx, val)) {
+      int64_t big_in;
+
+      JS_ToBigInt64(ctx, &big_in, val);
+
+      in = (int32_t)big_in;
+    } else {
+      JS_ToInt32(ctx, &in, val);
+    }
 
     PG_RETURN_INT32(in);
     break;
@@ -480,7 +496,11 @@ Datum pljs_jsvalue_to_datum(JSValue val, Oid rettype, JSContext *ctx,
 
   case INT8OID: {
     int64_t in;
-    JS_ToInt64(ctx, &in, val);
+    if (JS_IsBigInt(ctx, val)) {
+      JS_ToBigInt64(ctx, &in, val);
+    } else {
+      JS_ToInt64(ctx, &in, val);
+    }
 
     PG_RETURN_INT64(in);
     break;
@@ -503,10 +523,23 @@ Datum pljs_jsvalue_to_datum(JSValue val, Oid rettype, JSContext *ctx,
   }
 
   case NUMERICOID: {
-    double in;
-    JS_ToFloat64(ctx, &in, val);
+    if (JS_IsBigInt(ctx, val)) {
+      // Convert the value to a string then convert it to NUMERIC
+      JSValue str = JS_ToString(ctx, val);
 
-    return DirectFunctionCall1(float8_numeric, Float8GetDatum((float8)in));
+      const char *in = JS_ToCString(ctx, str);
+
+      return DirectFunctionCall3(numeric_in, (Datum)in,
+                                 ObjectIdGetDatum(InvalidOid),
+                                 Int32GetDatum((int32)-1));
+
+    } else {
+      double in;
+
+      JS_ToFloat64(ctx, &in, val);
+
+      return DirectFunctionCall1(float8_numeric, Float8GetDatum((float8)in));
+    }
     break;
   }
 

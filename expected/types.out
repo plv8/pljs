@@ -83,3 +83,42 @@ SELECT return_array();
  {foo,bar}
 (1 row)
 
+-- BigInt
+-- a BigInt that will work on any value
+CREATE OR REPLACE FUNCTION bigint_working(val BIGINT)
+   RETURNS BIGINT AS $$
+    return val - 1n;
+   $$ LANGUAGE pljs STABLE STRICT;
+SELECT bigint_working(9223372036854775807);
+   bigint_working    
+---------------------
+ 9223372036854775806
+(1 row)
+
+SELECT bigint_working(32);
+ bigint_working 
+----------------
+             31
+(1 row)
+
+-- a BigInt that will fail on any value
+CREATE OR REPLACE FUNCTION bigint_failing(val BIGINT)
+   RETURNS BIGINT AS $$
+    return val - 1;
+   $$ LANGUAGE pljs STABLE STRICT;
+SELECT bigint_failing(9223372036854775807);
+ERROR:  execution error
+DETAIL:  TypeError: cannot convert to bigint
+    at bigint_failing (<function>:3)
+
+-- BigInt as Numeric
+CREATE OR REPLACE FUNCTION bigint_numeric(a INT8, b INT8)
+   RETURNS NUMERIC AS $$
+    return a ** b;
+   $$ LANGUAGE pljs STABLE STRICT;
+SELECT bigint_numeric(20, 200);
+                                                                                                                            bigint_numeric                                                                                                                             
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ 160693804425899027554196209234116260252220299378279283530137600000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+(1 row)
+
