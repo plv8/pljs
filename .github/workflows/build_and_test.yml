@@ -51,4 +51,6 @@ jobs:
       - name: Print regression.diffs if regression tests failed
         if: failure() && steps.regression-tests.outcome != 'success'
         run: |
+          ls -l
+          ls -l pljs
           cat pljs/regression.diffs

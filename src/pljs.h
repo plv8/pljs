@@ -7,6 +7,7 @@
 #include "access/tupdesc.h"
 #include "executor/spi.h"
 #include "fmgr.h"
+#include "funcapi.h"
 #include "nodes/params.h"
 #include "parser/parse_node.h"
 
@@ -48,10 +49,12 @@ typedef struct pljs_function_cache_value {
   bool trigger;
   Oid user_id;
   int nargs;
+  bool is_srf;
   char proname[NAMEDATALEN];
   Oid argtypes[FUNC_MAX_ARGS];
   char argmodes[FUNC_MAX_ARGS];
   char *prosrc;
+  TypeFuncClass typeclass;
 } pljs_function_cache_value;
 
 typedef struct pljs_param_state {
@@ -59,6 +62,13 @@ typedef struct pljs_param_state {
   int nparams;
   MemoryContext memory_context;
 } pljs_param_state;
+
+typedef struct pljs_return_state {
+  Tuplestorestate *tuple_store_state;
+  TupleDesc tuple_desc;
+  Oid rettype;
+  bool is_composite;
+} pljs_return_state;
 
 // Expanded type definitions for pljs.
 typedef struct pljs_type {
@@ -91,9 +101,10 @@ typedef struct pljs_func {
   Oid user_id; // the user id
 
   bool trigger;
+  bool is_srf;                  // are we a set returning function?
   int inargs;                   // the number of input arguments
   int nargs;                    // the total number of arguments
-  bool is_srf;                  // are we a set returning function?
+  TypeFuncClass typeclass;      // used for SRF
   Oid rettype;                  // the return type
   Oid argtypes[FUNC_MAX_ARGS];  // the types of the argument passed
   char argmodes[FUNC_MAX_ARGS]; // mode of each argument
@@ -141,8 +152,10 @@ Datum pljs_jsvalue_to_array(JSValue, pljs_type *, JSContext *,
                             FunctionCallInfo);
 Datum pljs_jsvalue_to_datum(JSValue, Oid, JSContext *, FunctionCallInfo,
                             bool *);
+bool pljs_jsvalue_object_contains_all_column_names(JSValue val, JSContext *ctx,
+                                                   TupleDesc tupdesc);
 Datum pljs_jsvalue_to_record(JSValue val, pljs_type *type, JSContext *ctx,
-                             bool *is_null, TupleDesc);
+                             bool *is_null, TupleDesc, Tuplestorestate *);
 JSValue values_to_array(JSContext *, JSValue *, int, int);
 JSValue tuple_to_jsvalue(JSContext *ctx, TupleDesc, HeapTuple);
 JSValue spi_result_to_jsvalue(JSContext *, int);
@@ -150,3 +163,5 @@ JSValue spi_result_to_jsvalue(JSContext *, int);
 void pljs_variable_param_setup(ParseState *, void *);
 ParamListInfo pljs_setup_variable_paramlist(pljs_param_state *, Datum *,
                                             char *);
+
+extern JSClassID js_return_statement_handle_id;

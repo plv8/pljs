@@ -17,6 +17,16 @@ DATA = pljs.control pljs--$(PLJS_VERSION).sql
 PG_CFLAGS += -fPIC -Wall -Wextra -Wno-unused-parameter -Wno-declaration-after-statement -Wno-cast-function-type -std=c11 -DPLJS_VERSION=\"$(PLJS_VERSION)\"
 SHLIB_LINK = -Ldeps/quickjs -lquickjs
 
+ifeq ($(DEBUG), 1)
+PG_CFLAGS += -g
+SHLIB_LINK += -g
+endif
+
+ifeq ($(DEBUG_MEMORY), 1)
+PG_CFLAGS += -fno-omit-frame-pointer -fsanitize=address
+PG_SHLIB_LINK += -fsanitize=address
+endif
+
 REGRESS = init-extension function json jsonb json_conv types bytea context \
 	cursor array_spread plv8_regressions memory_limits inline composites \
 	trigger procedure find_function

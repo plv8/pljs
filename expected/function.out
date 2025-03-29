@@ -145,3 +145,97 @@ SELECT * FROM return_record(1, 'a') AS t(i integer, t text);
  1 | a
 (1 row)
 
+CREATE FUNCTION set_of_records() RETURNS SETOF rec AS
+$$
+	pljs.return_next( { "i": 1, "t": "a" } );
+	pljs.return_next( { "i": 2, "t": "b" } );
+	pljs.return_next( { "i": 3, "t": "c" } );
+$$
+LANGUAGE pljs;
+SELECT * FROM set_of_records();
+ i | t 
+---+---
+ 1 | a
+ 2 | b
+ 3 | c
+(3 rows)
+
+CREATE FUNCTION set_of_record_but_non_obj() RETURNS SETOF rec AS
+$$
+	pljs.return_next( "abc" );
+$$
+LANGUAGE pljs;
+SELECT * FROM set_of_record_but_non_obj();
+ERROR:  execution error
+DETAIL:  Error: argument must be an object
+    at set_of_record_but_non_obj (<function>:3)
+
+CREATE FUNCTION set_of_integers() RETURNS SETOF integer AS
+$$
+	pljs.return_next( 1 );
+	pljs.return_next( 2 );
+	pljs.return_next( 3 );
+$$
+LANGUAGE pljs;
+SELECT * FROM set_of_integers();
+ set_of_integers 
+-----------------
+               1
+               2
+               3
+(3 rows)
+
+CREATE FUNCTION set_of_nest() RETURNS SETOF float AS
+$$
+	pljs.return_next( -0.2 );
+	var rows = pljs.execute( "SELECT set_of_integers() AS i" );
+	pljs.return_next( rows[0].i );
+	return 0.2;
+$$
+LANGUAGE pljs;
+SELECT * FROM set_of_nest();
+ set_of_nest 
+-------------
+        -0.2
+           1
+         0.2
+(3 rows)
+
+CREATE FUNCTION set_of_unnamed_records() RETURNS SETOF record AS
+$$
+	return [ { i: true } ];
+$$
+LANGUAGE pljs;
+SELECT set_of_unnamed_records();
+ERROR:  function returning record called in context that cannot accept type record
+SELECT * FROM set_of_unnamed_records() t (i bool);
+ i 
+---
+ t
+(1 row)
+
+CREATE OR REPLACE FUNCTION set_of_unnamed_records() RETURNS SETOF record AS
+$$
+    pljs.return_next({"a": 1, "b": 2});
+    return;
+$$ LANGUAGE pljs;
+-- not enough fields specified
+SELECT * FROM set_of_unnamed_records() AS x(a int);
+ a 
+---
+ 1
+(1 row)
+
+-- field names mismatch
+SELECT * FROM set_of_unnamed_records() AS x(a int, c int);
+ERROR:  execution error
+DETAIL:  Error: field name / property name mismatch
+    at set_of_unnamed_records (<function>:3)
+
+-- name counts and values match
+SELECT * FROM set_of_unnamed_records() AS x(a int, b int);
+ a | b 
+---+---
+ 1 | 2
+(1 row)
+

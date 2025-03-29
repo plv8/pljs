@@ -16,6 +16,8 @@
 
 #include "pljs.h"
 
+#include <string.h>
+
 // helper functions that should really exist as part of quickjs.
 static JSClassID JS_CLASS_OBJECT = 1;
 static JSClassID JS_CLASS_ARRAY_BUFFER = 19;
@@ -305,6 +307,7 @@ JSValue pljs_datum_to_jsvalue(Datum arg, Oid argtype, JSContext *ctx) {
   case BYTEAOID: {
     void *p = PG_DETOAST_DATUM_COPY(arg);
     char *buf = palloc(VARSIZE_ANY_EXHDR(p) + 1);
+
     memcpy(buf, VARDATA(p), VARSIZE_ANY_EXHDR(p));
 
     return_result = JS_NewStringLen(ctx, buf, VARSIZE_ANY_EXHDR(p));
@@ -333,6 +336,7 @@ Datum pljs_jsvalue_to_array(JSValue val, pljs_type *type, JSContext *ctx,
 
   values = (Datum *)palloc(sizeof(Datum) * array_length);
   nulls = (bool *)palloc(sizeof(bool) * array_length);
+
   memset(nulls, 0, sizeof(bool) * array_length);
 
   ndims[0] = array_length;
@@ -356,10 +360,54 @@ Datum pljs_jsvalue_to_array(JSValue val, pljs_type *type, JSContext *ctx,
   return PointerGetDatum(result);
 }
 
+bool pljs_jsvalue_object_contains_all_column_names(JSValue val, JSContext *ctx,
+                                                   TupleDesc tupdesc) {
+  MemoryContext property_context = AllocSetContextCreate(
+      CurrentMemoryContext, "PLJS Column Name Context", ALLOCSET_SMALL_SIZES);
+  MemoryContext old_context = MemoryContextSwitchTo(property_context);
+
+  uint32_t object_keys_length = 0;
+  char **names = NULL;
+  JSPropertyEnum *tab;
+
+  if (JS_GetOwnPropertyNames(ctx, &tab, &object_keys_length, val,
+                             JS_GPN_STRING_MASK) < 0) {
+    return false;
+  }
+
+  for (int16 c = 0; c < tupdesc->natts; c++) {
+    if (TupleDescAttr(tupdesc, c)->attisdropped) {
+      continue;
+    }
+
+    char *colname = NameStr(TupleDescAttr(tupdesc, c)->attname);
+
+    // Check to see if the key exists in the object
+    bool found = false;
+    for (uint32_t object_key = 0; object_key < object_keys_length;
+         object_key++) {
+      if (strcmp(colname, JS_AtomToCString(ctx, tab[object_key].atom)) == 0) {
+        found = true;
+        break;
+      }
+    }
+
+    MemoryContextSwitchTo(old_context);
+
+    MemoryContextDelete(property_context);
+
+    if (!found) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
 Datum pljs_jsvalue_to_record(JSValue val, pljs_type *type, JSContext *ctx,
-                             bool *is_null, TupleDesc tupdesc) {
+                             bool *is_null, TupleDesc tupdesc,
+                             Tuplestorestate *tupstore) {
   Datum result = 0;
-  Oid rettype = type->typid;
 
   if (JS_IsNull(val) || JS_IsUndefined(val)) {
     *is_null = true;
@@ -370,6 +418,8 @@ Datum pljs_jsvalue_to_record(JSValue val, pljs_type *type, JSContext *ctx,
   PG_TRY();
   {
     if (tupdesc == NULL) {
+      Oid rettype = type->typid;
+
       tupdesc = lookup_rowtype_tupdesc(rettype, -1);
       cleanup_tupdesc = true;
     }
@@ -381,6 +431,7 @@ Datum pljs_jsvalue_to_record(JSValue val, pljs_type *type, JSContext *ctx,
   if (tupdesc != NULL) {
     Datum *values = (Datum *)palloc(sizeof(Datum) * tupdesc->natts);
     bool *nulls = (bool *)palloc(sizeof(bool) * tupdesc->natts);
+
     memset(nulls, 0, sizeof(bool) * tupdesc->natts);
 
     for (int16 c = 0; c < tupdesc->natts; c++) {
@@ -390,6 +441,7 @@ Datum pljs_jsvalue_to_record(JSValue val, pljs_type *type, JSContext *ctx,
       }
 
       char *colname = NameStr(TupleDescAttr(tupdesc, c)->attname);
+
       JSValue o = JS_GetPropertyStr(ctx, val, colname);
 
       if (JS_IsNull(o) || JS_IsUndefined(o)) {
@@ -401,7 +453,12 @@ Datum pljs_jsvalue_to_record(JSValue val, pljs_type *type, JSContext *ctx,
                                         NULL, &nulls[c]);
     }
 
-    result = HeapTupleGetDatum(heap_form_tuple(tupdesc, values, nulls));
+    if (tupstore != NULL) {
+      result = (Datum)0;
+      tuplestore_putvalues(tupstore, tupdesc, values, nulls);
+    } else {
+      result = HeapTupleGetDatum(heap_form_tuple(tupdesc, values, nulls));
+    }
 
     if (cleanup_tupdesc) {
       ReleaseTupleDesc(tupdesc);
@@ -428,7 +485,7 @@ Datum pljs_jsvalue_to_datum(JSValue val, Oid rettype, JSContext *ctx,
   }
 
   if (type.is_composite) {
-    return pljs_jsvalue_to_record(val, &type, ctx, isnull, NULL);
+    return pljs_jsvalue_to_record(val, &type, ctx, isnull, NULL, NULL);
   }
 
   if (JS_VALUE_GET_TAG(val) == JS_TAG_NULL) {
@@ -600,6 +657,7 @@ Datum pljs_jsvalue_to_datum(JSValue val, Oid rettype, JSContext *ctx,
         Is_ArrayType(val, JS_CLASS_INT8_ARRAY)) {
       pbytes_per_element = 1;
       psize = pbytes_per_element * length;
+
       uint8_t *array_copy = palloc(pbytes_per_element * length);
 
       for (size_t i = 0; i < length; i++) {
@@ -622,6 +680,7 @@ Datum pljs_jsvalue_to_datum(JSValue val, Oid rettype, JSContext *ctx,
                Is_ArrayType(val, JS_CLASS_INT16_ARRAY)) {
       pbytes_per_element = 2;
       psize = pbytes_per_element * length;
+
       uint16_t *array_copy = palloc(pbytes_per_element * length);
 
       for (size_t i = 0; i < length; i++) {
@@ -644,6 +703,7 @@ Datum pljs_jsvalue_to_datum(JSValue val, Oid rettype, JSContext *ctx,
                Is_ArrayType(val, JS_CLASS_INT32_ARRAY)) {
       pbytes_per_element = 4;
       psize = pbytes_per_element * length;
+
       uint32_t *array_copy = palloc(pbytes_per_element * length);
 
       for (size_t i = 0; i < pbytes_per_element * length; i++) {
@@ -665,6 +725,7 @@ Datum pljs_jsvalue_to_datum(JSValue val, Oid rettype, JSContext *ctx,
 
     } else if (Is_ArrayBuffer(val)) {
       uint8_t *array_copy = JS_GetArrayBuffer(ctx, &psize, val);
+
       buffer = palloc(VARHDRSZ + psize);
 
       SET_VARSIZE(buffer, psize + VARHDRSZ);
@@ -675,6 +736,7 @@ Datum pljs_jsvalue_to_datum(JSValue val, Oid rettype, JSContext *ctx,
       const char *str = JS_ToCStringLen(ctx, &str_length, val);
 
       buffer = palloc(str_length + VARHDRSZ);
+
       SET_VARSIZE(buffer, str_length + VARHDRSZ);
       memcpy(VARDATA(buffer), str, str_length);
 

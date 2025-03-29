@@ -39,6 +39,7 @@ static JSValue pljs_rollback(JSContext *, JSValueConst, int, JSValueConst *);
 
 static JSValue pljs_find_function(JSContext *, JSValueConst, int,
                                   JSValueConst *);
+static JSValue pljs_return_next(JSContext *, JSValueConst, int, JSValueConst *);
 
 void pljs_setup_namespace(JSContext *ctx) {
   // get a copy of the global object.
@@ -64,6 +65,9 @@ void pljs_setup_namespace(JSContext *ctx) {
   JS_SetPropertyStr(
       ctx, pljs, "find_function",
       JS_NewCFunction(ctx, pljs_find_function, "find_function", 1));
+
+  JS_SetPropertyStr(ctx, pljs, "return_next",
+                    JS_NewCFunction(ctx, pljs_return_next, "return_next", 0));
 
   JS_SetPropertyStr(ctx, global_obj, "pljs", pljs);
 
@@ -243,6 +247,9 @@ static int pljs_execute_params(const char *sql, JSValue params,
 
 // class id for prepared statement handles.
 static JSClassID js_prepared_statement_handle_id;
+
+// class id for return_next calls, must be global.
+JSClassID js_return_statement_handle_id;
 
 // class id for cursor handles.
 static JSClassID js_cursor_handle_id;
@@ -792,9 +799,53 @@ static JSValue pljs_find_function(JSContext *ctx, JSValueConst this_val,
     appendStringInfo(&str, "javascript function is not found for \"%s\"",
                      signature);
 
-    return js_throw(ctx, str.data);
+    return js_throw(ctx, NameStr(str));
   }
   PG_END_TRY();
 
   return func;
+}
+
+static JSValue pljs_return_next(JSContext *ctx, JSValueConst this_val, int argc,
+                                JSValueConst *argv) {
+  const char *sql;
+  JSValue params = {0};
+  int nparams;
+  Oid *types = NULL;
+  SPIPlanPtr initial = NULL, saved = NULL;
+  pljs_return_state *retstate = NULL;
+
+  JSValue global_obj = JS_GetGlobalObject(ctx);
+
+  JSValue pljs = JS_GetPropertyStr(ctx, global_obj, "pljs");
+  JSValue ptr = JS_GetPropertyStr(ctx, pljs, "return_context");
+
+  retstate = JS_GetOpaque(ptr, js_return_statement_handle_id);
+
+  if (retstate == NULL) {
+    return js_throw(ctx,
+                    "return_next called in context that cannot accept a set");
+  }
+
+  if (retstate->is_composite) {
+    if (!JS_IsObject(argv[0])) {
+      return js_throw(ctx, "argument must be an object");
+    }
+
+    if (!pljs_jsvalue_object_contains_all_column_names(argv[0], ctx,
+                                                       retstate->tuple_desc)) {
+      return js_throw(ctx, "field name / property name mismatch");
+    }
+
+    bool is_null;
+    pljs_jsvalue_to_record(argv[0], NULL, ctx, &is_null, retstate->tuple_desc,
+                           retstate->tuple_store_state);
+  } else {
+    bool is_null;
+    Datum result = pljs_jsvalue_to_datum(
+        argv[0], retstate->tuple_desc->attrs[0].atttypid, ctx, NULL, &is_null);
+    tuplestore_putvalues(retstate->tuple_store_state, retstate->tuple_desc,
+                         &result, &is_null);
+  }
+  return JS_UNDEFINED;
 }

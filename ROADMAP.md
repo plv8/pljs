@@ -13,7 +13,7 @@ Current Release Version: `0.8`
 - [x] functions
 - [x] inline functions
 - [x] triggers
-- [x] type conversion and coercian
+- [x] type conversion and coercion
 - [x] SQL executions
 - [x] cursors
 - [x] memory management
@@ -26,7 +26,7 @@ Current Release Version: `0.8`
 ## Major Features
 
 - [x] caching of contexts and functions
-- [ ] set returning functions
+- [x] set returning functions
 - [ ] windows
 - [ ] startup functions
 - [x] procedures/transactions

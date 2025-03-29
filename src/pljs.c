@@ -31,6 +31,8 @@ PG_FUNCTION_INFO_V1(pljs_inline_handler);
 
 static Datum pljs_call_function(PG_FUNCTION_ARGS, pljs_context *context,
                                 JSValueConst *argv);
+static Datum pljs_call_srf_function(PG_FUNCTION_ARGS, pljs_context *context,
+                                    JSValueConst *argv);
 
 static void pljs_call_anonymous_function(JSContext *, const char *);
 static Datum pljs_call_trigger(FunctionCallInfo fcinfo, pljs_context *context);
@@ -205,7 +207,7 @@ static bool setup_function(FunctionCallInfo fcinfo, HeapTuple proctuple,
   pg_proc_entry = (Form_pg_proc)GETSTRUCT(proctuple);
 
   // Get the actual name of the procedure.
-  strlcpy(pljs_function->proname, NameStr(pg_proc_entry->proname), NAMEDATALEN);
+  memcpy(pljs_function->proname, NameStr(pg_proc_entry->proname), NAMEDATALEN);
 
   // Are we building a set-returning function?  If so, a special case.
   pljs_function->is_srf = pg_proc_entry->proretset;
@@ -218,6 +220,10 @@ static bool setup_function(FunctionCallInfo fcinfo, HeapTuple proctuple,
     pljs_function->rettype = pg_proc_entry->prorettype;
   }
 
+  // Get the call type class
+  if (fcinfo) {
+    pljs_function->typeclass = get_call_result_type(fcinfo, NULL, NULL);
+  }
   // Get all of the argument information.
   nargs = get_func_arg_info(proctuple, &argtypes, &arguments, &argmodes);
 
@@ -399,7 +405,11 @@ Datum pljs_call_handler(PG_FUNCTION_ARGS) {
     JSValueConst *argv =
         convert_arguments_to_javascript(fcinfo, proctuple, &context);
 
-    retval = pljs_call_function(fcinfo, &context, argv);
+    if (context.function->is_srf) {
+      retval = pljs_call_srf_function(fcinfo, &context, argv);
+    } else {
+      retval = pljs_call_function(fcinfo, &context, argv);
+    }
   }
 
   return retval;
@@ -721,7 +731,8 @@ static Datum pljs_call_trigger(FunctionCallInfo fcinfo, pljs_context *context) {
 
     pljs_type type;
     pljs_type_fill(&type, context->function->rettype);
-    Datum d = pljs_jsvalue_to_record(ret, &type, context->ctx, NULL, tupdesc);
+    Datum d =
+        pljs_jsvalue_to_record(ret, &type, context->ctx, NULL, tupdesc, NULL);
 
     HeapTupleHeader header = DatumGetHeapTupleHeader(d);
 
@@ -743,8 +754,10 @@ static Datum pljs_call_trigger(FunctionCallInfo fcinfo, pljs_context *context) {
  */
 static Datum pljs_call_function(FunctionCallInfo fcinfo, pljs_context *context,
                                 JSValueConst *argv) {
+  pljs_return_state *state = NULL;
   MemoryContext execution_context = AllocSetContextCreate(
-      CurrentMemoryContext, "PLJS Memory Context", ALLOCSET_SMALL_SIZES);
+      CurrentMemoryContext, "PLJS Memory Context (pljs_call_function)",
+      ALLOCSET_SMALL_SIZES);
   MemoryContext old_context = MemoryContextSwitchTo(execution_context);
 
   Oid fn_oid = fcinfo->flinfo->fn_oid;
@@ -783,7 +796,7 @@ static Datum pljs_call_function(FunctionCallInfo fcinfo, pljs_context *context,
     ereport(ERROR, (errmsg("execution error"), errdetail("%s", error_message)));
 
     /* Shuts up the compiler, since ereports of ERROR stop execution. */
-    PG_RETURN_VOID();
+    return (Datum)0;
   } else {
     Datum datum;
 
@@ -795,7 +808,8 @@ static Datum pljs_call_function(FunctionCallInfo fcinfo, pljs_context *context,
       pljs_type type;
       pljs_type_fill(&type, rettype);
 
-      datum = pljs_jsvalue_to_record(ret, &type, context->ctx, NULL, tupdesc);
+      datum =
+          pljs_jsvalue_to_record(ret, &type, context->ctx, NULL, tupdesc, NULL);
     } else {
       bool is_null;
       datum =
@@ -807,6 +821,153 @@ static Datum pljs_call_function(FunctionCallInfo fcinfo, pljs_context *context,
     MemoryContextSwitchTo(old_context);
 
     return datum;
+  }
+}
+
+static Datum pljs_call_srf_function(FunctionCallInfo fcinfo,
+                                    pljs_context *context, JSValueConst *argv) {
+  pljs_return_state *state = NULL;
+  MemoryContext execution_context = AllocSetContextCreate(
+      CurrentMemoryContext, "PLJS Memory Context (pljs_call_srf_function)",
+      ALLOCSET_SMALL_SIZES);
+  MemoryContext old_context = MemoryContextSwitchTo(execution_context);
+
+  bool nonatomic = fcinfo->context && IsA(fcinfo->context, CallContext) &&
+                   !castNode(CallContext, fcinfo->context)->atomic;
+  if (SPI_connect_ext(nonatomic ? SPI_OPT_NONATOMIC : 0) != SPI_OK_CONNECT) {
+    elog(ERROR, "could not connect to spi manager");
+  }
+
+  ReturnSetInfo *rsinfo = (ReturnSetInfo *)fcinfo->resultinfo;
+
+  if (rsinfo == NULL || !IsA(rsinfo, ReturnSetInfo)) {
+    ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                    errmsg("set-valued function called in context that cannot "
+                           "accept a set")));
+  }
+
+  if (!(rsinfo->allowedModes & SFRM_Materialize)) {
+    ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                    errmsg("materialize mode required, but it is not "
+                           "allowed in this context")));
+  }
+
+  if (context->function->rettype == RECORDOID) {
+    if (context->function->typeclass != TYPEFUNC_COMPOSITE) {
+      ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                      errmsg("function returning record called in context "
+                             "that cannot accept type record")));
+    }
+  }
+
+  MemoryContextSwitchTo(rsinfo->econtext->ecxt_per_query_memory);
+
+  TupleDesc tuple_desc;
+  state = (pljs_return_state *)palloc(sizeof(pljs_return_state));
+
+  get_call_result_type(fcinfo, &state->rettype, &tuple_desc);
+
+  state->tuple_store_state = tuplestore_begin_heap(true, false, work_mem);
+
+  if (!rsinfo->setDesc) {
+    state->tuple_desc = CreateTupleDescCopy(rsinfo->expectedDesc);
+    rsinfo->setDesc = state->tuple_desc;
+  } else {
+    state->tuple_desc = rsinfo->setDesc;
+  }
+
+  state->is_composite = context->function->typeclass == TYPEFUNC_COMPOSITE;
+
+  rsinfo->returnMode = SFRM_Materialize;
+  rsinfo->setResult = state->tuple_store_state;
+
+  MemoryContextSwitchTo(execution_context);
+
+  JSValue handle =
+      JS_NewObjectClass(context->ctx, js_return_statement_handle_id);
+  JS_SetOpaque(handle, state);
+
+  JSValue global_obj = JS_GetGlobalObject(context->ctx);
+
+  JSValue pljs = JS_GetPropertyStr(context->ctx, global_obj, "pljs");
+
+  // Get a copy of the old return_context to set when complete
+  JSValue old_return_context =
+      JS_GetPropertyStr(context->ctx, pljs, "return_context");
+
+  pljs_return_state *old_state =
+      JS_GetOpaque(old_return_context, js_return_statement_handle_id);
+
+  JS_SetPropertyStr(context->ctx, pljs, "return_context", handle);
+
+  JS_SetInterruptHandler(JS_GetRuntime(context->ctx), interrupt_handler, NULL);
+  os_pending_signals &= ~((uint64_t)1 << SIGINT);
+
+  JSValue ret = JS_Call(context->ctx, context->js_function, JS_UNDEFINED,
+                        context->function->inargs, argv);
+
+  SPI_finish();
+
+  if (JS_IsException(ret)) {
+    char *error_message = dump_error(context->ctx);
+
+    JS_FreeValue(context->ctx, ret);
+
+    ereport(ERROR, (errmsg("execution error"), errdetail("%s", error_message)));
+
+    /* Shuts up the compiler, since ereports of ERROR stop execution. */
+    return (Datum)0;
+  } else {
+    // Check to see if we have any values to append
+    if (!JS_IsUndefined(ret) || !JS_IsNull(ret)) {
+      MemoryContextSwitchTo(rsinfo->econtext->ecxt_per_query_memory);
+
+      bool is_null;
+
+      if (state->is_composite) {
+        pljs_jsvalue_to_record(ret, NULL, context->ctx, &is_null,
+                               state->tuple_desc, state->tuple_store_state);
+      } else {
+        if (JS_IsArray(context->ctx, ret)) {
+          for (int i = 0; i < js_array_length(context->ctx, ret); i++) {
+            JSValue val = JS_GetPropertyUint32(context->ctx, ret, i);
+
+            Datum result =
+                pljs_jsvalue_to_datum(val, state->tuple_desc->attrs[0].atttypid,
+                                      context->ctx, NULL, &is_null);
+            tuplestore_putvalues(state->tuple_store_state, state->tuple_desc,
+                                 &result, &is_null);
+          }
+        } else {
+          if (!JS_IsUndefined(ret)) {
+            Datum result =
+                pljs_jsvalue_to_datum(ret, state->tuple_desc->attrs[0].atttypid,
+                                      context->ctx, NULL, &is_null);
+
+            tuplestore_putvalues(state->tuple_store_state, state->tuple_desc,
+                                 &result, &is_null);
+          }
+        }
+      }
+
+      MemoryContextSwitchTo(execution_context);
+    }
+
+    // Set the older return context
+    if (JS_IsUndefined(old_return_context) || JS_IsNull(old_return_context)) {
+      JS_SetPropertyStr(context->ctx, pljs, "return_context", JS_UNDEFINED);
+    } else {
+      handle = JS_NewObjectClass(context->ctx, js_return_statement_handle_id);
+      JS_SetOpaque(handle, old_state);
+      JS_SetPropertyStr(context->ctx, pljs, "return_context", handle);
+    }
+
+    JS_FreeValue(context->ctx, ret);
+
+    // Switch back the original context
+    MemoryContextSwitchTo(old_context);
+
+    return (Datum)0;
   }
 }
 

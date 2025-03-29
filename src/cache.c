@@ -222,9 +222,13 @@ void pljs_function_cache_to_context(pljs_context *context,
   context->js_function = function_entry->fn;
 
   context->function = (pljs_func *)palloc(sizeof(pljs_func));
+
   context->function->fn_oid = function_entry->fn_oid;
   context->function->user_id = function_entry->user_id;
   context->function->trigger = function_entry->trigger;
+  context->function->is_srf = function_entry->is_srf;
+  context->function->typeclass = function_entry->typeclass;
+
   context->js_function = function_entry->fn;
 
   context->function->inargs = function_entry->nargs;
@@ -236,6 +240,7 @@ void pljs_function_cache_to_context(pljs_context *context,
   memcpy(context->function->proname, function_entry->proname, NAMEDATALEN);
 
   context->function->prosrc = (char *)palloc(NAMEDATALEN);
+
   memcpy(context->function->prosrc, function_entry->prosrc, NAMEDATALEN);
 }
 
@@ -255,6 +260,9 @@ void pljs_context_to_function_cache(pljs_function_cache_value *function_entry,
   function_entry->fn_oid = context->function->fn_oid;
   function_entry->user_id = context->function->user_id;
   function_entry->trigger = context->function->trigger;
+  function_entry->is_srf = context->function->is_srf;
+  function_entry->typeclass = context->function->typeclass;
+
   function_entry->fn = context->js_function;
   function_entry->nargs = context->function->inargs;
   for (int i = 0; i < function_entry->nargs; i++) {
@@ -266,6 +274,7 @@ void pljs_context_to_function_cache(pljs_function_cache_value *function_entry,
 
   function_entry->prosrc =
       (char *)palloc(strlen(context->function->prosrc) + 1);
+
   memcpy(function_entry->prosrc, context->function->prosrc,
          strlen(context->function->prosrc));
 
