@@ -743,52 +743,25 @@ static JSValue pljs_find_function(JSContext *ctx, JSValueConst this_val,
   const char *signature = JS_ToCString(ctx, argv[0]);
   JSValue func = JS_UNDEFINED;
 
-  // Stack-allocate FunctionCallInfoBaseData with
-  // space for 2 arguments:
-  LOCAL_FCINFO(fake_fcinfo, 2);
-
-  FmgrInfo flinfo;
-
-  char perm[16];
-  strcpy(perm, "EXECUTE");
-  text *arg = (text *)palloc(8 + VARHDRSZ);
-  memcpy(VARDATA(arg), perm, 8);
-  SET_VARSIZE(arg, 8 + VARHDRSZ);
-  Oid funcoid;
-
   PG_TRY();
   {
-    if (strchr(signature, '(') == NULL) {
-      funcoid = DatumGetObjectId(
-          DirectFunctionCall1(regprocin, CStringGetDatum(signature)));
-    } else {
-      funcoid = DatumGetObjectId(
-          DirectFunctionCall1(regprocedurein, CStringGetDatum(signature)));
-    }
+    Oid funcoid;
 
-    MemSet(&flinfo, 0, sizeof(flinfo));
-    fake_fcinfo->flinfo = &flinfo;
-    flinfo.fn_oid = InvalidOid;
-    flinfo.fn_mcxt = CurrentMemoryContext;
-    fake_fcinfo->nargs = 2;
-    fake_fcinfo->args[0].value = ObjectIdGetDatum(funcoid);
-    fake_fcinfo->args[1].value = PointerGetDatum(arg);
-
-    Datum ret = has_function_privilege_id(fake_fcinfo);
-
-    if (ret == 0) {
-      elog(WARNING, "failed to find or no permission for js function %s",
-           signature);
+    if (!has_permission_to_execute(signature)) {
       return func;
     } else {
-      if (DatumGetBool(ret)) {
-        func = pljs_find_js_function(funcoid);
-
-        if (JS_IsUndefined(func)) {
-          elog(ERROR, "javascript function is not found for \"%s\"", signature);
-        }
+      if (strchr(signature, '(') == NULL) {
+        funcoid = DatumGetObjectId(
+            DirectFunctionCall1(regprocin, CStringGetDatum(signature)));
       } else {
-        elog(WARNING, "no permission to execute js function %s", signature);
+        funcoid = DatumGetObjectId(
+            DirectFunctionCall1(regprocedurein, CStringGetDatum(signature)));
+      }
+
+      func = pljs_find_js_function(funcoid, ctx);
+
+      if (JS_IsUndefined(func)) {
+        elog(ERROR, "javascript function is not found for \"%s\"", signature);
       }
     }
   }
@@ -808,11 +781,6 @@ static JSValue pljs_find_function(JSContext *ctx, JSValueConst this_val,
 
 static JSValue pljs_return_next(JSContext *ctx, JSValueConst this_val, int argc,
                                 JSValueConst *argv) {
-  const char *sql;
-  JSValue params = {0};
-  int nparams;
-  Oid *types = NULL;
-  SPIPlanPtr initial = NULL, saved = NULL;
   pljs_return_state *retstate = NULL;
 
   JSValue global_obj = JS_GetGlobalObject(ctx);

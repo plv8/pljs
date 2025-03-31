@@ -21,10 +21,6 @@
 
 PG_MODULE_MAGIC;
 
-Datum pljs_call_handler(PG_FUNCTION_ARGS);
-Datum pljs_call_validator(PG_FUNCTION_ARGS);
-Datum pljs_inline_handler(PG_FUNCTION_ARGS);
-
 PG_FUNCTION_INFO_V1(pljs_call_handler);
 PG_FUNCTION_INFO_V1(pljs_call_validator);
 PG_FUNCTION_INFO_V1(pljs_inline_handler);
@@ -36,79 +32,15 @@ static Datum pljs_call_srf_function(PG_FUNCTION_ARGS, pljs_context *context,
 
 static void pljs_call_anonymous_function(JSContext *, const char *);
 static Datum pljs_call_trigger(FunctionCallInfo fcinfo, pljs_context *context);
-
-/**
- * @brief Converts a javascript error into a string.
- *
- * Takes a javascript context and converts it into a string,
- * allocating the memory needed in the currect memory context.
- *
- * @returns @c char * as an error message.
- */
-static char *dump_error(JSContext *ctx) {
-  JSValue exception_val, val;
-  const char *stack;
-  const char *str;
-  bool is_error;
-  char *ret = NULL;
-  size_t s1, s2;
-
-  exception_val = JS_GetException(ctx);
-
-  /* In the case of OOM, a null exception is thrown. */
-  if (JS_IsNull(exception_val)) {
-    char *oom = palloc(14);
-    strcpy(oom, "out of memory");
-
-    JS_FreeValue(ctx, exception_val);
-
-    return oom;
-  }
-
-  is_error = JS_IsError(ctx, exception_val);
-  str = JS_ToCStringLen(ctx, &s1, exception_val);
-
-  if (!str) {
-    elog(DEBUG3, "error thrown but no error message");
-    return NULL;
-  }
-
-  if (!is_error) {
-    ret = (char *)palloc((s1 + 8) * sizeof(char));
-    sprintf(ret, "Throw:\n%s", str);
-  } else {
-    val = JS_GetPropertyStr(ctx, exception_val, "stack");
-
-    if (!JS_IsUndefined(val)) {
-      stack = JS_ToCStringLen(ctx, &s2, val);
-
-      ret = (char *)palloc((s1 + s2 + 2) * sizeof(char));
-      sprintf(ret, "%s\n%s", str, stack);
-      JS_FreeCString(ctx, stack);
-    }
-
-    JS_FreeValue(ctx, val);
-  }
-
-  JS_FreeCString(ctx, str);
-  JS_FreeValue(ctx, exception_val);
-
-  return ret;
-}
+static void signal_handler(int sig_num);
+static int interrupt_handler(JSRuntime *rt, void *opaque);
 
 /** \brief QuickJS Runtime */
 JSRuntime *rt = NULL;
-static uint64_t os_pending_signals = 0;
 
 pljs_configuration configuration = {0};
 
-static void signal_handler(int sig_num) {
-  os_pending_signals |= ((uint64_t)1 << sig_num);
-}
-
-static int interrupt_handler(JSRuntime *rt, void *opaque) {
-  return (os_pending_signals >> SIGINT) & 1;
-}
+static uint64_t os_pending_signals = 0;
 
 /**
  * @brief PostgreSQL extension initialization function.
@@ -165,15 +97,84 @@ void pljs_guc_init(void) {
 }
 
 /**
+ * @brief Converts a Javascript error into a string.
+ *
+ * Takes a javascript context and converts it into a string,
+ * allocating the memory needed in the currect memory context.
+ *
+ * @param ctx #JSContext - Javascript context with the error
+ * @returns @c char * as an error message
+ */
+static char *dump_error(JSContext *ctx) {
+  JSValue exception_val, val;
+  const char *stack;
+  const char *str;
+  bool is_error;
+  char *ret = NULL;
+  size_t s1, s2;
+
+  exception_val = JS_GetException(ctx);
+
+  /* In the case of OOM, a null exception is thrown. */
+  if (JS_IsNull(exception_val)) {
+    char *oom = palloc(14);
+    strcpy(oom, "out of memory");
+
+    JS_FreeValue(ctx, exception_val);
+
+    return oom;
+  }
+
+  is_error = JS_IsError(ctx, exception_val);
+  str = JS_ToCStringLen(ctx, &s1, exception_val);
+
+  if (!str) {
+    elog(DEBUG3, "error thrown but no error message");
+    return NULL;
+  }
+
+  if (!is_error) {
+    ret = (char *)palloc((s1 + 8) * sizeof(char));
+    sprintf(ret, "Throw:\n%s", str);
+  } else {
+    val = JS_GetPropertyStr(ctx, exception_val, "stack");
+
+    if (!JS_IsUndefined(val)) {
+      stack = JS_ToCStringLen(ctx, &s2, val);
+
+      ret = (char *)palloc((s1 + s2 + 2) * sizeof(char));
+      sprintf(ret, "%s\n%s", str, stack);
+      JS_FreeCString(ctx, stack);
+    }
+
+    JS_FreeValue(ctx, val);
+  }
+
+  JS_FreeCString(ctx, str);
+  JS_FreeValue(ctx, exception_val);
+
+  return ret;
+}
+
+static void signal_handler(int sig_num) {
+  os_pending_signals |= ((uint64_t)1 << sig_num);
+}
+
+static int interrupt_handler(JSRuntime *rt, void *opaque) {
+  return (os_pending_signals >> SIGINT) & 1;
+}
+
+/**
  * @brief Set up the pljs_context.
  *
  * Sets up the pljs_context with the function and any needed contexts.
+ *
  * @param fcinfo #FunctionCallInfo - optional, allows for the `fn_oid` to be
  * added
- * @param proctuple #HeapTuple - information pointer for the source and argument
- * information
+ * @param proctuple #HeapTuple - information pointer for the source and
+ * argument information
  * @param context #pljs_context - context to set up the function into
- * @returns @c bool of success for failure.
+ * @returns @c bool of success for failure
  */
 static bool setup_function(FunctionCallInfo fcinfo, HeapTuple proctuple,
                            pljs_context *context) {
@@ -212,8 +213,8 @@ static bool setup_function(FunctionCallInfo fcinfo, HeapTuple proctuple,
   // Are we building a set-returning function?  If so, a special case.
   pljs_function->is_srf = pg_proc_entry->proretset;
 
-  // Figure out the return type, we care about this when we are calling directly
-  // from postgres.
+  // Figure out the return type, we care about this when we are calling
+  // directly from postgres.
   if (fcinfo && IsPolymorphicType(pg_proc_entry->prorettype)) {
     pljs_function->rettype = get_fn_expr_rettype(fcinfo->flinfo);
   } else {
@@ -274,9 +275,123 @@ static bool setup_function(FunctionCallInfo fcinfo, HeapTuple proctuple,
 }
 
 /**
- * @brief Converts all function call arguments from postgres to javascript.
+ * @brief Check to see if there is permission to execute a function.
  *
- * Allocates and creates an array of arguments as javascript values.
+ * Searches the catalog for a function and checks to see if the current user
+ * has permission to execute it.
+ *
+ * @param signature @c char *
+ * @returns @c bool
+ */
+bool has_permission_to_execute(const char *signature) {
+  // Stack-allocate FunctionCallInfoBaseData with
+  // space for 2 arguments:
+  LOCAL_FCINFO(fake_fcinfo, 2);
+
+  FmgrInfo flinfo;
+
+  char perm[16];
+  strcpy(perm, "EXECUTE");
+  text *arg = (text *)palloc(8 + VARHDRSZ);
+  memcpy(VARDATA(arg), perm, 8);
+  SET_VARSIZE(arg, 8 + VARHDRSZ);
+  Oid funcoid;
+
+  if (strchr(signature, '(') == NULL) {
+    funcoid = DatumGetObjectId(
+        DirectFunctionCall1(regprocin, CStringGetDatum(signature)));
+  } else {
+    funcoid = DatumGetObjectId(
+        DirectFunctionCall1(regprocedurein, CStringGetDatum(signature)));
+  }
+
+  MemSet(&flinfo, 0, sizeof(flinfo));
+  fake_fcinfo->flinfo = &flinfo;
+  flinfo.fn_oid = InvalidOid;
+  flinfo.fn_mcxt = CurrentMemoryContext;
+  fake_fcinfo->nargs = 2;
+  fake_fcinfo->args[0].value = ObjectIdGetDatum(funcoid);
+  fake_fcinfo->args[1].value = PointerGetDatum(arg);
+
+  Datum ret = has_function_privilege_id(fake_fcinfo);
+
+  if (ret == 0) {
+    elog(WARNING, "failed to find or no permission for js function %s",
+         signature);
+    return false;
+  } else {
+    return true;
+  }
+}
+
+/**
+ * @brief Validates and runs the `pljs.start_proc` if there is one.
+ *
+ * Finds, verifies, and executes a `pljs.start_proc` if one is set.
+ * This is executed whenever a new context is created.
+ */
+static void pljs_setup_start_proc(JSContext *ctx) {
+  JSValue func = JS_UNDEFINED;
+
+  // Get a copy of the current memory context, we will need to switch to it in
+  // case of an error.
+  MemoryContext memory_context = CurrentMemoryContext;
+
+  PG_TRY();
+  {
+    // Check to see if we have permission to execute the startup procedure
+    if (has_permission_to_execute(configuration.start_proc)) {
+      Oid funcoid;
+      if (strchr(configuration.start_proc, '(') == NULL) {
+        funcoid = DatumGetObjectId(DirectFunctionCall1(
+            regprocin, CStringGetDatum(configuration.start_proc)));
+      } else {
+        funcoid = DatumGetObjectId(DirectFunctionCall1(
+            regprocedurein, CStringGetDatum(configuration.start_proc)));
+      }
+
+      elog(NOTICE, "searching for function");
+      func = pljs_find_js_function(funcoid, ctx);
+    }
+  }
+  PG_CATCH();
+  {
+    ErrorData *edata;
+
+    // Switch out of the error memory context and back into the execution
+    // context to get the error details
+    MemoryContextSwitchTo(memory_context);
+
+    edata = CopyErrorData();
+    elog(WARNING, "failed to find pljs function %s: ", edata->message);
+    FlushErrorState();
+    FreeErrorData(edata);
+
+    return;
+  }
+  PG_END_TRY();
+
+  if (JS_IsUndefined(func)) {
+    elog(DEBUG3, "javascript function is not found for \"%s\"",
+         configuration.start_proc);
+  } else {
+    JSValue ret = JS_Call(ctx, func, JS_UNDEFINED, 0, NULL);
+    if (JS_IsException(ret)) {
+      ereport(ERROR, (errmsg("start proc execution error"),
+                      errdetail("%s", dump_error(ctx))));
+    }
+  }
+}
+
+/**
+ * @brief Converts all function call arguments from postgres to Javascript.
+ *
+ * Allocates and creates an array of arguments as Javascript values.
+ *
+ * @param fcinfo #FunctionCallInfo
+ * @param proctuple #HeapTuple
+ * @param context #pljs_context
+ * @returns an array of #JSValueConst values of the function arguments
  */
 static JSValueConst *convert_arguments_to_javascript(FunctionCallInfo fcinfo,
                                                      HeapTuple proctuple,
@@ -328,16 +443,16 @@ static JSValueConst *convert_arguments_to_javascript(FunctionCallInfo fcinfo,
  * success, or throwing an error on exception.  Calls can be of types
  * `function`, `procedure`, `do`, or `trigger`, and are dispatched from this
  * entry point.
+ *
  * @param PG_FUNCTION_ARGS Pointer to struct FunctionCallInfoBaseData
- * @returns @c #Datum of the result.
+ * @returns #Datum of the result
  */
 Datum pljs_call_handler(PG_FUNCTION_ARGS) {
   Oid fn_oid = fcinfo->flinfo->fn_oid;
   HeapTuple proctuple;
   JSContext *ctx;
   Datum retval;
-  bool nonatomic = fcinfo->context && IsA(fcinfo->context, CallContext) &&
-                   !castNode(CallContext, fcinfo->context)->atomic;
+
   bool is_trigger = CALLED_AS_TRIGGER(fcinfo);
   pljs_context context = {0};
 
@@ -368,6 +483,13 @@ Datum pljs_call_handler(PG_FUNCTION_ARGS) {
       // Set up the namespace, globals and functions available inside the
       // context.
       pljs_setup_namespace(ctx);
+
+      // Check to see if there is a start_proc, if there is, attempt to apply
+      // it.
+      if (configuration.start_proc != NULL &&
+          strlen(configuration.start_proc) != 0) {
+        pljs_setup_start_proc(ctx);
+      }
 
       // Save the context in the cache for this user id.
       pljs_cache_context_add(GetUserId(), ctx);
@@ -416,11 +538,13 @@ Datum pljs_call_handler(PG_FUNCTION_ARGS) {
 }
 
 /**
- * #brief Execute an inline javascript call.
+ * @brief Execute an inline javascript call.
  *
  * Executes whatever is passed as a `DO` call in postgres, does
  * not accept any arguments to the call, nor allow for any returned
  * data.
+ *
+ * @returns #Datum containing `VOID`
  */
 Datum pljs_inline_handler(PG_FUNCTION_ARGS) {
   pljs_context_cache_value *entry = pljs_cache_context_find(GetUserId());
@@ -445,6 +569,13 @@ Datum pljs_inline_handler(PG_FUNCTION_ARGS) {
     // context.
     pljs_setup_namespace(ctx);
 
+    // Check to see if there is a start_proc, if there is, attempt to apply
+    // it.
+    if (configuration.start_proc != NULL &&
+        strlen(configuration.start_proc) != 0) {
+      pljs_setup_start_proc(ctx);
+    }
+
     // Save the context
     pljs_cache_context_add(GetUserId(), ctx);
   }
@@ -466,7 +597,8 @@ Datum pljs_inline_handler(PG_FUNCTION_ARGS) {
  *
  * Calls a Javascript function returning the result on success, or throwing
  * an error on exception.
- * @returns @c #Datum of the result.
+ *
+ * @returns #Datum of type `VOID`
  */
 Datum pljs_call_validator(PG_FUNCTION_ARGS) {
   Oid fn_oid = fcinfo->flinfo->fn_oid;
@@ -521,11 +653,12 @@ Datum pljs_call_validator(PG_FUNCTION_ARGS) {
  *
  * Sets up the arguments and code of a javascript function, compiles
  * it, and returns the function itself for use.
+ *
  * @param context #pljs_context - context to compile it into, which
  * also has the current function
  * @param is_trigger #bool - whether it is to be called as a trigger
  * or not, this determines arguments
- * @returns function #JSValue of the function.
+ * @returns #JSValue of the compiled function
  */
 JSValue pljs_compile_function(pljs_context *context, bool is_trigger) {
   StringInfoData src;
@@ -589,6 +722,13 @@ JSValue pljs_compile_function(pljs_context *context, bool is_trigger) {
 
 /**
  * @brief Compile and call an anonymous function.
+ *
+ * Compiles an anonymous function inside the #JSContext passed, then
+ * executes it within the context passed.
+ *
+ * @param ctx #JSContext - the Javascript context to compile and execute
+ * in
+ * @param source @c char * - the source code of the function to compile
  */
 static void pljs_call_anonymous_function(JSContext *ctx, const char *source) {
   StringInfoData src;
@@ -618,6 +758,10 @@ static void pljs_call_anonymous_function(JSContext *ctx, const char *source) {
  * Sets up all of the function arguments for a trigger, and calls
  * a trigger function.  This also determines the result type and
  * generates a resulting return Datum for postgres to injest.
+ *
+ * @param #fcinfo FunctionCallInfo
+ * @param context #pljs_context
+ * @returns #Datum containing the return value from the trigger
  */
 static Datum pljs_call_trigger(FunctionCallInfo fcinfo, pljs_context *context) {
   TriggerData *trig = (TriggerData *)fcinfo->context;
@@ -626,9 +770,9 @@ static Datum pljs_call_trigger(FunctionCallInfo fcinfo, pljs_context *context) {
   JSValueConst argv[10];
   Datum result = (Datum)0;
 
-  MemoryContext execution_context =
-      AllocSetContextCreate(CurrentMemoryContext, "PLJS Trigger Memory Context",
-                            ALLOCSET_SMALL_SIZES);
+  MemoryContext execution_context = AllocSetContextCreate(
+      CurrentMemoryContext, "PLJS Trigger Memory Context (pljs_call_trigger)",
+      ALLOCSET_SMALL_SIZES);
   MemoryContext old_context = MemoryContextSwitchTo(execution_context);
 
   if (TRIGGER_FIRED_FOR_ROW(event)) {
@@ -750,13 +894,16 @@ static Datum pljs_call_trigger(FunctionCallInfo fcinfo, pljs_context *context) {
  *
  * Calls a Javascript function returning the result on success, or throwing
  * an error on exception.
- * @returns @c #Datum of the result.
+ *
+ * @param #fcinfo FunctionCallInfo
+ * @param context #pljs_context
+ * @param argv #JSValueConst - array of arguments as Javascript values
+ * @returns #Datum containing the return value from the function
  */
 static Datum pljs_call_function(FunctionCallInfo fcinfo, pljs_context *context,
                                 JSValueConst *argv) {
-  pljs_return_state *state = NULL;
   MemoryContext execution_context = AllocSetContextCreate(
-      CurrentMemoryContext, "PLJS Memory Context (pljs_call_function)",
+      CurrentMemoryContext, "PLJS Function Memory Context (pljs_call_function)",
       ALLOCSET_SMALL_SIZES);
   MemoryContext old_context = MemoryContextSwitchTo(execution_context);
 
@@ -824,11 +971,26 @@ static Datum pljs_call_function(FunctionCallInfo fcinfo, pljs_context *context,
   }
 }
 
+/**
+ * @brief Call a set returning function (SRF).
+ *
+ * Sets up all of the function arguments for a set returning function,
+ * and calls it.  Generally output is returned with `pljs.return_next()`,
+ * but if there are additional results returned, then they are appended
+ * as well.  This also determines the result type and generates a resulting
+ * return Datum for postgres to injest.
+ *
+ * @param #fcinfo FunctionCallInfo
+ * @param context #pljs_context
+ * @param argv #JSValueConst - array of arguments as Javascript values
+ * @returns #Datum containing the return value from the function
+ */
 static Datum pljs_call_srf_function(FunctionCallInfo fcinfo,
                                     pljs_context *context, JSValueConst *argv) {
   pljs_return_state *state = NULL;
   MemoryContext execution_context = AllocSetContextCreate(
-      CurrentMemoryContext, "PLJS Memory Context (pljs_call_srf_function)",
+      CurrentMemoryContext,
+      "PLJS Set Returning Memory Context (pljs_call_srf_function)",
       ALLOCSET_SMALL_SIZES);
   MemoryContext old_context = MemoryContextSwitchTo(execution_context);
 
@@ -929,7 +1091,7 @@ static Datum pljs_call_srf_function(FunctionCallInfo fcinfo,
                                state->tuple_desc, state->tuple_store_state);
       } else {
         if (JS_IsArray(context->ctx, ret)) {
-          for (int i = 0; i < js_array_length(context->ctx, ret); i++) {
+          for (uint32_t i = 0; i < js_array_length(context->ctx, ret); i++) {
             JSValue val = JS_GetPropertyUint32(context->ctx, ret, i);
 
             Datum result =
@@ -977,7 +1139,10 @@ static Datum pljs_call_srf_function(FunctionCallInfo fcinfo,
  * Throws a Javascript exception and fills it with the message passed, along
  * with as much context as it can derive from the current state of Postgres
  * when the exception is called.
- * @returns @c #JSValue of the exception.
+ *
+ * @param ctx #JSContext - Javascript context to execute in
+ * @param message @c const char * - message to throw with
+ * @returns #JSValue of the exception
  */
 JSValue js_throw(JSContext *ctx, const char *message) {
   JSValue error = JS_NewError(ctx);
@@ -987,7 +1152,20 @@ JSValue js_throw(JSContext *ctx, const char *message) {
   return JS_Throw(ctx, error);
 }
 
-JSValue pljs_find_js_function(Oid fn_oid) {
+/**
+ * @brief Finds a `pljs` function and returns the JSValue of the function.
+ *
+ * Finds a function by its #Oid, compiles it in its own context, and
+ * returns a #JSValue containing a compiled version of the function.
+ * Note that no permissions checks are done, it is assumed these are
+ * done before calling.
+ *
+ * @param fn_oid #Oid
+ * @param ctx #JSContext - if NULL, the cached ctx will be used
+ * @returns #JSValue representation of either the function if it exists
+ * of `JS_UNDEFINED` if it does not
+ */
+JSValue pljs_find_js_function(Oid fn_oid, JSContext *ctx) {
   Form_pg_proc proc;
   Oid prolang;
   NameData langname = {.data = "pljs"};
@@ -1034,7 +1212,12 @@ JSValue pljs_find_js_function(Oid fn_oid) {
     pljs_context_cache_value *context_entry =
         pljs_cache_context_find(GetUserId());
 
-    context.ctx = context_entry->ctx;
+    if (ctx == NULL) {
+      context.ctx = context_entry->ctx;
+    } else {
+      context.ctx = ctx;
+    }
+
     setup_function(NULL, functuple, &context);
 
     func = pljs_compile_function(&context, false);

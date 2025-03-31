@@ -19,8 +19,6 @@ It compiles, and is on track to match functionality of [PLV8](https://github.com
 Missing:
 
 - Windows
-- SRF
-- startup functions
 
 Also, WASM will likely never be added to this extension.
 

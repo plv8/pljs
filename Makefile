@@ -29,7 +29,7 @@ endif
 
 REGRESS = init-extension function json jsonb json_conv types bytea context \
 	cursor array_spread plv8_regressions memory_limits inline composites \
-	trigger procedure find_function
+	trigger procedure find_function start_proc
 
 all: deps/quickjs/quickjs.h deps/quickjs/libquickjs.a pljs--$(PLJS_VERSION).sql
 
@@ -52,7 +52,7 @@ pljs--$(PLJS_VERSION).sql: pljs.sql
 	$(CP) pljs.sql pljs--$(PLJS_VERSION).sql
 
 lintcheck:
-	clang-tidy $(SRCS) -- -I$(INCLUDEDIR) -I$(INCLUDEDIR_SERVER) -I$(PWD) --std=c11
+	clang-tidy $(SRCS) -- $(LINTFLAGS) -I$(INCLUDEDIR) -I$(INCLUDEDIR_SERVER) -I$(PWD) --std=c11
 
 all: deps/quickjs/quickjs.h deps/quickjs/libquickjs.a pljs--$(PLJS_VERSION).sql
 

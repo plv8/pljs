@@ -362,12 +362,7 @@ Datum pljs_jsvalue_to_array(JSValue val, pljs_type *type, JSContext *ctx,
 
 bool pljs_jsvalue_object_contains_all_column_names(JSValue val, JSContext *ctx,
                                                    TupleDesc tupdesc) {
-  MemoryContext property_context = AllocSetContextCreate(
-      CurrentMemoryContext, "PLJS Column Name Context", ALLOCSET_SMALL_SIZES);
-  MemoryContext old_context = MemoryContextSwitchTo(property_context);
-
   uint32_t object_keys_length = 0;
-  char **names = NULL;
   JSPropertyEnum *tab;
 
   if (JS_GetOwnPropertyNames(ctx, &tab, &object_keys_length, val,
@@ -391,10 +386,6 @@ bool pljs_jsvalue_object_contains_all_column_names(JSValue val, JSContext *ctx,
         break;
       }
     }
-
-    MemoryContextSwitchTo(old_context);
-
-    MemoryContextDelete(property_context);
 
     if (!found) {
       return false;

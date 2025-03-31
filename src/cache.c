@@ -63,6 +63,9 @@ void pljs_cache_reset(void) {
  * Creates a #pljs_context_cache_value and fills it with the
  * javascript context and #HTAB storing #pljs_function_cache_value
  * entries by `fn_oid`.
+ *
+ * @param user_id #Oid - user ID for the #JSContext to be assigned to
+ * @param ctx #JSContext - context to be added to the cache
  */
 void pljs_cache_context_add(Oid user_id, JSContext *ctx) {
   bool found;
@@ -107,7 +110,7 @@ void pljs_cache_context_add(Oid user_id, JSContext *ctx) {
  * @brief Removes a #pljs_context_cache_value for a `user_id`.
  *
  * Removes a cache entry from the cache by `user_id`.
- * @param user_id #Oid
+ * @param user_id #Oid - user ID for which to remove the cache entries
  */
 void pljs_cache_context_remove(Oid user_id) {
   bool found;
@@ -125,7 +128,7 @@ void pljs_cache_context_remove(Oid user_id) {
  * @brief Finds a #pljs_context_cache_value for a `user_id`.
  *
  * @param user_id #Oid
- * @returns #pljs_context_cache_value that is found, or `NULL` if not found.
+ * @returns #pljs_context_cache_value that is found, or `NULL` if not found
  */
 pljs_context_cache_value *pljs_cache_context_find(Oid user_id) {
   pljs_context_cache_value *value = (pljs_context_cache_value *)hash_search(
@@ -186,7 +189,7 @@ void pljs_cache_function_add(pljs_context *context) {
  *
  * @param user_id #Oid
  * @param fn_oid #Oid
- * @returns #pljs_function_cache_value that is found, or `NULL` if not found.
+ * @returns #pljs_function_cache_value that is found, or `NULL` if not found
  */
 pljs_function_cache_value *pljs_cache_function_find(Oid user_id, Oid fn_oid) {
   bool found;
