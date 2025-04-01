@@ -119,7 +119,16 @@ typedef struct pljs_context {
   pljs_func *function;
 } pljs_context;
 
+typedef struct pljs_storage {
+  pljs_return_state *return_state;
+  MemoryContext execution_memory_context;
+} pljs_storage;
+
+extern JSClassID js_prepared_statement_handle_id;
 extern JSClassID js_return_statement_handle_id;
+extern JSClassID js_fcinfo_handle_id;
+extern JSClassID js_cursor_handle_id;
+extern JSClassID js_pljs_storage;
 
 // pljs.c
 

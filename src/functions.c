@@ -46,7 +46,15 @@ void pljs_setup_namespace(JSContext *ctx) {
   JSValue global_obj = JS_GetGlobalObject(ctx);
 
   // set up the pljs namespace and functions.
-  JSValue pljs = JS_NewObject(ctx);
+  JSValue pljs = JS_NewObjectClass(ctx, js_pljs_storage);
+
+  // set up the pljs storage object.
+  pljs_storage *storage = (pljs_storage *)palloc(sizeof(pljs_storage));
+  memset(storage, 0, sizeof(pljs_storage));
+
+  // attach storage to the pljs object
+  JS_SetOpaque(pljs, storage);
+
   JS_SetPropertyStr(ctx, pljs, "elog",
                     JS_NewCFunction(ctx, pljs_elog, "elog", 2));
 
@@ -244,15 +252,6 @@ static int pljs_execute_params(const char *sql, JSValue params,
 
   return status;
 }
-
-// class id for prepared statement handles.
-static JSClassID js_prepared_statement_handle_id;
-
-// class id for return_next calls, must be global.
-JSClassID js_return_statement_handle_id;
-
-// class id for cursor handles.
-static JSClassID js_cursor_handle_id;
 
 static void js_prepared_statement_finalizer(JSRuntime *rt, JSValue val) {
   pljs_plan *plan = JS_GetOpaque(val, js_prepared_statement_handle_id);
@@ -786,9 +785,10 @@ static JSValue pljs_return_next(JSContext *ctx, JSValueConst this_val, int argc,
   JSValue global_obj = JS_GetGlobalObject(ctx);
 
   JSValue pljs = JS_GetPropertyStr(ctx, global_obj, "pljs");
-  JSValue ptr = JS_GetPropertyStr(ctx, pljs, "return_context");
 
-  retstate = JS_GetOpaque(ptr, js_return_statement_handle_id);
+  pljs_storage *storage = JS_GetOpaque(pljs, js_pljs_storage);
+
+  retstate = storage->return_state;
 
   if (retstate == NULL) {
     return js_throw(ctx,

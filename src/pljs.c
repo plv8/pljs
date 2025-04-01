@@ -40,6 +40,21 @@ JSRuntime *rt = NULL;
 
 pljs_configuration configuration = {0};
 
+// class id for prepared statement handles.
+JSClassID js_prepared_statement_handle_id;
+
+// class id for return_next calls, must be global.
+JSClassID js_return_statement_handle_id;
+
+// class id for cursor handles.
+JSClassID js_cursor_handle_id;
+
+// class id for fcinfo data
+JSClassID js_fcinfo_handle_id;
+
+// class id for pljs storage
+JSClassID js_pljs_storage;
+
 static uint64_t os_pending_signals = 0;
 
 /**
@@ -350,7 +365,6 @@ static void pljs_setup_start_proc(JSContext *ctx) {
             regprocedurein, CStringGetDatum(configuration.start_proc)));
       }
 
-      elog(NOTICE, "searching for function");
       func = pljs_find_js_function(funcoid, ctx);
     }
   }
@@ -1045,22 +1059,21 @@ static Datum pljs_call_srf_function(FunctionCallInfo fcinfo,
 
   MemoryContextSwitchTo(execution_context);
 
-  JSValue handle =
-      JS_NewObjectClass(context->ctx, js_return_statement_handle_id);
-  JS_SetOpaque(handle, state);
-
   JSValue global_obj = JS_GetGlobalObject(context->ctx);
 
   JSValue pljs = JS_GetPropertyStr(context->ctx, global_obj, "pljs");
 
-  // Get a copy of the old return_context to set when complete
-  JSValue old_return_context =
-      JS_GetPropertyStr(context->ctx, pljs, "return_context");
+  pljs_storage *storage = JS_GetOpaque(pljs, js_pljs_storage);
 
-  pljs_return_state *old_state =
-      JS_GetOpaque(old_return_context, js_return_statement_handle_id);
+  if (storage == NULL) {
+    elog(ERROR, "invalid storage found on pljs object");
+  }
 
-  JS_SetPropertyStr(context->ctx, pljs, "return_context", handle);
+  // Get a copy of the old return_context to set when complete.
+  pljs_return_state *old_state = storage->return_state;
+
+  // Set the current return context.
+  storage->return_state = state;
 
   JS_SetInterruptHandler(JS_GetRuntime(context->ctx), interrupt_handler, NULL);
   os_pending_signals &= ~((uint64_t)1 << SIGINT);
@@ -1114,23 +1127,17 @@ static Datum pljs_call_srf_function(FunctionCallInfo fcinfo,
 
       MemoryContextSwitchTo(execution_context);
     }
-
-    // Set the older return context
-    if (JS_IsUndefined(old_return_context) || JS_IsNull(old_return_context)) {
-      JS_SetPropertyStr(context->ctx, pljs, "return_context", JS_UNDEFINED);
-    } else {
-      handle = JS_NewObjectClass(context->ctx, js_return_statement_handle_id);
-      JS_SetOpaque(handle, old_state);
-      JS_SetPropertyStr(context->ctx, pljs, "return_context", handle);
-    }
-
-    JS_FreeValue(context->ctx, ret);
-
-    // Switch back the original context
-    MemoryContextSwitchTo(old_context);
-
-    return (Datum)0;
   }
+
+  // Reset the return state.
+  storage->return_state = old_state;
+
+  JS_FreeValue(context->ctx, ret);
+
+  // Switch back the original context
+  MemoryContextSwitchTo(old_context);
+
+  return (Datum)0;
 }
 
 /**

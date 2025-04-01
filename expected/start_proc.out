@@ -7,7 +7,6 @@ $$
 $$ LANGUAGE pljs;
 SET pljs.start_proc = 'start';
 DO $$ pljs.elog(NOTICE, pljs.current_scope.name); $$ language pljs;
-NOTICE:  searching for function
 NOTICE:  start function executed
 NOTICE:  current_scope
 -- setting a start proc after the context is created should change do anything
