@@ -43,6 +43,7 @@ static void pljs_store_storage_in_context(pljs_context *context,
 /** \brief QuickJS Runtime */
 JSRuntime *rt = NULL;
 
+/** \brief PLJS Configuration */
 pljs_configuration configuration = {0};
 
 // class id for prepared statement handles.
@@ -839,7 +840,7 @@ static void pljs_call_anonymous_function(JSContext *ctx, const char *source) {
  * a trigger function.  This also determines the result type and
  * generates a resulting return Datum for postgres to injest.
  *
- * @param #fcinfo FunctionCallInfo
+ * @param fcinfo #FunctionCallInfo
  * @param context #pljs_context
  * @returns #Datum containing the return value from the trigger
  */
@@ -975,7 +976,7 @@ static Datum pljs_call_trigger(FunctionCallInfo fcinfo, pljs_context *context) {
  * Calls a Javascript function returning the result on success, or throwing
  * an error on exception.
  *
- * @param #fcinfo FunctionCallInfo
+ * @param fcinfo #FunctionCallInfo
  * @param context #pljs_context
  * @param argv #JSValueConst - array of arguments as Javascript values
  * @returns #Datum containing the return value from the function
@@ -1028,7 +1029,6 @@ static Datum pljs_call_function(FunctionCallInfo fcinfo, pljs_context *context,
     Datum datum;
 
     if (rettype == RECORDOID) {
-      Oid rettype;
       TupleDesc tupdesc;
       get_call_result_type(fcinfo, &rettype, &tupdesc);
 
@@ -1060,7 +1060,7 @@ static Datum pljs_call_function(FunctionCallInfo fcinfo, pljs_context *context,
  * as well.  This also determines the result type and generates a resulting
  * return Datum for postgres to injest.
  *
- * @param #fcinfo FunctionCallInfo
+ * @param fcinfo #FunctionCallInfo
  * @param context #pljs_context
  * @param argv #JSValueConst - array of arguments as Javascript values
  * @returns #Datum containing the return value from the function
@@ -1166,17 +1166,17 @@ static Datum pljs_call_srf_function(FunctionCallInfo fcinfo,
           for (uint32_t i = 0; i < js_array_length(context->ctx, ret); i++) {
             JSValue val = JS_GetPropertyUint32(context->ctx, ret, i);
 
-            Datum result =
-                pljs_jsvalue_to_datum(val, state->tuple_desc->attrs[0].atttypid,
-                                      context->ctx, NULL, &is_null);
+            Datum result = pljs_jsvalue_to_datum(
+                val, TupleDescAttr(state->tuple_desc, 0)->atttypid,
+                context->ctx, NULL, &is_null);
             tuplestore_putvalues(state->tuple_store_state, state->tuple_desc,
                                  &result, &is_null);
           }
         } else {
           if (!JS_IsUndefined(ret)) {
-            Datum result =
-                pljs_jsvalue_to_datum(ret, state->tuple_desc->attrs[0].atttypid,
-                                      context->ctx, NULL, &is_null);
+            Datum result = pljs_jsvalue_to_datum(
+                ret, TupleDescAttr(state->tuple_desc, 0)->atttypid,
+                context->ctx, NULL, &is_null);
 
             tuplestore_putvalues(state->tuple_store_state, state->tuple_desc,
                                  &result, &is_null);
@@ -1193,7 +1193,7 @@ static Datum pljs_call_srf_function(FunctionCallInfo fcinfo,
   // Switch back the original context
   MemoryContextSwitchTo(old_context);
 
-  return (Datum)0;
+  PG_RETURN_NULL();
 }
 
 /**

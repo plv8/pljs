@@ -75,13 +75,11 @@ typedef struct pljs_return_state {
 typedef struct pljs_type {
   Oid typid;
   Oid ioparam;
-  int16 len;
+  int16 length;
   bool byval;
   char align;
   char category;
   bool is_composite;
-  FmgrInfo fn_input;
-  FmgrInfo fn_output;
 } pljs_type;
 
 // Plan for prepared statements.
@@ -127,6 +125,12 @@ typedef struct pljs_storage {
   WindowObject window_object;
   MemoryContext execution_memory_context;
 } pljs_storage;
+
+typedef struct pljs_window_storage {
+  size_t max_length; // allocated memory
+  size_t length;     // the byte size of data
+  char data[1];      // actual string (without null-termination
+} pljs_window_storage;
 
 extern JSClassID js_prepared_statement_handle_id;
 extern JSClassID js_cursor_handle_id;

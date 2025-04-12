@@ -71,12 +71,6 @@ static JSValue pljs_object_to_string(JSContext *ctx, JSValueConst this_obj,
   return JS_NewString(ctx, "[object pljs]");
 }
 
-typedef struct pljs_window_storage {
-  size_t max_length; /* allocated memory */
-  size_t length;     /* the byte size of data */
-  char data[1];      /* actual string (without null-termination */
-} pljs_window_storage;
-
 void pljs_setup_namespace(JSContext *ctx) {
   // get a copy of the global object.
   JSValue global_obj = JS_GetGlobalObject(ctx);
@@ -859,7 +853,8 @@ static JSValue pljs_return_next(JSContext *ctx, JSValueConst this_val, int argc,
   } else {
     bool is_null;
     Datum result = pljs_jsvalue_to_datum(
-        argv[0], retstate->tuple_desc->attrs[0].atttypid, ctx, NULL, &is_null);
+        argv[0], TupleDescAttr(retstate->tuple_desc, 0)->atttypid, ctx, NULL,
+        &is_null);
     tuplestore_putvalues(retstate->tuple_store_state, retstate->tuple_desc,
                          &result, &is_null);
   }
@@ -881,10 +876,10 @@ static JSValue pljs_window_get_partition_local(JSContext *ctx,
       return js_throw(ctx, "allocation size cannot be negative");
     }
 
-    size = input_size;
+    if (input_size) {
+      size = input_size;
+    }
   }
-
-  // size += sizeof(pljs_window_storage);
 
   pljs_storage *storage = pljs_storage_for_context(ctx);
   FunctionCallInfo fcinfo = storage->fcinfo;
@@ -914,6 +909,7 @@ static JSValue pljs_window_get_partition_local(JSContext *ctx,
     return JS_UNDEFINED;
   }
   window_storage->data[window_storage->length] = '\0';
+
   JSValue json =
       JS_ParseJSON(ctx, window_storage->data, window_storage->length, NULL);
 
@@ -937,7 +933,7 @@ static JSValue pljs_window_set_partition_local(JSContext *ctx,
   const char *str = JS_ToCString(ctx, js);
   size_t str_size = strlen(str);
 
-  size_t size = str_size; // + sizeof(pljs_window_storage);
+  size_t size = str_size;
 
   pljs_window_storage *window_storage;
 
