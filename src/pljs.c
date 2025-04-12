@@ -16,6 +16,7 @@
 #include "utils/syscache.h"
 
 #include "deps/quickjs/quickjs.h"
+#include "windowapi.h"
 
 #include "pljs.h"
 
@@ -34,6 +35,10 @@ static void pljs_call_anonymous_function(JSContext *, const char *);
 static Datum pljs_call_trigger(FunctionCallInfo fcinfo, pljs_context *context);
 static void signal_handler(int sig_num);
 static int interrupt_handler(JSRuntime *rt, void *opaque);
+static void pljs_setup_storage_for_context(pljs_context *context,
+                                           FunctionCallInfo fcinfo);
+static void pljs_store_storage_in_context(pljs_context *context,
+                                          pljs_storage *storage);
 
 /** \brief QuickJS Runtime */
 JSRuntime *rt = NULL;
@@ -43,17 +48,14 @@ pljs_configuration configuration = {0};
 // class id for prepared statement handles.
 JSClassID js_prepared_statement_handle_id;
 
-// class id for return_next calls, must be global.
-JSClassID js_return_statement_handle_id;
-
 // class id for cursor handles.
 JSClassID js_cursor_handle_id;
 
-// class id for fcinfo data
-JSClassID js_fcinfo_handle_id;
-
 // class id for pljs storage
-JSClassID js_pljs_storage;
+JSClassID js_pljs_storage_id;
+
+// class id for pljs window object
+JSClassID js_window_id;
 
 static uint64_t os_pending_signals = 0;
 
@@ -418,36 +420,91 @@ static JSValueConst *convert_arguments_to_javascript(FunctionCallInfo fcinfo,
   nargs = get_func_arg_info(proctuple, &argtypes, &arguments, &argmodes);
 
   JSValueConst *argv = (JSValueConst *)palloc(sizeof(JSValueConst) * nargs);
-
   int inargs = 0;
-  for (int i = 0; i < nargs; i++) {
-    Oid argtype = argtypes[i];
-    char argmode = argmodes ? argmodes[i] : PROARGMODE_IN;
 
-    switch (argmode) {
-    case PROARGMODE_IN:
-    case PROARGMODE_INOUT:
-    case PROARGMODE_VARIADIC:
-      break;
-    default:
-      continue;
-    }
+  WindowObject window_obj = PG_WINDOW_OBJECT();
 
-    /* Resolve polymorphic types, if this is an actual call context. */
-    if (fcinfo && IsPolymorphicType(argtype)) {
-      argtype = get_fn_expr_argtype(fcinfo->flinfo, i);
+  if (WindowObjectIsValid(window_obj)) {
+    for (int i = 0; i < nargs; i++) {
+      bool isnull;
+      Datum arg = WinGetFuncArgCurrent(window_obj, i, &isnull);
+      if (isnull) {
+        argv[i] = JS_NULL;
+      } else {
+        argv[i] = pljs_datum_to_jsvalue(arg, argtypes[i], context->ctx, true);
+      }
     }
-    if (fcinfo->args[inargs].isnull == 1) {
-      argv[inargs] = JS_NULL;
-    } else {
-      argv[inargs] = pljs_datum_to_jsvalue(fcinfo->args[inargs].value, argtype,
-                                           context->ctx);
-    }
+  } else {
 
-    inargs++;
+    for (int i = 0; i < nargs; i++) {
+      Oid argtype = argtypes[i];
+      char argmode = argmodes ? argmodes[i] : PROARGMODE_IN;
+
+      switch (argmode) {
+      case PROARGMODE_IN:
+      case PROARGMODE_INOUT:
+      case PROARGMODE_VARIADIC:
+        break;
+      default:
+        continue;
+      }
+
+      /* Resolve polymorphic types, if this is an actual call context. */
+      if (fcinfo && IsPolymorphicType(argtype)) {
+        argtype = get_fn_expr_argtype(fcinfo->flinfo, i);
+      }
+      if (fcinfo->args[inargs].isnull == 1) {
+        argv[inargs] = JS_NULL;
+      } else {
+        argv[inargs] = pljs_datum_to_jsvalue(fcinfo->args[inargs].value,
+                                             argtype, context->ctx, false);
+      }
+
+      inargs++;
+    }
   }
 
   return argv;
+}
+
+pljs_storage *pljs_storage_for_context(JSContext *ctx) {
+  JSValue global_obj = JS_GetGlobalObject(ctx);
+
+  JSValue pljs = JS_GetPropertyStr(ctx, global_obj, "pljs");
+
+  pljs_storage *storage = JS_GetOpaque(pljs, js_pljs_storage_id);
+
+  return storage;
+}
+
+static void pljs_setup_storage_for_context(pljs_context *context,
+                                           FunctionCallInfo fcinfo) {
+  // Set up the pljs storage object.
+  pljs_storage *storage = (pljs_storage *)palloc0(sizeof(pljs_storage));
+
+  // Function.
+  storage->function = context->function;
+
+  // Set up the MemoryContext, we should be in our execution context by now.
+  storage->execution_memory_context = CurrentMemoryContext;
+
+  // Set up the FunctionCallInfo.
+  storage->fcinfo = fcinfo;
+
+  // Current WindowObject.
+  storage->window_object = PG_WINDOW_OBJECT();
+
+  pljs_store_storage_in_context(context, storage);
+}
+
+static void pljs_store_storage_in_context(pljs_context *context,
+                                          pljs_storage *storage) {
+  JSValue global_obj = JS_GetGlobalObject(context->ctx);
+
+  JSValue pljs = JS_GetPropertyStr(context->ctx, global_obj, "pljs");
+
+  // Attach storage to the pljs object.
+  JS_SetOpaque(pljs, storage);
 }
 
 /**
@@ -541,11 +598,20 @@ Datum pljs_call_handler(PG_FUNCTION_ARGS) {
     JSValueConst *argv =
         convert_arguments_to_javascript(fcinfo, proctuple, &context);
 
+    // Get the old storage object.
+    pljs_storage *old_storage = pljs_storage_for_context(context.ctx);
+
+    // Set up a new storage object for this call.
+    pljs_setup_storage_for_context(&context, fcinfo);
+
     if (context.function->is_srf) {
       retval = pljs_call_srf_function(fcinfo, &context, argv);
     } else {
       retval = pljs_call_function(fcinfo, &context, argv);
     }
+
+    // Reset to the old storage now that the call is over.
+    pljs_store_storage_in_context(&context, old_storage);
   }
 
   return retval;
@@ -1059,18 +1125,11 @@ static Datum pljs_call_srf_function(FunctionCallInfo fcinfo,
 
   MemoryContextSwitchTo(execution_context);
 
-  JSValue global_obj = JS_GetGlobalObject(context->ctx);
-
-  JSValue pljs = JS_GetPropertyStr(context->ctx, global_obj, "pljs");
-
-  pljs_storage *storage = JS_GetOpaque(pljs, js_pljs_storage);
+  pljs_storage *storage = pljs_storage_for_context(context->ctx);
 
   if (storage == NULL) {
     elog(ERROR, "invalid storage found on pljs object");
   }
-
-  // Get a copy of the old return_context to set when complete.
-  pljs_return_state *old_state = storage->return_state;
 
   // Set the current return context.
   storage->return_state = state;
@@ -1128,9 +1187,6 @@ static Datum pljs_call_srf_function(FunctionCallInfo fcinfo,
       MemoryContextSwitchTo(execution_context);
     }
   }
-
-  // Reset the return state.
-  storage->return_state = old_state;
 
   JS_FreeValue(context->ctx, ret);
 

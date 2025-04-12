@@ -27,7 +27,7 @@ Current Release Version: `0.8`
 
 - [x] caching of contexts and functions
 - [x] set returning functions
-- [ ] windows
+- [x] windows
 - [x] startup functions
 - [x] procedures/transactions
 - [x] find function

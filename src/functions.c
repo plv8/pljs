@@ -7,10 +7,11 @@
 #include "parser/parse_type.h"
 #include "utils/elog.h"
 #include "utils/fmgrprotos.h"
-
-#include "pljs.h"
 #include "utils/palloc.h"
 #include "utils/resowner.h"
+#include "windowapi.h"
+
+#include "pljs.h"
 
 // local only functions for injecting into pljs
 static JSValue pljs_elog(JSContext *, JSValueConst, int, JSValueConst *);
@@ -41,19 +42,50 @@ static JSValue pljs_find_function(JSContext *, JSValueConst, int,
                                   JSValueConst *);
 static JSValue pljs_return_next(JSContext *, JSValueConst, int, JSValueConst *);
 
+static JSValue pljs_get_window_object(JSContext *, JSValueConst, int,
+                                      JSValueConst *);
+static JSValue pljs_window_get_partition_local(JSContext *, JSValueConst, int,
+                                               JSValueConst *);
+static JSValue pljs_window_set_partition_local(JSContext *, JSValueConst, int,
+                                               JSValueConst *);
+static JSValue pljs_window_get_current_position(JSContext *, JSValueConst, int,
+                                                JSValueConst *);
+static JSValue pljs_window_get_partition_row_count(JSContext *, JSValueConst,
+                                                   int, JSValueConst *);
+static JSValue pljs_window_set_mark_position(JSContext *, JSValueConst, int,
+                                             JSValueConst *);
+static JSValue pljs_window_rows_are_peers(JSContext *, JSValueConst, int,
+                                          JSValueConst *);
+static JSValue pljs_window_get_func_arg_in_partition(JSContext *, JSValueConst,
+                                                     int, JSValueConst *);
+static JSValue pljs_window_get_func_arg_in_frame(JSContext *, JSValueConst, int,
+                                                 JSValueConst *);
+static JSValue pljs_window_get_func_arg_current(JSContext *, JSValueConst, int,
+                                                JSValueConst *);
+static JSValue pljs_window_object_to_string(JSContext *, JSValueConst, int,
+                                            JSValueConst *);
+
+// The toString for the pljs object.
+static JSValue pljs_object_to_string(JSContext *ctx, JSValueConst this_obj,
+                                     int argc, JSValueConst *argv) {
+  return JS_NewString(ctx, "[object pljs]");
+}
+
+typedef struct pljs_window_storage {
+  size_t max_length; /* allocated memory */
+  size_t length;     /* the byte size of data */
+  char data[1];      /* actual string (without null-termination */
+} pljs_window_storage;
+
 void pljs_setup_namespace(JSContext *ctx) {
   // get a copy of the global object.
   JSValue global_obj = JS_GetGlobalObject(ctx);
 
   // set up the pljs namespace and functions.
-  JSValue pljs = JS_NewObjectClass(ctx, js_pljs_storage);
+  JSValue pljs = JS_NewObjectClass(ctx, js_pljs_storage_id);
 
-  // set up the pljs storage object.
-  pljs_storage *storage = (pljs_storage *)palloc(sizeof(pljs_storage));
-  memset(storage, 0, sizeof(pljs_storage));
-
-  // attach storage to the pljs object
-  JS_SetOpaque(pljs, storage);
+  JS_SetPropertyStr(ctx, pljs, "toString",
+                    JS_NewCFunction(ctx, pljs_object_to_string, "toString", 0));
 
   JS_SetPropertyStr(ctx, pljs, "elog",
                     JS_NewCFunction(ctx, pljs_elog, "elog", 2));
@@ -76,6 +108,10 @@ void pljs_setup_namespace(JSContext *ctx) {
 
   JS_SetPropertyStr(ctx, pljs, "return_next",
                     JS_NewCFunction(ctx, pljs_return_next, "return_next", 0));
+
+  JS_SetPropertyStr(
+      ctx, pljs, "get_window_object",
+      JS_NewCFunction(ctx, pljs_get_window_object, "get_window_object", 0));
 
   JS_SetPropertyStr(ctx, global_obj, "pljs", pljs);
 
@@ -136,7 +172,9 @@ static JSValue pljs_elog(JSContext *ctx, JSValueConst this_val, int argc,
 
     /* ERROR case. */
     PG_TRY();
-    { elog(level, "%s", full_message); }
+    {
+      elog(level, "%s", full_message);
+    }
     PG_CATCH();
     {
       ErrorData *edata = CopyErrorData();
@@ -467,7 +505,9 @@ static JSValue pljs_prepare(JSContext *ctx, JSValueConst this_val, int argc,
   }
 
   PG_CATCH();
-  { return js_throw(ctx, "Unable to prepare parameters"); }
+  {
+    return js_throw(ctx, "Unable to prepare parameters");
+  }
 
   PG_END_TRY();
 
@@ -571,7 +611,9 @@ static JSValue pljs_plan_cursor(JSContext *ctx, JSValueConst this_val, int argc,
   }
 
   PG_CATCH();
-  { return js_throw(ctx, "Error executing"); }
+  {
+    return js_throw(ctx, "Error executing");
+  }
 
   PG_END_TRY();
   JSValue ret = JS_NewObject(ctx);
@@ -606,7 +648,9 @@ static JSValue pljs_plan_cursor_fetch(JSContext *ctx, JSValueConst this_val,
   }
 
   PG_TRY();
-  { SPI_cursor_fetch(cursor, forward, nfetch); }
+  {
+    SPI_cursor_fetch(cursor, forward, nfetch);
+  }
   PG_CATCH();
   {
     SPI_rollback();
@@ -661,9 +705,13 @@ static JSValue pljs_plan_cursor_move(JSContext *ctx, JSValueConst this_val,
   }
 
   PG_TRY();
-  { SPI_cursor_move(cursor, forward, nmove); }
+  {
+    SPI_cursor_move(cursor, forward, nmove);
+  }
   PG_CATCH();
-  { return js_throw(ctx, "Unable to fetch"); }
+  {
+    return js_throw(ctx, "Unable to fetch");
+  }
   PG_END_TRY();
 
   return JS_UNDEFINED;
@@ -680,7 +728,9 @@ static JSValue pljs_plan_cursor_close(JSContext *ctx, JSValueConst this_val,
   }
 
   PG_TRY();
-  { SPI_cursor_close(cursor); }
+  {
+    SPI_cursor_close(cursor);
+  }
   PG_CATCH();
   {
     SPI_rollback();
@@ -713,7 +763,9 @@ static JSValue pljs_commit(JSContext *ctx, JSValueConst this_val, int argc,
     SPI_start_transaction();
   }
   PG_CATCH();
-  { return js_throw(ctx, "Unable to commit"); }
+  {
+    return js_throw(ctx, "Unable to commit");
+  }
   PG_END_TRY();
 
   return JS_UNDEFINED;
@@ -728,7 +780,9 @@ static JSValue pljs_rollback(JSContext *ctx, JSValueConst this_val, int argc,
     SPI_start_transaction();
   }
   PG_CATCH();
-  { return js_throw(ctx, "Unable to rollback"); }
+  {
+    return js_throw(ctx, "Unable to rollback");
+  }
   PG_END_TRY();
 
   return JS_UNDEFINED;
@@ -780,15 +834,9 @@ static JSValue pljs_find_function(JSContext *ctx, JSValueConst this_val,
 
 static JSValue pljs_return_next(JSContext *ctx, JSValueConst this_val, int argc,
                                 JSValueConst *argv) {
-  pljs_return_state *retstate = NULL;
+  pljs_storage *storage = pljs_storage_for_context(ctx);
 
-  JSValue global_obj = JS_GetGlobalObject(ctx);
-
-  JSValue pljs = JS_GetPropertyStr(ctx, global_obj, "pljs");
-
-  pljs_storage *storage = JS_GetOpaque(pljs, js_pljs_storage);
-
-  retstate = storage->return_state;
+  pljs_return_state *retstate = storage->return_state;
 
   if (retstate == NULL) {
     return js_throw(ctx,
@@ -816,4 +864,376 @@ static JSValue pljs_return_next(JSContext *ctx, JSValueConst this_val, int argc,
                          &result, &is_null);
   }
   return JS_UNDEFINED;
+}
+
+static JSValue pljs_window_get_partition_local(JSContext *ctx,
+                                               JSValueConst this_val, int argc,
+                                               JSValueConst *argv) {
+
+  // Default to 1000.
+  size_t size = 1000;
+
+  if (argc) {
+    int input_size;
+    JS_ToInt32(ctx, &input_size, argv[0]);
+
+    if (input_size < 0) {
+      return js_throw(ctx, "allocation size cannot be negative");
+    }
+
+    size = input_size;
+  }
+
+  // size += sizeof(pljs_window_storage);
+
+  pljs_storage *storage = pljs_storage_for_context(ctx);
+  FunctionCallInfo fcinfo = storage->fcinfo;
+
+  WindowObject winobj = PG_WINDOW_OBJECT();
+
+  pljs_window_storage *window_storage;
+
+  PG_TRY();
+  {
+    window_storage = (pljs_window_storage *)WinGetPartitionLocalMemory(
+        winobj, size + sizeof(pljs_window_storage));
+  }
+  PG_CATCH();
+  {
+    return js_throw(ctx, "Unable to retrieve window storage");
+  }
+  PG_END_TRY();
+
+  /* If it's new, store the maximum size. */
+  if (window_storage->max_length == 0) {
+    window_storage->max_length = size;
+  }
+
+  /* If nothing is stored, undefined is returned. */
+  if (window_storage->length == 0) {
+    return JS_UNDEFINED;
+  }
+  window_storage->data[window_storage->length] = '\0';
+  JSValue json =
+      JS_ParseJSON(ctx, window_storage->data, window_storage->length, NULL);
+
+  return json;
+}
+
+static JSValue pljs_window_set_partition_local(JSContext *ctx,
+                                               JSValueConst this_val, int argc,
+                                               JSValueConst *argv) {
+  pljs_storage *storage = pljs_storage_for_context(ctx);
+  FunctionCallInfo fcinfo = storage->fcinfo;
+
+  WindowObject winobj = PG_WINDOW_OBJECT();
+
+  if (argc < 1) {
+    return JS_UNDEFINED;
+  }
+
+  JSValue js = JS_JSONStringify(ctx, argv[0], JS_UNDEFINED, JS_UNDEFINED);
+
+  const char *str = JS_ToCString(ctx, js);
+  size_t str_size = strlen(str);
+
+  size_t size = str_size; // + sizeof(pljs_window_storage);
+
+  pljs_window_storage *window_storage;
+
+  PG_TRY();
+  {
+    window_storage = (pljs_window_storage *)WinGetPartitionLocalMemory(
+        winobj, size + sizeof(pljs_window_storage));
+  }
+  PG_CATCH();
+  {
+    PG_RE_THROW();
+  }
+  PG_END_TRY();
+
+  if (window_storage->max_length != 0 &&
+      window_storage->max_length < size + sizeof(pljs_window_storage)) {
+    return js_throw(ctx, "window local memory overflow");
+  } else if (window_storage->max_length == 0) {
+    /* new allocation */
+    window_storage->max_length = size;
+  }
+  window_storage->length = str_size;
+  memcpy(window_storage->data, str, str_size);
+
+  return JS_UNDEFINED;
+}
+
+static JSValue pljs_window_get_current_position(JSContext *ctx,
+                                                JSValueConst this_val, int argc,
+                                                JSValueConst *argv) {
+  int64 pos = 0;
+  pljs_storage *storage = pljs_storage_for_context(ctx);
+  FunctionCallInfo fcinfo = storage->fcinfo;
+
+  WindowObject winobj = PG_WINDOW_OBJECT();
+
+  PG_TRY();
+  {
+    pos = WinGetCurrentPosition(winobj);
+  }
+  PG_CATCH();
+  {
+    PG_RE_THROW();
+  }
+  PG_END_TRY();
+
+  return JS_NewInt64(ctx, pos);
+}
+
+static JSValue pljs_window_get_partition_row_count(JSContext *ctx,
+                                                   JSValueConst this_val,
+                                                   int argc,
+                                                   JSValueConst *argv) {
+  int64 pos = 0;
+  pljs_storage *storage = pljs_storage_for_context(ctx);
+  FunctionCallInfo fcinfo = storage->fcinfo;
+
+  WindowObject winobj = PG_WINDOW_OBJECT();
+
+  PG_TRY();
+  {
+    pos = WinGetPartitionRowCount(winobj);
+  }
+  PG_CATCH();
+  {
+    PG_RE_THROW();
+  }
+  PG_END_TRY();
+
+  return JS_NewInt64(ctx, pos);
+}
+
+static JSValue pljs_window_set_mark_position(JSContext *ctx,
+                                             JSValueConst this_val, int argc,
+                                             JSValueConst *argv) {
+  int64_t mark_pos;
+  JS_ToInt64(ctx, &mark_pos, argv[0]);
+
+  pljs_storage *storage = pljs_storage_for_context(ctx);
+  FunctionCallInfo fcinfo = storage->fcinfo;
+
+  WindowObject winobj = PG_WINDOW_OBJECT();
+
+  PG_TRY();
+  {
+    WinSetMarkPosition(winobj, mark_pos);
+  }
+  PG_CATCH();
+  {
+    PG_RE_THROW();
+  }
+  PG_END_TRY();
+
+  return JS_UNDEFINED;
+}
+
+static JSValue pljs_window_rows_are_peers(JSContext *ctx, JSValueConst this_val,
+                                          int argc, JSValueConst *argv) {
+  if (argc < 2) {
+
+    return JS_UNDEFINED;
+  }
+  int64_t pos1;
+  JS_ToInt64(ctx, &pos1, argv[0]);
+  int64_t pos2;
+  JS_ToInt64(ctx, &pos2, argv[1]);
+  bool res = false;
+
+  pljs_storage *storage = pljs_storage_for_context(ctx);
+  FunctionCallInfo fcinfo = storage->fcinfo;
+
+  WindowObject winobj = PG_WINDOW_OBJECT();
+
+  PG_TRY();
+  {
+    res = WinRowsArePeers(winobj, pos1, pos2);
+  }
+  PG_CATCH();
+  {
+    PG_RE_THROW();
+  }
+  PG_END_TRY();
+
+  return JS_NewBool(ctx, res);
+}
+
+static JSValue pljs_window_get_func_arg_in_partition(JSContext *ctx,
+                                                     JSValueConst this_val,
+                                                     int argc,
+                                                     JSValueConst *argv) {
+  /* Since we return undefined in "isout" case, throw if arg isn't enough. */
+  if (argc < 4) {
+    return js_throw(ctx, "not enough arguments for get_func_arg_in_partition");
+  }
+
+  int argno;
+  JS_ToInt32(ctx, &argno, argv[0]);
+
+  int relpos;
+  JS_ToInt32(ctx, &relpos, argv[1]);
+
+  int seektype;
+  JS_ToInt32(ctx, &seektype, argv[2]);
+
+  bool set_mark = JS_ToBool(ctx, argv[3]);
+
+  bool isnull, isout;
+  Datum res;
+
+  pljs_storage *storage = pljs_storage_for_context(ctx);
+  FunctionCallInfo fcinfo = storage->fcinfo;
+
+  WindowObject winobj = PG_WINDOW_OBJECT();
+
+  PG_TRY();
+  {
+    res = WinGetFuncArgInPartition(winobj, argno, relpos, seektype, set_mark,
+                                   &isnull, &isout);
+  }
+  PG_CATCH();
+  {
+    PG_RE_THROW();
+  }
+  PG_END_TRY();
+
+  /* Return undefined to tell it's out of partition. */
+  if (isout) {
+    return JS_UNDEFINED;
+  }
+
+  return pljs_datum_to_jsvalue(res, storage->function->argtypes[argno], ctx,
+                               false);
+}
+
+static JSValue pljs_window_get_func_arg_in_frame(JSContext *ctx,
+                                                 JSValueConst this_val,
+                                                 int argc, JSValueConst *argv) {
+  /* Since we return undefined in "isout" case, throw if arg isn't enough. */
+  if (argc < 4) {
+    return js_throw(ctx, "not enough arguments for get_func_arg_in_partition");
+  }
+
+  int argno;
+  JS_ToInt32(ctx, &argno, argv[0]);
+
+  int relpos;
+  JS_ToInt32(ctx, &relpos, argv[1]);
+
+  int seektype;
+  JS_ToInt32(ctx, &seektype, argv[2]);
+
+  bool set_mark = JS_ToBool(ctx, argv[3]);
+
+  bool isnull, isout;
+  Datum res;
+
+  pljs_storage *storage = pljs_storage_for_context(ctx);
+  FunctionCallInfo fcinfo = storage->fcinfo;
+
+  WindowObject winobj = PG_WINDOW_OBJECT();
+
+  PG_TRY();
+  {
+    res = WinGetFuncArgInFrame(winobj, argno, relpos, seektype, set_mark,
+                               &isnull, &isout);
+  }
+  PG_CATCH();
+  {
+    PG_RE_THROW();
+  }
+  PG_END_TRY();
+
+  /* Return undefined to tell it's out of frame. */
+  if (isout) {
+    return JS_UNDEFINED;
+  }
+  return pljs_datum_to_jsvalue(res, storage->function->argtypes[argno], ctx,
+                               false);
+}
+
+static JSValue pljs_window_get_func_arg_current(JSContext *ctx,
+                                                JSValueConst this_val, int argc,
+                                                JSValueConst *argv) {
+  if (argc < 1) {
+    return JS_UNDEFINED;
+  }
+
+  int argno;
+  JS_ToInt32(ctx, &argno, argv[0]);
+
+  bool isnull;
+  Datum res;
+
+  pljs_storage *storage = pljs_storage_for_context(ctx);
+  FunctionCallInfo fcinfo = storage->fcinfo;
+
+  WindowObject winobj = PG_WINDOW_OBJECT();
+
+  PG_TRY();
+  {
+    res = WinGetFuncArgCurrent(winobj, argno, &isnull);
+  }
+  PG_CATCH();
+  {
+    PG_RE_THROW();
+  }
+  PG_END_TRY();
+
+  return pljs_datum_to_jsvalue(res, storage->function->argtypes[argno], ctx,
+                               false);
+}
+
+static JSValue pljs_window_object_to_string(JSContext *ctx,
+                                            JSValueConst this_val, int argc,
+                                            JSValueConst *argv) {
+  return JS_NewString(ctx, "[object Window]");
+}
+
+static const JSCFunctionListEntry js_window_funcs[] = {
+    JS_CFUNC_DEF("get_partition_local", 0, pljs_window_get_partition_local),
+    JS_CFUNC_DEF("set_partition_local", 1, pljs_window_set_partition_local),
+    JS_CFUNC_DEF("get_current_position", 0, pljs_window_get_current_position),
+    JS_CFUNC_DEF("get_partition_row_count", 0,
+                 pljs_window_get_partition_row_count),
+    JS_CFUNC_DEF("set_mark_position", 1, pljs_window_set_mark_position),
+    JS_CFUNC_DEF("rows_are_peers", 2, pljs_window_rows_are_peers),
+    JS_CFUNC_DEF("get_func_arg_in_partition", 4,
+                 pljs_window_get_func_arg_in_partition),
+    JS_CFUNC_DEF("get_func_arg_in_frame", 4, pljs_window_get_func_arg_in_frame),
+    JS_CFUNC_DEF("get_func_arg_current", 1, pljs_window_get_func_arg_current),
+    JS_CFUNC_DEF("toString", 0, pljs_window_object_to_string)};
+
+static JSValue pljs_get_window_object(JSContext *ctx, JSValueConst this_val,
+                                      int argc, JSValueConst *argv) {
+  pljs_storage *storage = pljs_storage_for_context(ctx);
+
+  if (storage->window_object == NULL ||
+      !WindowObjectIsValid(storage->window_object)) {
+    return js_throw(ctx, "get_window_object called in wrong context");
+  }
+  // Create the window object that
+  JSValue window_obj = JS_NewObjectClass(ctx, js_window_id);
+
+  // JSValue str = JS_NewString(ctx, "postgres window object");
+  // JS_SetPropertyStr(ctx, window_obj, "name", str);
+  JS_SetPropertyFunctionList(ctx, window_obj, js_window_funcs, 10);
+
+  JS_SetPropertyStr(ctx, window_obj, "SEEK_CURRENT",
+                    JS_NewInt32(ctx, WINDOW_SEEK_CURRENT));
+  JS_SetPropertyStr(ctx, window_obj, "SEEK_HEAD",
+                    JS_NewInt32(ctx, WINDOW_SEEK_HEAD));
+  JS_SetPropertyStr(ctx, window_obj, "SEEK_TAIL",
+                    JS_NewInt32(ctx, WINDOW_SEEK_TAIL));
+
+  // JS_SetPropertyStr(ctx, window_obj, "class",
+  //                   JS_NewString(ctx, "window object"));
+
+  return window_obj;
 }

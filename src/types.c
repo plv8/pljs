@@ -7,9 +7,11 @@
 #include "parser/parse_coerce.h"
 #include "utils/array.h"
 #include "utils/builtins.h"
+#include "utils/date.h"
 #include "utils/jsonb.h"
 #include "utils/lsyscache.h"
 #include "utils/palloc.h"
+#include "utils/timestamp.h"
 #include "utils/typcache.h"
 
 #include "deps/quickjs/quickjs.h"
@@ -20,6 +22,7 @@
 
 // helper functions that should really exist as part of quickjs.
 static JSClassID JS_CLASS_OBJECT = 1;
+static JSClassID JS_CLASS_DATE = 10;
 static JSClassID JS_CLASS_ARRAY_BUFFER = 19;
 static JSClassID JS_CLASS_SHARED_ARRAY_BUFFER = 20;
 static JSClassID JS_CLASS_UINT8C_ARRAY = 21;
@@ -47,6 +50,56 @@ inline static bool Is_SharedArrayBuffer(JSValueConst obj) {
 // if this is an actual object of any sort.
 inline static bool Is_Object(JSValueConst obj) {
   return NULL != JS_GetOpaque(obj, JS_CLASS_OBJECT);
+}
+
+// if given object is shared array buffer.
+inline static bool Is_Date(JSValueConst obj) {
+  return NULL != JS_GetOpaque(obj, JS_CLASS_DATE);
+}
+
+static Datum epoch_to_date(double epoch) {
+  epoch -= (POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE) * 86400000.0;
+
+#ifdef HAVE_INT64_TIMESTAMP
+  epoch = (epoch * 1000) / USECS_PER_DAY;
+#else
+  epoch = (epoch / 1000) / SECS_PER_DAY;
+#endif
+  PG_RETURN_DATEADT((DateADT)epoch);
+}
+
+static Datum epoch_to_timestamptz(double epoch) {
+  epoch -= (POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE) * 86400000.0;
+
+#ifdef HAVE_INT64_TIMESTAMP
+  return Int64GetDatum((int64)epoch * 1000);
+#else
+  return Float8GetDatum(epoch / 1000.0);
+#endif
+}
+
+static double date_to_epoch(DateADT date) {
+  double epoch;
+
+#ifdef HAVE_INT64_TIMESTAMP
+  epoch = (double)date * USECS_PER_DAY / 1000.0;
+#else
+  epoch = (double)date * SECS_PER_DAY * 1000.0;
+#endif
+
+  return epoch + (POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE) * 86400000.0;
+}
+
+static double timestamptz_to_epoch(TimestampTz tm) {
+  double epoch;
+
+#ifdef HAVE_INT64_TIMESTAMP
+  epoch = (double)tm / 1000.0;
+#else
+  epoch = (double)tm * 1000.0;
+#endif
+
+  return epoch + (POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE) * 86400000.0;
 }
 
 // allocate memory and copy data from the varlena text representation.
@@ -149,7 +202,9 @@ JSValue pljs_datum_to_object(Datum arg, pljs_type *type, JSContext *ctx) {
     tupdesc = lookup_rowtype_tupdesc(tupType, tupTypmod);
   }
   PG_CATCH();
-  { elog(WARNING, "caught error"); }
+  {
+    elog(WARNING, "caught error");
+  }
   PG_END_TRY();
 
   obj = JS_NewObject(ctx);
@@ -174,9 +229,9 @@ JSValue pljs_datum_to_object(Datum arg, pljs_type *type, JSContext *ctx) {
       if (isnull) {
         JS_SetPropertyStr(ctx, obj, colname, JS_NULL);
       } else {
-        JS_SetPropertyStr(
-            ctx, obj, colname,
-            pljs_datum_to_jsvalue(datum, tupdesc->attrs[i].atttypid, ctx));
+        JS_SetPropertyStr(ctx, obj, colname,
+                          pljs_datum_to_jsvalue(
+                              datum, tupdesc->attrs[i].atttypid, ctx, false));
       }
     }
 
@@ -198,7 +253,8 @@ JSValue pljs_datum_to_array(Datum arg, pljs_type *type, JSContext *ctx) {
 
   for (int i = 0; i < nelems; i++) {
     JSValue value =
-        nulls[i] ? JS_NULL : pljs_datum_to_jsvalue(values[i], type->typid, ctx);
+        nulls[i] ? JS_NULL
+                 : pljs_datum_to_jsvalue(values[i], type->typid, ctx, false);
 
     JS_SetPropertyUint32(ctx, array, i, value);
   }
@@ -213,10 +269,10 @@ JSValue pljs_datum_to_array(Datum arg, pljs_type *type, JSContext *ctx) {
 }
 
 // convert a value to a quickjs value.
-JSValue pljs_datum_to_jsvalue(Datum arg, Oid argtype, JSContext *ctx) {
+JSValue pljs_datum_to_jsvalue(Datum arg, Oid argtype, JSContext *ctx,
+                              bool skip_composite) {
   JSValue return_result;
   char *str;
-  Jsonb *jb;
 
   pljs_type type;
   pljs_type_fill(&type, argtype);
@@ -225,7 +281,7 @@ JSValue pljs_datum_to_jsvalue(Datum arg, Oid argtype, JSContext *ctx) {
     return pljs_datum_to_array(arg, &type, ctx);
   }
 
-  if (type.is_composite) {
+  if (!skip_composite && type.is_composite) {
     return pljs_datum_to_object(arg, &type, ctx);
   }
 
@@ -292,7 +348,7 @@ JSValue pljs_datum_to_jsvalue(Datum arg, Oid argtype, JSContext *ctx) {
 
   case JSONBOID:
     // get the datum
-    jb = DatumGetJsonbP(arg);
+    Jsonb *jb = DatumGetJsonbP(arg);
 
     // convert it to a string (takes some casting, but JsonbContainer is also
     // a varlena).
@@ -314,6 +370,15 @@ JSValue pljs_datum_to_jsvalue(Datum arg, Oid argtype, JSContext *ctx) {
     pfree(buf);
     break;
   }
+
+  case DATEOID:
+    return_result = JS_NewDate(ctx, date_to_epoch(DatumGetDateADT(arg)));
+    break;
+  case TIMESTAMPOID:
+  case TIMESTAMPTZOID:
+    return_result =
+        JS_NewDate(ctx, timestamptz_to_epoch(DatumGetTimestampTz(arg)));
+    break;
 
   default:
     elog(DEBUG3, "Unknown type: %d", argtype);
@@ -416,7 +481,9 @@ Datum pljs_jsvalue_to_record(JSValue val, pljs_type *type, JSContext *ctx,
     }
   }
   PG_CATCH();
-  { elog(WARNING, "in catch"); }
+  {
+    elog(WARNING, "in catch");
+  }
   PG_END_TRY();
 
   if (tupdesc != NULL) {
@@ -479,7 +546,7 @@ Datum pljs_jsvalue_to_datum(JSValue val, Oid rettype, JSContext *ctx,
     return pljs_jsvalue_to_record(val, &type, ctx, isnull, NULL, NULL);
   }
 
-  if (JS_VALUE_GET_TAG(val) == JS_TAG_NULL) {
+  if (JS_IsNull(val) || JS_IsUndefined(val)) {
     if (fcinfo) {
       PG_RETURN_NULL();
     } else {
@@ -487,7 +554,7 @@ Datum pljs_jsvalue_to_datum(JSValue val, Oid rettype, JSContext *ctx,
         *isnull = true;
       }
 
-      return (Datum)0;
+      PG_RETURN_NULL();
     }
   }
 
@@ -747,6 +814,22 @@ Datum pljs_jsvalue_to_datum(JSValue val, Oid rettype, JSContext *ctx,
     }
   }
 
+  case DATEOID:
+    if (Is_Date(val)) {
+      double in;
+      JS_ToFloat64(ctx, &in, val);
+      return epoch_to_date(in);
+    }
+    break;
+  case TIMESTAMPOID:
+  case TIMESTAMPTZOID:
+    if (Is_Date(val)) {
+      double in;
+      JS_ToFloat64(ctx, &in, val);
+      return epoch_to_timestamptz(in);
+    }
+    break;
+
   default:
     elog(DEBUG3, "Unknown type: %d", rettype);
     if (fcinfo) {
@@ -760,7 +843,7 @@ Datum pljs_jsvalue_to_datum(JSValue val, Oid rettype, JSContext *ctx,
   }
 
   // shut up, compiler
-  PG_RETURN_VOID();
+  PG_RETURN_NULL();
 }
 
 JSValue values_to_array(JSContext *ctx, JSValue *array, int argc, int start) {
@@ -795,7 +878,7 @@ JSValue tuple_to_jsvalue(JSContext *ctx, TupleDesc tuple,
     } else {
       JS_SetPropertyStr(
           ctx, obj, name,
-          pljs_datum_to_jsvalue(datum, tuple_attrs->atttypid, ctx));
+          pljs_datum_to_jsvalue(datum, tuple_attrs->atttypid, ctx, false));
     }
   }
 

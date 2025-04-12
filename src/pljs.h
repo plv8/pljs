@@ -10,10 +10,11 @@
 #include "funcapi.h"
 #include "nodes/params.h"
 #include "parser/parse_node.h"
+#include "utils/palloc.h"
+#include "windowapi.h"
 
 #include "deps/quickjs/quickjs-libc.h"
 #include "deps/quickjs/quickjs.h"
-#include "utils/palloc.h"
 
 #define STORAGE_HASH_LEN 32
 #ifndef PLJS_VERSION
@@ -121,14 +122,16 @@ typedef struct pljs_context {
 
 typedef struct pljs_storage {
   pljs_return_state *return_state;
+  pljs_func *function;
+  FunctionCallInfo fcinfo;
+  WindowObject window_object;
   MemoryContext execution_memory_context;
 } pljs_storage;
 
 extern JSClassID js_prepared_statement_handle_id;
-extern JSClassID js_return_statement_handle_id;
-extern JSClassID js_fcinfo_handle_id;
 extern JSClassID js_cursor_handle_id;
-extern JSClassID js_pljs_storage;
+extern JSClassID js_pljs_storage_id;
+extern JSClassID js_window_id;
 
 // pljs.c
 
@@ -150,6 +153,7 @@ JSValue js_throw(JSContext *, const char *);
 JSValue pljs_compile_function(pljs_context *context, bool is_trigger);
 JSValue pljs_find_js_function(Oid fn_oid, JSContext *ctx);
 bool has_permission_to_execute(const char *signature);
+pljs_storage *pljs_storage_for_context(JSContext *ctx);
 
 // cache.c
 
@@ -173,7 +177,8 @@ void pljs_cache_reset(void);
 // type.c
 
 // To Javascript
-JSValue pljs_datum_to_jsvalue(Datum arg, Oid type, JSContext *ctx);
+JSValue pljs_datum_to_jsvalue(Datum arg, Oid type, JSContext *ctx,
+                              bool skip_composite);
 JSValue pljs_datum_to_array(Datum arg, pljs_type *type, JSContext *ctx);
 JSValue pljs_datum_to_object(Datum arg, pljs_type *type, JSContext *ctx);
 JSValue tuple_to_jsvalue(JSContext *ctx, TupleDesc, HeapTuple);
