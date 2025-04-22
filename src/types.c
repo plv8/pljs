@@ -820,6 +820,7 @@ Datum pljs_jsvalue_to_datum(JSValue val, Oid rettype, JSContext *ctx,
     Datum ret = CStringGetTextDatum(str);
 
     JS_FreeCString(ctx, str);
+    JS_FreeValue(ctx, js);
 
     return ret;
     break;
@@ -830,11 +831,13 @@ Datum pljs_jsvalue_to_datum(JSValue val, Oid rettype, JSContext *ctx,
     JSValue js = JS_JSONStringify(ctx, argv[0], JS_UNDEFINED, JS_UNDEFINED);
     size_t plen;
     const char *str = JS_ToCStringLen(ctx, &plen, js);
+
     // return it as a Datum, since there is no direct CStringGetJsonb exposed.
     Datum ret = (Datum)DatumGetJsonbP(
         DirectFunctionCall1(jsonb_in, (Datum)(char *)str));
 
     JS_FreeCString(ctx, str);
+    JS_FreeValue(ctx, js);
 
     return ret;
     break;
