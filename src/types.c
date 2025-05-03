@@ -240,6 +240,10 @@ void pljs_type_fill(pljs_type *type, Oid typid) {
  * @returns #JSValue of the object or thrown exception in case of error
  */
 JSValue pljs_datum_to_object(Datum arg, pljs_type *type, JSContext *ctx) {
+  if (arg == 0) {
+    return JS_UNDEFINED;
+  }
+
   JSValue obj;
 
   HeapTupleHeader rec = DatumGetHeapTupleHeader(arg);
