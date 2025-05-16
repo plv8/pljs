@@ -168,7 +168,7 @@ LANGUAGE pljs;
 SELECT * FROM set_of_record_but_non_obj();
 ERROR:  execution error
 DETAIL:  Error: argument must be an object
-    at set_of_record_but_non_obj (<function>:3)
+    at set_of_record_but_non_obj (<function>:3:18)
 
 CREATE FUNCTION set_of_integers() RETURNS SETOF integer AS
 $$
@@ -230,7 +230,7 @@ SELECT * FROM set_of_unnamed_records() AS x(a int);
 SELECT * FROM set_of_unnamed_records() AS x(a int, c int);
 ERROR:  execution error
 DETAIL:  Error: field name / property name mismatch
-    at set_of_unnamed_records (<function>:3)
+    at set_of_unnamed_records (<function>:3:21)
 
 -- name counts and values match
 SELECT * FROM set_of_unnamed_records() AS x(a int, b int);

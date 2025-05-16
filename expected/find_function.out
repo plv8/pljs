@@ -34,12 +34,12 @@ SELECT caller(10, 2);
 SELECT caller(10, 3);
 ERROR:  execution error
 DETAIL:  Error: javascript function is not found for "sqlf"
-    at caller (<function>:9)
+    at caller (<function>:9:30)
 
 SELECT caller(10, 4);
 ERROR:  execution error
 DETAIL:  Error: javascript function is not found for "callee(int, int)"
-    at caller (<function>:11)
+    at caller (<function>:11:30)
 
 SELECT caller(10, 5);
  caller 

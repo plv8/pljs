@@ -12,8 +12,8 @@ do $$
 $$ language pljs;
 ERROR:  execution error
 DETAIL:  InternalError: out of memory
-    at <anonymous> (<function>:4)
-    at <eval> (<function>:6)
+    at <anonymous> (<function>:4:28)
+    at <eval> (<function>:6:3)
 
 do $$
   const limit = pljs.execute(`select setting from pg_settings where name = $1`, ['pljs.memory_limit'])[0].setting;
