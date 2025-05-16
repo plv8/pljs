@@ -847,11 +847,11 @@ static JSValue pljs_return_next(JSContext *ctx, JSValueConst this_val, int argc,
       return js_throw(ctx, "field name / property name mismatch");
     }
 
-    bool is_null;
+    bool is_null = false;
     pljs_jsvalue_to_record(argv[0], NULL, ctx, &is_null, retstate->tuple_desc,
                            retstate->tuple_store_state);
   } else {
-    bool is_null;
+    bool is_null = false;
     Datum result = pljs_jsvalue_to_datum(
         argv[0], TupleDescAttr(retstate->tuple_desc, 0)->atttypid, ctx, NULL,
         &is_null);
