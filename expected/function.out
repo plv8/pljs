@@ -239,3 +239,27 @@ SELECT * FROM set_of_unnamed_records() AS x(a int, b int);
  1 | 2
 (1 row)
 
+-- execute with an array of arguments
+CREATE FUNCTION execute_with_array() RETURNS VOID AS
+$$
+  pljs.execute( "SELECT $1, $2", [1, 2]);
+$$
+LANGUAGE pljs;
+SELECT * FROM execute_with_array();
+ execute_with_array 
+--------------------
+ 
+(1 row)
+
+-- execute without an array of arguments
+CREATE FUNCTION execute_without_array() RETURNS VOID AS
+$$
+  pljs.execute( "SELECT $1, $2", 1, 2);
+$$
+LANGUAGE pljs;
+SELECT * FROM execute_without_array();
+ execute_without_array 
+-----------------------
+ 
+(1 row)
+
