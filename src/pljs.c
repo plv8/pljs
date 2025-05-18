@@ -436,7 +436,6 @@ static JSValueConst *convert_arguments_to_javascript(FunctionCallInfo fcinfo,
       }
     }
   } else {
-
     for (int i = 0; i < nargs; i++) {
       Oid argtype = argtypes[i];
       char argmode = argmodes ? argmodes[i] : PROARGMODE_IN;
@@ -462,6 +461,13 @@ static JSValueConst *convert_arguments_to_javascript(FunctionCallInfo fcinfo,
       }
 
       inargs++;
+    }
+
+    /* If there are still empty arguments, fill them with `undefined`. */
+    if (inargs < nargs) {
+      for (int i = inargs; i < nargs; i++) {
+        argv[i] = JS_UNDEFINED;
+      }
     }
   }
 
