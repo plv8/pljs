@@ -560,10 +560,15 @@ bool pljs_jsvalue_object_contains_all_column_names(JSValue val, JSContext *ctx,
     bool found = false;
     for (uint32_t object_key = 0; object_key < object_keys_length;
          object_key++) {
-      if (strcmp(colname, JS_AtomToCString(ctx, tab[object_key].atom)) == 0) {
+      const char *atom = JS_AtomToCString(ctx, tab[object_key].atom);
+
+      if (strcmp(colname, atom) == 0) {
         found = true;
+        JS_FreeCString(ctx, atom);
         break;
       }
+
+      JS_FreeCString(ctx, atom);
     }
 
     if (!found) {

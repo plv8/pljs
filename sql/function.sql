@@ -147,3 +147,19 @@ SELECT * FROM set_of_unnamed_records() AS x(a int);
 SELECT * FROM set_of_unnamed_records() AS x(a int, c int);
 -- name counts and values match
 SELECT * FROM set_of_unnamed_records() AS x(a int, b int);
+
+-- execute with an array of arguments
+CREATE FUNCTION execute_with_array() RETURNS VOID AS
+$$
+  pljs.execute( "SELECT $1, $2", [1, 2]);
+$$
+LANGUAGE pljs;
+SELECT * FROM execute_with_array();
+
+-- execute without an array of arguments
+CREATE FUNCTION execute_without_array() RETURNS VOID AS
+$$
+  pljs.execute( "SELECT $1, $2", 1, 2);
+$$
+LANGUAGE pljs;
+SELECT * FROM execute_without_array();

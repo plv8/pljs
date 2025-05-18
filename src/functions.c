@@ -13,7 +13,7 @@
 
 #include "pljs.h"
 
-// local only functions for injecting into pljs
+// Local only functions for injecting into pljs
 static JSValue pljs_elog(JSContext *, JSValueConst, int, JSValueConst *);
 static JSValue pljs_execute(JSContext *, JSValueConst, int, JSValueConst *);
 static JSValue pljs_prepare(JSContext *, JSValueConst, int, JSValueConst *);
@@ -65,31 +65,47 @@ static JSValue pljs_window_get_func_arg_current(JSContext *, JSValueConst, int,
 static JSValue pljs_window_object_to_string(JSContext *, JSValueConst, int,
                                             JSValueConst *);
 
-// The toString for the pljs object.
+/**
+ * @brief toString Javascript method for the pljs object.
+ *
+ * @returns #JSValue containing the string "[object pljs]"
+ */
 static JSValue pljs_object_to_string(JSContext *ctx, JSValueConst this_obj,
                                      int argc, JSValueConst *argv) {
   return JS_NewString(ctx, "[object pljs]");
 }
 
+/**
+ * @brief Sets up the `pljs` object.
+ *
+ * Creates a global object named `pljs` that contains all of the helper
+ * functions, such as query access and windowing, along with logging to
+ * Postgres and utility functions.
+ *
+ * @param ctx #JSContext Javascript context
+ */
 void pljs_setup_namespace(JSContext *ctx) {
-  // get a copy of the global object.
+  // Get a copy of the global object.
   JSValue global_obj = JS_GetGlobalObject(ctx);
 
-  // set up the pljs namespace and functions.
+  // Set up the pljs namespace and functions.
   JSValue pljs = JS_NewObjectClass(ctx, js_pljs_storage_id);
 
   JS_SetPropertyStr(ctx, pljs, "toString",
                     JS_NewCFunction(ctx, pljs_object_to_string, "toString", 0));
 
+  // Logging.
   JS_SetPropertyStr(ctx, pljs, "elog",
                     JS_NewCFunction(ctx, pljs_elog, "elog", 2));
 
+  // Query access.
   JS_SetPropertyStr(ctx, pljs, "execute",
                     JS_NewCFunction(ctx, pljs_execute, "execute", 2));
 
   JS_SetPropertyStr(ctx, pljs, "prepare",
                     JS_NewCFunction(ctx, pljs_prepare, "prepare", 2));
 
+  // Transactions.
   JS_SetPropertyStr(ctx, pljs, "commit",
                     JS_NewCFunction(ctx, pljs_commit, "commit", 0));
 
@@ -109,10 +125,10 @@ void pljs_setup_namespace(JSContext *ctx) {
 
   JS_SetPropertyStr(ctx, global_obj, "pljs", pljs);
 
-  // version.
+  // Version.
   JS_SetPropertyStr(ctx, pljs, "version", JS_NewString(ctx, PLJS_VERSION));
 
-  // set up logging levels in the context.
+  // Set up logging levels in the context.
   JS_SetPropertyStr(ctx, global_obj, "DEBUG5", JS_NewInt32(ctx, DEBUG5));
   JS_SetPropertyStr(ctx, global_obj, "DEBUG4", JS_NewInt32(ctx, DEBUG4));
   JS_SetPropertyStr(ctx, global_obj, "DEBUG3", JS_NewInt32(ctx, DEBUG3));
@@ -125,6 +141,14 @@ void pljs_setup_namespace(JSContext *ctx) {
   JS_SetPropertyStr(ctx, global_obj, "ERROR", JS_NewInt32(ctx, ERROR));
 }
 
+/**
+ * @brief Javascript function `pljs.elog`.
+ *
+ * Javascript function that can be called from the interpreter for logging
+ * purposes.
+ *
+ * @returns #JSValue containing `undefined`
+ */
 static JSValue pljs_elog(JSContext *ctx, JSValueConst this_val, int argc,
                          JSValueConst *argv) {
   if (argc) {
@@ -160,6 +184,9 @@ static JSValue pljs_elog(JSContext *ctx, JSValueConst this_val, int argc,
       const char *cstr = JS_ToCString(ctx, str);
 
       appendStringInfo(&msg, "%s", cstr);
+
+      JS_FreeCString(ctx, cstr);
+      JS_FreeValue(ctx, str);
     }
 
     const char *full_message = msg.data;
@@ -184,6 +211,14 @@ static JSValue pljs_elog(JSContext *ctx, JSValueConst this_val, int argc,
   return JS_UNDEFINED;
 }
 
+/**
+ * @brief Javascript function `pljs.execute`.
+ *
+ * Javascript function that executes a Postgres query and returns
+ * the results of that query.
+ *
+ * @returns #JSValue containing result of the query
+ */
 static JSValue pljs_execute(JSContext *ctx, JSValueConst this_val, int argc,
                             JSValueConst *argv) {
   int status;
@@ -192,6 +227,7 @@ static JSValue pljs_execute(JSContext *ctx, JSValueConst this_val, int argc,
   int nparam;
   ResourceOwner m_resowner;
   MemoryContext m_mcontext;
+  bool cleanup_params = false;
 
   if (argc < 1) {
     return JS_UNDEFINED;
@@ -205,6 +241,7 @@ static JSValue pljs_execute(JSContext *ctx, JSValueConst this_val, int argc,
     } else {
       /* Consume trailing elements as an array. */
       params = values_to_array(ctx, argv, argc, 1);
+      cleanup_params = true;
     }
   }
 
@@ -237,11 +274,24 @@ static JSValue pljs_execute(JSContext *ctx, JSValueConst this_val, int argc,
     MemoryContextSwitchTo(m_mcontext);
     CurrentResourceOwner = m_resowner;
 
+    if (cleanup_params) {
+      JS_FreeValue(ctx, params);
+    }
+
+    JS_FreeCString(ctx, sql);
+
     return error;
   }
   PG_END_TRY();
 
   ReleaseCurrentSubTransaction();
+
+  JS_FreeCString(ctx, sql);
+
+  // If we allocated params, then we need to free it.
+  if (cleanup_params) {
+    JS_FreeValue(ctx, params);
+  }
 
   MemoryContextSwitchTo(m_mcontext);
   CurrentResourceOwner = m_resowner;
@@ -249,6 +299,16 @@ static JSValue pljs_execute(JSContext *ctx, JSValueConst this_val, int argc,
   return spi_result_to_jsvalue(ctx, status);
 }
 
+/**
+ * @brief Executes a query with parameters and returns the status.
+ *
+ * Accepts a query and parameters and executes the query via SPI.
+ *
+ * @param sql @c string containing the sql to execute
+ * @param params #JSValue array of parameters to execute
+ * @param ctx #JSContext
+ * @returns #JSValue containing result of the query
+ */
 static int pljs_execute_params(const char *sql, JSValue params,
                                JSContext *ctx) {
   int nparams = js_array_length(ctx, params);
@@ -274,6 +334,8 @@ static int pljs_execute_params(const char *sql, JSValue params,
 
     values[i] = pljs_jsvalue_to_datum(param, parstate.param_types[i], ctx, NULL,
                                       &is_null);
+
+    JS_FreeValue(ctx, param);
   }
 
   param_li = pljs_setup_variable_paramlist(&parstate, values, nulls);
@@ -285,14 +347,14 @@ static int pljs_execute_params(const char *sql, JSValue params,
   return status;
 }
 
-static void js_prepared_statement_finalizer(JSRuntime *rt, JSValue val) {
-  pljs_plan *plan = JS_GetOpaque(val, js_prepared_statement_handle_id);
-
-  SPI_freeplan(plan->plan);
-  pfree(plan->parstate);
-  pfree(plan);
-}
-
+/**
+ * @brief Javascript function `plan.execute`.
+ *
+ * Javascript function that executes a Postgres plan and returns
+ * the results of that query.
+ *
+ * @returns #JSValue containing result of the query
+ */
 static JSValue pljs_plan_execute(JSContext *ctx, JSValueConst this_val,
                                  int argc, JSValueConst *argv) {
   pljs_plan *plan = NULL;
@@ -304,6 +366,7 @@ static JSValue pljs_plan_execute(JSContext *ctx, JSValueConst this_val,
   MemoryContext m_mcontext;
   ResourceOwner m_resowner;
   int status;
+  bool cleanup_params = false;
 
   if (argc) {
     if (JS_IsArray(ctx, argv[0])) {
@@ -311,6 +374,7 @@ static JSValue pljs_plan_execute(JSContext *ctx, JSValueConst this_val,
     } else {
       /* Consume trailing elements as an array. */
       params = values_to_array(ctx, argv, argc, 0);
+      cleanup_params = true;
     }
   }
 
@@ -319,6 +383,8 @@ static JSValue pljs_plan_execute(JSContext *ctx, JSValueConst this_val,
   JSValue ptr = JS_GetPropertyStr(ctx, this_val, "plan");
 
   plan = JS_GetOpaque(ptr, js_prepared_statement_handle_id);
+
+  JS_FreeValue(ctx, ptr);
 
   if (plan == NULL) {
     return js_throw(ctx, "Invalid plan");
@@ -347,6 +413,8 @@ static JSValue pljs_plan_execute(JSContext *ctx, JSValueConst this_val,
     values[i] = pljs_jsvalue_to_datum(
         param, plan->parstate ? plan->parstate->param_types[i] : 0, ctx, NULL,
         &is_null);
+
+    JS_FreeValue(ctx, param);
   }
 
   m_resowner = CurrentResourceOwner;
@@ -390,6 +458,10 @@ static JSValue pljs_plan_execute(JSContext *ctx, JSValueConst this_val,
       pfree(nulls);
     }
 
+    if (cleanup_params) {
+      JS_FreeValue(ctx, params);
+    }
+
     return error;
   }
 
@@ -411,9 +483,21 @@ static JSValue pljs_plan_execute(JSContext *ctx, JSValueConst this_val,
     pfree(nulls);
   }
 
+  if (cleanup_params) {
+    JS_FreeValue(ctx, params);
+  }
+
   return ret;
 }
 
+/**
+ * @brief Javascript function `plan.free`.
+ *
+ * Javascript function that frees a plan and sets it to the JSValue null.
+ * the results of that query.
+ *
+ * @returns 0 for historic plv8 compatibility
+ */
 static JSValue pljs_plan_free(JSContext *ctx, JSValueConst this_val, int argc,
                               JSValueConst *argv) {
   pljs_plan *plan;
@@ -435,6 +519,8 @@ static JSValue pljs_plan_free(JSContext *ctx, JSValueConst this_val, int argc,
 
   JS_SetPropertyStr(ctx, this_val, "plan", JS_NULL);
 
+  JS_FreeValue(ctx, ptr);
+
   return JS_NewInt32(ctx, 0);
 }
 
@@ -444,6 +530,15 @@ static const JSCFunctionListEntry js_plan_funcs[] = {
     JS_CFUNC_DEF("cursor", 0, pljs_plan_cursor),
     JS_CFUNC_DEF("toString", 0, pljs_plan_to_string)};
 
+/**
+ * @brief Javascript function `pljs.prepare`.
+ *
+ * Javascript function that prepares a plan from sql
+ * and returns a `plan` object with the functions of
+ * `execute`, `free`, `cursor`, and `toString`.
+ *
+ * @returns #JSValue containing a plan
+ */
 static JSValue pljs_prepare(JSContext *ctx, JSValueConst this_val, int argc,
                             JSValueConst *argv) {
   const char *sql;
@@ -453,6 +548,7 @@ static JSValue pljs_prepare(JSContext *ctx, JSValueConst this_val, int argc,
   SPIPlanPtr initial = NULL, saved = NULL;
   pljs_param_state *parstate = NULL;
   pljs_plan *plan = NULL;
+  bool cleanup_params = false;
 
   if (argc < 1) {
     return JS_UNDEFINED;
@@ -464,6 +560,7 @@ static JSValue pljs_prepare(JSContext *ctx, JSValueConst this_val, int argc,
     } else {
       /* Consume trailing elements as an array. */
       params = values_to_array(ctx, argv, argc, 1);
+      cleanup_params = true;
     }
   }
 
@@ -480,6 +577,9 @@ static JSValue pljs_prepare(JSContext *ctx, JSValueConst this_val, int argc,
     int32 typemod;
 
     parseTypeString(str, &types[i], &typemod, false);
+
+    JS_FreeCString(ctx, str);
+    JS_FreeValue(ctx, param);
   }
 
   sql = JS_ToCString(ctx, argv[0]);
@@ -500,18 +600,24 @@ static JSValue pljs_prepare(JSContext *ctx, JSValueConst this_val, int argc,
 
   PG_CATCH();
   {
+    if (cleanup_params) {
+      JS_FreeValue(ctx, params);
+    }
+
+    JS_FreeCString(ctx, sql);
     return js_throw(ctx, "Unable to prepare parameters");
   }
 
   PG_END_TRY();
+
+  JS_FreeCString(ctx, sql);
 
   if (types != NULL) {
     pfree(types);
   }
 
   JSValue ret = JS_NewObject(ctx);
-  JSValue str = JS_NewString(ctx, "postgres execution plan");
-  JS_SetPropertyStr(ctx, ret, "name", str);
+
   JS_SetPropertyFunctionList(ctx, ret, js_plan_funcs, 4);
 
   plan = palloc(sizeof(pljs_plan));
@@ -523,6 +629,10 @@ static JSValue pljs_prepare(JSContext *ctx, JSValueConst this_val, int argc,
   JS_SetOpaque(handle, plan);
   JS_SetPropertyStr(ctx, ret, "plan", handle);
 
+  if (cleanup_params) {
+    JS_FreeValue(ctx, params);
+  }
+
   return ret;
 }
 
@@ -532,6 +642,13 @@ static const JSCFunctionListEntry js_cursor_funcs[] = {
     JS_CFUNC_DEF("close", 0, pljs_plan_cursor_close),
     JS_CFUNC_DEF("toString", 0, pljs_plan_cursor_to_string)};
 
+/**
+ * @brief Javascript function `plan.cursor`.
+ *
+ * Javascript function that provides access to a plan's cursor.
+ *
+ * @returns #JSValue containing result of the query
+ */
 static JSValue pljs_plan_cursor(JSContext *ctx, JSValueConst this_val, int argc,
                                 JSValueConst *argv) {
   pljs_plan *plan;
@@ -541,10 +658,13 @@ static JSValue pljs_plan_cursor(JSContext *ctx, JSValueConst this_val, int argc,
   int nparams = 0;
   int argcount;
   Portal cursor;
+  bool cleanup_params = false;
 
   JSValue ptr = JS_GetPropertyStr(ctx, this_val, "plan");
 
   plan = JS_GetOpaque(ptr, js_prepared_statement_handle_id);
+
+  JS_FreeValue(ctx, ptr);
 
   if (plan == NULL || plan->plan == NULL) {
     StringInfoData buf;
@@ -562,6 +682,7 @@ static JSValue pljs_plan_cursor(JSContext *ctx, JSValueConst this_val, int argc,
     } else {
       /* Consume trailing elements as an array. */
       params = values_to_array(ctx, argv, argc, 0);
+      cleanup_params = true;
     }
   }
 
@@ -606,6 +727,10 @@ static JSValue pljs_plan_cursor(JSContext *ctx, JSValueConst this_val, int argc,
 
   PG_CATCH();
   {
+    if (cleanup_params) {
+      JS_FreeValue(ctx, params);
+    }
+
     return js_throw(ctx, "Error executing");
   }
 
@@ -615,13 +740,28 @@ static JSValue pljs_plan_cursor(JSContext *ctx, JSValueConst this_val, int argc,
   JS_SetPropertyStr(ctx, ret, "name", str);
   JS_SetPropertyFunctionList(ctx, ret, js_cursor_funcs, 4);
 
+  if (cleanup_params) {
+    JS_FreeValue(ctx, params);
+  }
+
   return ret;
 }
 
+/**
+ * @brief Javascript function `cursor.fetch`.
+ *
+ * Javascript function that executes a fetch on a cursor.
+ *
+ * @returns #JSValue containing result of the fetch
+ */
 static JSValue pljs_plan_cursor_fetch(JSContext *ctx, JSValueConst this_val,
                                       int argc, JSValueConst *argv) {
   JSValue name = JS_GetPropertyStr(ctx, this_val, "name");
   const char *plan_name = JS_ToCString(ctx, name);
+
+  JS_FreeCString(ctx, plan_name);
+  JS_FreeValue(ctx, name);
+
   int nfetch = 1;
   bool forward = true, wantarray = false;
 
@@ -674,6 +814,12 @@ static JSValue pljs_plan_cursor_fetch(JSContext *ctx, JSValueConst this_val,
   return JS_UNDEFINED;
 }
 
+/**
+ * @brief Javascript function `cursor.move`.
+ *
+ * Javascript function that executes a move of the current cursor
+ * @returns #JSValue containing result of the query
+ */
 static JSValue pljs_plan_cursor_move(JSContext *ctx, JSValueConst this_val,
                                      int argc, JSValueConst *argv) {
   JSValue name = JS_GetPropertyStr(ctx, this_val, "name");
@@ -682,6 +828,9 @@ static JSValue pljs_plan_cursor_move(JSContext *ctx, JSValueConst this_val,
   bool forward = true;
 
   Portal cursor = SPI_cursor_find(cursor_name);
+
+  JS_FreeCString(ctx, cursor_name);
+  JS_FreeValue(ctx, name);
 
   if (cursor == NULL) {
     return js_throw(ctx, "Unable to find plan");
@@ -711,11 +860,22 @@ static JSValue pljs_plan_cursor_move(JSContext *ctx, JSValueConst this_val,
   return JS_UNDEFINED;
 }
 
+/**
+ * @brief Javascript function `cursor.close`.
+ *
+ * Javascript function that closes the cursor.
+ *
+ * @returns #JSValue containing an integer result of 0 if
+ * unsuccessful or 1 if successful
+ */
 static JSValue pljs_plan_cursor_close(JSContext *ctx, JSValueConst this_val,
                                       int argc, JSValueConst *argv) {
   JSValue name = JS_GetPropertyStr(ctx, this_val, "name");
   const char *cursor_name = JS_ToCString(ctx, name);
   Portal cursor = SPI_cursor_find(cursor_name);
+
+  JS_FreeCString(ctx, cursor_name);
+  JS_FreeValue(ctx, name);
 
   if (!cursor) {
     return js_throw(ctx, "Unable to find cursor");
@@ -748,6 +908,13 @@ static JSValue pljs_plan_to_string(JSContext *ctx, JSValueConst this_val,
   return JS_NewString(ctx, "[object Plan]");
 }
 
+/**
+ * @brief Javascript function `pljs.commit`.
+ *
+ * Javascript function that commits the current transaction.
+ *
+ * @returns #JSValue containing `undefined`
+ */
 static JSValue pljs_commit(JSContext *ctx, JSValueConst this_val, int argc,
                            JSValueConst *argv) {
   PG_TRY();
@@ -765,6 +932,13 @@ static JSValue pljs_commit(JSContext *ctx, JSValueConst this_val, int argc,
   return JS_UNDEFINED;
 }
 
+/**
+ * @brief Javascript function `pljs.rollback`.
+ *
+ * Javascript function that rolls back the current transaction
+ *
+ * @returns #JSValue containing `undefined`
+ */
 static JSValue pljs_rollback(JSContext *ctx, JSValueConst this_val, int argc,
                              JSValueConst *argv) {
   PG_TRY();
@@ -782,6 +956,13 @@ static JSValue pljs_rollback(JSContext *ctx, JSValueConst this_val, int argc,
   return JS_UNDEFINED;
 }
 
+/**
+ * @brief Javascript function `pljs.find_function`.
+ *
+ * Javascript function that finds a specific Javascript function from Postgres.
+ *
+ * @returns #JSValue containing a Javascript function or `undefined`
+ */
 static JSValue pljs_find_function(JSContext *ctx, JSValueConst this_val,
                                   int argc, JSValueConst *argv) {
   if (argc < 1) {
@@ -819,13 +1000,24 @@ static JSValue pljs_find_function(JSContext *ctx, JSValueConst this_val,
     appendStringInfo(&str, "javascript function is not found for \"%s\"",
                      signature);
 
+    JS_FreeCString(ctx, signature);
+
     return js_throw(ctx, NameStr(str));
   }
   PG_END_TRY();
 
+  JS_FreeCString(ctx, signature);
+
   return func;
 }
 
+/**
+ * @brief Javascript function `pljs.return_next`.
+ *
+ * Javascript function that adds a value to return for a Set Returning Function.
+ *
+ * @returns #JSValue containing `undefined`
+ */
 static JSValue pljs_return_next(JSContext *ctx, JSValueConst this_val, int argc,
                                 JSValueConst *argv) {
   pljs_storage *storage = pljs_storage_for_context(ctx);
@@ -861,6 +1053,13 @@ static JSValue pljs_return_next(JSContext *ctx, JSValueConst this_val, int argc,
   return JS_UNDEFINED;
 }
 
+/**
+ * @brief Javascript function `window.get_partition_local`.
+ *
+ * Javascript function that gets a local partition from a window.
+ *
+ * @returns #JSValue containing JSON of the stored value
+ */
 static JSValue pljs_window_get_partition_local(JSContext *ctx,
                                                JSValueConst this_val, int argc,
                                                JSValueConst *argv) {
@@ -916,6 +1115,13 @@ static JSValue pljs_window_get_partition_local(JSContext *ctx,
   return json;
 }
 
+/**
+ * @brief Javascript function `window.set_partition_local`.
+ *
+ * Javascript function that sets a value to a local partition in a window.
+ *
+ * @returns #JSValue containing `undefined`
+ */
 static JSValue pljs_window_set_partition_local(JSContext *ctx,
                                                JSValueConst this_val, int argc,
                                                JSValueConst *argv) {
@@ -958,9 +1164,19 @@ static JSValue pljs_window_set_partition_local(JSContext *ctx,
   window_storage->length = str_size;
   memcpy(window_storage->data, str, str_size);
 
+  JS_FreeCString(ctx, str);
+  JS_FreeValue(ctx, js);
+
   return JS_UNDEFINED;
 }
 
+/**
+ * @brief Javascript function `window.get_current_position`.
+ *
+ * Javascript function that gets the current position from a window.
+ *
+ * @returns #JSValue containing the position
+ */
 static JSValue pljs_window_get_current_position(JSContext *ctx,
                                                 JSValueConst this_val, int argc,
                                                 JSValueConst *argv) {
@@ -983,6 +1199,14 @@ static JSValue pljs_window_get_current_position(JSContext *ctx,
   return JS_NewInt64(ctx, pos);
 }
 
+/**
+ * @brief Javascript function `window.get_partition_row_count`.
+ *
+ * Javascript function that gets the number of rows in a partition from a
+ * window.
+ *
+ * @returns #JSValue containing number of rows
+ */
 static JSValue pljs_window_get_partition_row_count(JSContext *ctx,
                                                    JSValueConst this_val,
                                                    int argc,
@@ -1006,6 +1230,13 @@ static JSValue pljs_window_get_partition_row_count(JSContext *ctx,
   return JS_NewInt64(ctx, pos);
 }
 
+/**
+ * @brief Javascript function `window.set_mark_position`.
+ *
+ * Javascript function that sets a mark position for a window.
+ *
+ * @returns #JSValue containing `undefined`
+ */
 static JSValue pljs_window_set_mark_position(JSContext *ctx,
                                              JSValueConst this_val, int argc,
                                              JSValueConst *argv) {
@@ -1030,6 +1261,13 @@ static JSValue pljs_window_set_mark_position(JSContext *ctx,
   return JS_UNDEFINED;
 }
 
+/**
+ * @brief Javascript function `window.rows_are_peers`.
+ *
+ * Javascript function that whether rows in a window are peers.
+ *
+ * @returns #JSValue containing a boolean result of `true` or `false`
+ */
 static JSValue pljs_window_rows_are_peers(JSContext *ctx, JSValueConst this_val,
                                           int argc, JSValueConst *argv) {
   if (argc < 2) {
@@ -1206,6 +1444,13 @@ static const JSCFunctionListEntry js_window_funcs[] = {
     JS_CFUNC_DEF("get_func_arg_current", 1, pljs_window_get_func_arg_current),
     JS_CFUNC_DEF("toString", 0, pljs_window_object_to_string)};
 
+/**
+ * @brief Javascript function `pljs.get_window_object`.
+ *
+ * Javascript function that a window object.
+ *
+ * @returns #JSValue containing the window object
+ */
 static JSValue pljs_get_window_object(JSContext *ctx, JSValueConst this_val,
                                       int argc, JSValueConst *argv) {
   pljs_storage *storage = pljs_storage_for_context(ctx);
@@ -1214,11 +1459,9 @@ static JSValue pljs_get_window_object(JSContext *ctx, JSValueConst this_val,
       !WindowObjectIsValid(storage->window_object)) {
     return js_throw(ctx, "get_window_object called in wrong context");
   }
-  // Create the window object that
+  // Create the window object that we will return.
   JSValue window_obj = JS_NewObjectClass(ctx, js_window_id);
 
-  // JSValue str = JS_NewString(ctx, "postgres window object");
-  // JS_SetPropertyStr(ctx, window_obj, "name", str);
   JS_SetPropertyFunctionList(ctx, window_obj, js_window_funcs, 10);
 
   JS_SetPropertyStr(ctx, window_obj, "SEEK_CURRENT",
@@ -1227,9 +1470,6 @@ static JSValue pljs_get_window_object(JSContext *ctx, JSValueConst this_val,
                     JS_NewInt32(ctx, WINDOW_SEEK_HEAD));
   JS_SetPropertyStr(ctx, window_obj, "SEEK_TAIL",
                     JS_NewInt32(ctx, WINDOW_SEEK_TAIL));
-
-  // JS_SetPropertyStr(ctx, window_obj, "class",
-  //                   JS_NewString(ctx, "window object"));
 
   return window_obj;
 }
