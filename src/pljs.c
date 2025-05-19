@@ -823,7 +823,7 @@ static void pljs_call_anonymous_function(JSContext *ctx, const char *source) {
   initStringInfo(&src);
 
   // generate the function as javascript with all of its arguments
-  appendStringInfo(&src, "(function () {\n%s\n})();", source);
+  appendStringInfo(&src, "(function () {%s})();", source);
 
   JS_SetInterruptHandler(JS_GetRuntime(ctx), interrupt_handler, NULL);
   os_pending_signals &= ~((uint64_t)1 << SIGINT);
@@ -1019,7 +1019,7 @@ static Datum pljs_call_function(FunctionCallInfo fcinfo, pljs_context *context,
 
   JSValue ret = JS_Call(context->ctx, context->js_function, JS_UNDEFINED,
                         context->function->inargs, argv);
-
+  JS_RunGC(rt);
   SPI_finish();
 
   if (JS_IsException(ret)) {

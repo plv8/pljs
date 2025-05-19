@@ -70,6 +70,11 @@ static JSValue pljs_window_object_to_string(JSContext *, JSValueConst, int,
  *
  * @returns #JSValue containing the string "[object pljs]"
  */
+#ifdef EXPOSE_GC
+static JSValue pljs_gc(JSContext *, JSValueConst, int, JSValueConst *);
+#endif
+
+// The toString for the pljs object.
 static JSValue pljs_object_to_string(JSContext *ctx, JSValueConst this_obj,
                                      int argc, JSValueConst *argv) {
   return JS_NewString(ctx, "[object pljs]");
@@ -122,6 +127,10 @@ void pljs_setup_namespace(JSContext *ctx) {
   JS_SetPropertyStr(
       ctx, pljs, "get_window_object",
       JS_NewCFunction(ctx, pljs_get_window_object, "get_window_object", 0));
+
+#ifdef EXPOSE_GC
+  JS_SetPropertyStr(ctx, pljs, "gc", JS_NewCFunction(ctx, pljs_gc, "gc", 0));
+#endif
 
   JS_SetPropertyStr(ctx, global_obj, "pljs", pljs);
 
@@ -296,7 +305,9 @@ static JSValue pljs_execute(JSContext *ctx, JSValueConst this_val, int argc,
   MemoryContextSwitchTo(m_mcontext);
   CurrentResourceOwner = m_resowner;
 
-  return spi_result_to_jsvalue(ctx, status);
+  JSValue ret = spi_result_to_jsvalue(ctx, status);
+
+  return ret;
 }
 
 /**
@@ -327,7 +338,6 @@ static int pljs_execute_params(const char *sql, JSValue params,
     elog(ERROR, "parameter count mismatch: %d != %d", parstate.nparams,
          nparams);
   }
-
   for (int i = 0; i < nparams; i++) {
     JSValue param = JS_GetPropertyUint32(ctx, params, i);
     bool is_null;
@@ -1473,3 +1483,12 @@ static JSValue pljs_get_window_object(JSContext *ctx, JSValueConst this_val,
 
   return window_obj;
 }
+
+#ifdef EXPOSE_GC
+static JSValue pljs_gc(JSContext *ctx, JSValueConst this_val, int argc,
+                       JSValueConst *argv) {
+  JS_RunGC(JS_GetRuntime(ctx));
+
+  return JS_UNDEFINED;
+}
+#endif

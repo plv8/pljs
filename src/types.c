@@ -58,6 +58,12 @@ inline static bool Is_Date(JSValueConst obj) {
   return NULL != JS_GetOpaque(obj, JS_CLASS_DATE);
 }
 
+#if JSONB_DIRECT_CONVERSION
+static JSValue convert_jsonb(JSContext *ctx, JsonbContainer *in);
+static JSValue get_jsonb_value(JSContext *ctx, JsonbValue *scalarVal);
+static Jsonb *convert_object(JSContext *ctx, JSValue object);
+#endif
+
 /**
  * @brief Converts a Javascript epoch to a Datum.
  *
@@ -435,6 +441,17 @@ JSValue pljs_datum_to_jsvalue(Datum arg, Oid argtype, JSContext *ctx,
     break;
 
   case JSONBOID: {
+#if JSONB_DIRECT_CONVERSION
+    Jsonb *jsonb = (Jsonb *)PG_DETOAST_DATUM(arg);
+
+    if (JB_ROOT_IS_SCALAR(jsonb)) {
+      JsonbValue jb;
+      JsonbExtractScalar(&jsonb->root, &jb);
+      return_result = get_jsonb_value(ctx, &jb);
+    } else {
+      return_result = convert_jsonb(ctx, &jsonb->root);
+    }
+#else
     // Get the datum.
     Jsonb *jb = DatumGetJsonbP(arg);
 
@@ -446,6 +463,7 @@ JSValue pljs_datum_to_jsvalue(Datum arg, Oid argtype, JSContext *ctx,
 
     // Free the memory allocated.
     pfree(str);
+#endif
     break;
   }
 
@@ -837,9 +855,15 @@ Datum pljs_jsvalue_to_datum(JSValue val, Oid rettype, JSContext *ctx,
 
   case JSONBOID: {
     JSValueConst *argv = &val;
+#if JSONB_DIRECT_CONVERSION
+    {
+      Jsonb *obj = convert_object(ctx, argv[0]);
+      PG_RETURN_JSONB_P(DatumGetJsonbP((unsigned long)obj));
+    }
+#else // JSONB_DIRECT_CONVERSION
     JSValue js = JS_JSONStringify(ctx, argv[0], JS_UNDEFINED, JS_UNDEFINED);
-    size_t plen;
-    const char *str = JS_ToCStringLen(ctx, &plen, js);
+
+    const char *str = JS_ToCString(ctx, js);
 
     // return it as a Datum, since there is no direct CStringGetJsonb exposed.
     Datum ret = (Datum)DatumGetJsonbP(
@@ -849,6 +873,7 @@ Datum pljs_jsvalue_to_datum(JSValue val, Oid rettype, JSContext *ctx,
     JS_FreeValue(ctx, js);
 
     return ret;
+#endif
     break;
   }
 
@@ -1009,6 +1034,11 @@ Datum pljs_jsvalue_to_datum(JSValue val, Oid rettype, JSContext *ctx,
  */
 JSValue values_to_array(JSContext *ctx, JSValue *array, int argc, int start) {
   JSValue ret = JS_NewArray(ctx);
+  if (JS_IsError(ctx, ret) || JS_IsException(ret)) {
+    // Allocating this stops a bad free later down the road.
+    // TODO: why? and patch to quickjs?
+    char *str = JS_ToCString(ctx, ret);
+  }
 
   uint32_t current = 0;
   for (int i = start; i < argc; i++) {
@@ -1103,3 +1133,308 @@ JSValue spi_result_to_jsvalue(JSContext *ctx, int status) {
 
   return result;
 }
+
+#if JSONB_DIRECT_CONVERSION
+static JSValue get_jsonb_value(JSContext *ctx, JsonbValue *scalarVal) {
+  if (scalarVal->type == jbvNull) {
+    return JS_NULL;
+  } else if (scalarVal->type == jbvString) {
+    return JS_NewStringLen(ctx, scalarVal->val.string.val,
+                           scalarVal->val.string.len);
+  } else if (scalarVal->type == jbvNumeric) {
+    return JS_NewFloat64(
+        ctx, DatumGetFloat8(DirectFunctionCall1(
+                 numeric_float8, PointerGetDatum(scalarVal->val.numeric))));
+  } else if (scalarVal->type == jbvBool) {
+    return JS_NewBool(ctx, scalarVal->val.boolean);
+  } else {
+    elog(ERROR, "unknown jsonb scalar type");
+    return JS_NULL;
+  }
+}
+
+static JSValue jsonb_iterate(JSContext *ctx, JsonbIterator **it,
+                             JSValue container) {
+  JsonbValue val;
+  int32 count = 0;
+  JsonbIteratorToken token;
+  JSValue key;
+  char *key_string = NULL;
+  JSValue obj;
+
+  token = JsonbIteratorNext(it, &val, false);
+
+  while (token != WJB_DONE) {
+    switch (token) {
+    case WJB_BEGIN_OBJECT:
+      obj = JS_NewObject(ctx);
+
+      if (JS_IsArray(ctx, container)) {
+        JS_SetPropertyUint32(ctx, container, count,
+                             jsonb_iterate(ctx, it, obj));
+        count++;
+      } else {
+        JS_SetPropertyStr(ctx, container, key_string,
+                          jsonb_iterate(ctx, it, obj));
+        JS_FreeCString(ctx, key_string);
+        key_string = NULL;
+      }
+      break;
+
+    case WJB_END_OBJECT:
+      return container;
+
+      break;
+
+    case WJB_BEGIN_ARRAY:
+      obj = JS_NewArray(ctx);
+      if (JS_IsArray(ctx, container)) {
+        JS_SetPropertyUint32(ctx, container, count,
+                             jsonb_iterate(ctx, it, obj));
+        count++;
+      } else {
+        JS_SetPropertyStr(ctx, container, key_string,
+                          jsonb_iterate(ctx, it, obj));
+        JS_FreeCString(ctx, key_string);
+        key_string = NULL;
+      }
+      break;
+
+    case WJB_END_ARRAY:
+      return container;
+
+      break;
+
+    case WJB_KEY:
+      key = get_jsonb_value(ctx, &val);
+      key_string = (char *)JS_ToCString(ctx, key);
+      JS_FreeValue(ctx, key);
+
+      break;
+
+    case WJB_VALUE:
+      // object value
+      JS_SetPropertyStr(ctx, container, key_string, get_jsonb_value(ctx, &val));
+      JS_FreeCString(ctx, key_string);
+      key_string = NULL;
+
+      break;
+
+    case WJB_ELEM:
+      // array element
+      JS_SetPropertyUint32(ctx, container, count, get_jsonb_value(ctx, &val));
+      count++;
+      break;
+
+    case WJB_DONE:
+      return container;
+      break;
+
+    default:
+      elog(ERROR, "unknown jsonb iterator value");
+    }
+
+    token = JsonbIteratorNext(it, &val, false);
+  }
+
+  return container;
+}
+
+static JSValue convert_jsonb(JSContext *ctx, JsonbContainer *in) {
+  JsonbValue val;
+  JsonbIterator *it = JsonbIteratorInit(in);
+  JsonbIteratorToken token = JsonbIteratorNext(&it, &val, false);
+
+  JSValue container;
+
+  if (token == WJB_BEGIN_ARRAY) {
+    container = JS_NewArray(ctx);
+  } else {
+    container = JS_NewObject(ctx);
+  }
+
+  return jsonb_iterate(ctx, &it, container);
+}
+
+static JsonbValue *jsonb_object_from_object(JSContext *ctx,
+                                            JsonbParseState **pstate,
+                                            JSValue object);
+static JsonbValue *jsonb_array_from_array(JSContext *ctx,
+                                          JsonbParseState **pstate,
+                                          JSValue object);
+
+static char *time_as_8601(double millis) {
+  char tmp[100];
+  char *buf = (char *)palloc(25);
+
+  time_t t = (time_t)(millis / 1000);
+  strftime(tmp, 25, "%Y-%m-%dT%H:%M:%S", gmtime(&t));
+
+  double integral;
+  double fractional = modf(millis / 1000, &integral);
+
+  sprintf(buf, "%s.%03dZ", tmp, (int)(fractional * 1000));
+
+  return buf;
+}
+
+static JsonbValue *jsonb_from_value(JSContext *ctx, JsonbParseState **pstate,
+                                    JSValue value, JsonbIteratorToken type) {
+  JsonbValue val;
+
+  // if the token type is a key, the only valid value is jbvString
+  if (type == WJB_KEY) {
+    val.type = jbvString;
+    size_t len;
+    const char *key = JS_ToCStringLen(ctx, &len, value);
+
+    val.val.string.val = palloc(len);
+    memcpy(val.val.string.val, key, len);
+    val.val.string.len = len;
+
+    JS_FreeCString(ctx, key);
+  } else {
+    if (JS_IsBool(value)) {
+      val.type = jbvBool;
+      val.val.boolean = JS_ToBool(ctx, value);
+    } else if (JS_IsNull(value)) {
+      val.type = jbvNull;
+    } else if (JS_IsUndefined(value)) {
+      return NULL;
+    } else if (JS_IsString(value)) {
+      val.type = jbvString;
+      size_t len;
+      const char *v = JS_ToCStringLen(ctx, &len, value);
+
+      val.val.string.val = palloc(len);
+      memcpy(val.val.string.val, v, len);
+      val.val.string.len = len;
+
+      JS_FreeCString(ctx, v);
+    } else if (JS_IsNumber(value)) {
+      double in;
+
+      JS_ToFloat64(ctx, &in, value);
+
+      val.val.numeric = DatumGetNumeric(
+          DirectFunctionCall1(float8_numeric, Float8GetDatum((float8)in)));
+      val.type = jbvNumeric;
+    } else if (Is_Date(value)) {
+      double in;
+
+      JS_ToFloat64(ctx, &in, value);
+
+      if (isnan(in)) {
+        val.type = jbvNull;
+      } else {
+        val.val.string.val = time_as_8601(in);
+        val.val.string.len = 24;
+        val.type = jbvString;
+      }
+    } else {
+      val.type = jbvString;
+      size_t len;
+      const char *v = JS_ToCStringLen(ctx, &len, value);
+
+      val.val.string.val = palloc(len);
+      memcpy(val.val.string.val, v, len);
+      val.val.string.len = len;
+
+      JS_FreeCString(ctx, v);
+    }
+  }
+
+  return pushJsonbValue(pstate, type, &val);
+}
+
+static JsonbValue *jsonb_array_from_array(JSContext *ctx,
+                                          JsonbParseState **pstate,
+                                          JSValue object) {
+  JsonbValue *val = pushJsonbValue(pstate, WJB_BEGIN_ARRAY, NULL);
+
+  int32_t array_length = js_array_length(ctx, object);
+
+  for (int i = 0; i < array_length; i++) {
+    JSValue elem = JS_GetPropertyUint32(ctx, object, i);
+
+    if (JS_IsArray(ctx, elem)) {
+      val = jsonb_array_from_array(ctx, pstate, elem);
+    } else if (JS_IsObject(elem)) {
+      val = jsonb_object_from_object(ctx, pstate, elem);
+    } else {
+      val = jsonb_from_value(ctx, pstate, elem, WJB_ELEM);
+    }
+
+    JS_FreeValue(ctx, elem);
+  }
+
+  val = pushJsonbValue(pstate, WJB_END_ARRAY, NULL);
+
+  return val;
+}
+
+static JsonbValue *jsonb_object_from_object(JSContext *ctx,
+                                            JsonbParseState **pstate,
+                                            JSValue object) {
+  JsonbValue *val = pushJsonbValue(pstate, WJB_BEGIN_OBJECT, NULL);
+
+  uint32_t object_keys_length = 0;
+  JSPropertyEnum *tab;
+
+  if (JS_GetOwnPropertyNames(ctx, &tab, &object_keys_length, object,
+                             JS_GPN_STRING_MASK) < 0) {
+    return false;
+  }
+
+  for (uint32_t object_key = 0; object_key < object_keys_length; object_key++) {
+    JSValue o =
+        JS_GetPropertyInternal(ctx, object, tab[object_key].atom, object, 0);
+
+    val = jsonb_from_value(ctx, pstate, o, WJB_KEY);
+
+    if (JS_IsArray(ctx, o)) {
+      val = jsonb_array_from_array(ctx, pstate, o);
+    } else if (JS_IsObject(o)) {
+      val = jsonb_object_from_object(ctx, pstate, o);
+    } else {
+      val = jsonb_from_value(ctx, pstate, o, WJB_VALUE);
+    }
+
+    JS_FreeValue(ctx, o);
+  }
+
+  val = pushJsonbValue(pstate, WJB_END_OBJECT, NULL);
+  return val;
+}
+
+static Jsonb *convert_object(JSContext *ctx, JSValue object) {
+  // create a new memory context for conversion
+  MemoryContext oldcontext = CurrentMemoryContext;
+  MemoryContext conversion_context;
+
+  conversion_context = AllocSetContextCreate(
+      CurrentMemoryContext, "JSONB Conversion Context", ALLOCSET_SMALL_SIZES);
+
+  MemoryContextSwitchTo(conversion_context);
+
+  JsonbParseState *pstate = NULL;
+  JsonbValue *val;
+
+  if (JS_IsArray(ctx, object)) {
+    val = jsonb_array_from_array(ctx, &pstate, object);
+  } else if (JS_IsObject(object)) {
+    val = jsonb_object_from_object(ctx, &pstate, object);
+  } else {
+    pushJsonbValue(&pstate, WJB_BEGIN_ARRAY, NULL);
+    jsonb_from_value(ctx, &pstate, object, WJB_ELEM);
+    val = pushJsonbValue(&pstate, WJB_END_ARRAY, NULL);
+    val->val.array.rawScalar = true;
+  }
+
+  MemoryContextSwitchTo(oldcontext);
+
+  Jsonb *ret = JsonbValueToJsonb(val);
+  MemoryContextDelete(conversion_context);
+  return ret;
+}
+#endif

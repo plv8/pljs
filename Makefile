@@ -14,17 +14,25 @@ OBJS = src/pljs.o src/cache.o src/functions.o src/types.o src/params.o
 MODULE_big = pljs
 EXTENSION = pljs
 DATA = pljs.control pljs--$(PLJS_VERSION).sql
-PG_CFLAGS += -fPIC -Wall -Wextra -Wno-unused-parameter -Wno-declaration-after-statement -Wno-cast-function-type -std=c11 -DPLJS_VERSION=\"$(PLJS_VERSION)\"
+PG_CFLAGS += -fPIC -Wall -Wextra -Wno-unused-parameter -Wno-declaration-after-statement \
+    -Wno-cast-function-type -std=c11 -DPLJS_VERSION=\"$(PLJS_VERSION)\" -DEXPOSE_GC
 SHLIB_LINK = -Ldeps/quickjs -lquickjs
 
 ifeq ($(DEBUG), 1)
 PG_CFLAGS += -g
 SHLIB_LINK += -g
+else
+PG_CFLAGS += -O3
+SHLIB_LINK += -O3
 endif
 
 ifeq ($(DEBUG_MEMORY), 1)
 PG_CFLAGS += -fno-omit-frame-pointer -fsanitize=address
 PG_SHLIB_LINK += -fsanitize=address
+endif
+
+ifneq ($(DISABLE_DIRECT_JSONB_CONVERSION), 1)
+PG_CFLAGS += -DJSONB_DIRECT_CONVERSION
 endif
 
 REGRESS = init-extension function json jsonb json_conv types bytea context \
