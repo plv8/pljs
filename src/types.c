@@ -17,6 +17,7 @@
 #include "deps/quickjs/quickjs.h"
 
 #include "pljs.h"
+#include "varatt.h"
 
 #include <string.h>
 
@@ -33,6 +34,8 @@ static JSClassID JS_CLASS_UINT16_ARRAY = 25;
 static JSClassID JS_CLASS_INT32_ARRAY = 26;
 static JSClassID JS_CLASS_UINT32_ARRAY = 27;
 
+/**
+ * Struct containing the type information for a catch-all*/
 // if given object is an array.
 inline static bool Is_ArrayType(JSValueConst obj, JSClassID class_id) {
   return NULL != JS_GetOpaque(obj, class_id);
@@ -349,6 +352,44 @@ JSValue pljs_datum_to_array(Datum arg, pljs_type *type, JSContext *ctx) {
 }
 
 /**
+ * @brief Default type conversion from @Datum to @JSValue.
+ *
+ * If a type is unknown, instead of returning `undefined` or `NULL`, do a
+ * `cstring` or `varlena`, or value based conversion to an `String` or `Int32`
+ * and back.
+ *
+ * In the case of fixed-length `INTERNALLENGTH`, it will be a `String`
+ * with those bytes copied into the string, and the length set appropriately.
+ * When the `String` is variable, the length would be taken from the `varlena`
+ * header, and the rest copied into the string.
+ *
+ * @param arg #Datum - Postgres datum to convert
+ * @param type #pljs_type - type of the datum
+ * @param ctx #JSContext - Javascript context
+ * @returns #JSValue conversion of the Datum
+ */
+static JSValue pljs_datum_to_jsvalue_default(Datum arg, pljs_type type,
+                                             JSContext *ctx) {
+  JSValue ret = JS_UNDEFINED;
+
+  if (type.byval) {
+    ret = JS_NewInt32(ctx, arg);
+  } else {
+    // If this is a variable length type, make a copy of it.
+    if (type.length == -1) {
+      ret = JS_NewStringLen(ctx, (char *)VARDATA(arg), VARSIZE_ANY_EXHDR(arg));
+      JS_SetPropertyStr(ctx, ret, "length",
+                        JS_NewInt32(ctx, VARSIZE_ANY_EXHDR(arg)));
+    } else {
+      ret = JS_NewStringLen(ctx, (char *)arg, type.length);
+      JS_SetPropertyStr(ctx, ret, "length", JS_NewInt32(ctx, type.length));
+    }
+  }
+
+  return ret;
+}
+
+/**
  * @brief Converts a Postgres #Datum to a Javascript value.
  *
  * Takes a Postgres #Datum and type and converts it into a Javascript
@@ -488,9 +529,7 @@ JSValue pljs_datum_to_jsvalue(Datum arg, Oid argtype, JSContext *ctx,
     break;
 
   default:
-    // Log the inabilty to convert, and return JS_NULL.
-    elog(DEBUG3, "Unknown type: %d", argtype);
-    return_result = JS_NULL;
+    return_result = pljs_datum_to_jsvalue_default(arg, type, ctx);
   }
 
   return return_result;
@@ -678,6 +717,78 @@ Datum pljs_jsvalue_to_record(JSValue val, pljs_type *type, JSContext *ctx,
 }
 
 /**
+ * @brief Default type conversion from @JSValue to @Datum.
+ *
+ * If a type is unknown, instead of returning `NULL`, do a
+ * `cstring` or `varlena`, or value based conversion to an `Datum`.
+ *
+ * In the case of fixed-length `INTERNALLENGTH`, it will be a `cstring`
+ * with those bytes copied into the cstring.  When the `String` is variable,
+ * a `varlena` will be used and the size set appropriately.
+ *
+ * @param ctx #JSContext - Javascript context
+ * @param value #JSValue - Javascript to convert
+ * @param rettype #Oid - type of the datum
+ * @param isnull
+ * @returns #Datum conversion of the JSValue
+ */
+static Datum jsvalue_to_datum_default(JSContext *ctx, JSValue value,
+                                      Oid rettype, bool *isnull) {
+  Datum ret = 0;
+
+  // Set whether the Datum is `NULL` or not.
+  JSValue is_set_null_value = JS_GetPropertyStr(ctx, value, "is_null");
+  *isnull = JS_ToBool(ctx, is_set_null_value);
+
+  // If the value's property of `null` is set to `true`, we return an empty
+  // Datum.
+  if (*isnull) {
+    return (Datum)0;
+  }
+
+  pljs_type type;
+
+  pljs_type_fill(&type, rettype);
+
+  // If the type is by value, it's a 32bit value.
+  if (type.byval) {
+    int32_t v;
+    ret = JS_ToInt32(ctx, &v, value);
+
+    ret = v;
+  } else {
+    // Get a copy of the data, as well as its length.
+    size_t length;
+    const char *js_data = JS_ToCStringLen(ctx, &length, value);
+
+    //  If this is a variable length array then we return a `varlena`.
+    if (type.length == -1) {
+      //  Allocate a new cstring of the length of the type.
+      struct varlena *return_data = (struct varlena *)palloc(VARHDRSZ + length);
+
+      // Copy in the data and set the size.
+      memcpy(VARDATA(return_data), js_data, length);
+      SET_VARSIZE(return_data, length + VARHDRSZ);
+
+      ret = PointerGetDatum(return_data);
+    } else if (type.length > 0) {
+      // Allocate the memory for the type.
+      char *return_data = palloc0(type.length);
+
+      if (length < type.length) {
+        memcpy(return_data, js_data, length);
+      } else {
+        memcpy(return_data, js_data, type.length);
+      }
+
+      ret = PointerGetDatum(return_data);
+    }
+  }
+
+  return ret;
+}
+
+/**
  * @brief Converts a Javascript value to a Postgres #Datum.
  *
  * Takes a Javascript value and converts it into a Postgres #Datum,
@@ -803,7 +914,7 @@ Datum pljs_jsvalue_to_datum(JSValue val, Oid rettype, JSContext *ctx,
 
   case NUMERICOID: {
     if (JS_IsBigInt(ctx, val)) {
-      // Convert the value to a string then convert it to NUMERIC
+      // Convert the value to a string then convert it to NUMERIC.
       JSValue str = JS_ToString(ctx, val);
 
       const char *in = JS_ToCString(ctx, str);
@@ -1005,15 +1116,7 @@ Datum pljs_jsvalue_to_datum(JSValue val, Oid rettype, JSContext *ctx,
     break;
 
   default:
-    elog(DEBUG3, "Unknown type: %d", rettype);
-    if (fcinfo) {
-      PG_RETURN_NULL();
-    } else {
-      if (isnull) {
-        *isnull = true;
-      }
-      return (Datum)0;
-    }
+    return jsvalue_to_datum_default(ctx, val, rettype, isnull);
   }
 
   // shut up, compiler
@@ -1034,11 +1137,6 @@ Datum pljs_jsvalue_to_datum(JSValue val, Oid rettype, JSContext *ctx,
  */
 JSValue values_to_array(JSContext *ctx, JSValue *array, int argc, int start) {
   JSValue ret = JS_NewArray(ctx);
-  if (JS_IsError(ctx, ret) || JS_IsException(ret)) {
-    // Allocating this stops a bad free later down the road.
-    // TODO: why? and patch to quickjs?
-    char *str = JS_ToCString(ctx, ret);
-  }
 
   uint32_t current = 0;
   for (int i = start; i < argc; i++) {

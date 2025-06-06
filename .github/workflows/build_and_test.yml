@@ -25,6 +25,8 @@ jobs:
           git branch
           ./configure --prefix=$PWD/inst/  --enable-cassert --enable-debug --with-openssl
           make -j4 install
+          cd contrib/ltree
+          make install
 
       - name: Start Postgres
         run: |
