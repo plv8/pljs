@@ -50,3 +50,21 @@ CREATE OR REPLACE FUNCTION bigint_numeric(a INT8, b INT8)
     return a ** b;
    $$ LANGUAGE pljs STABLE STRICT;
 SELECT bigint_numeric(20, 200);
+
+-- ENUM type
+CREATE TYPE status AS ENUM ('active', 'inactive', 'pending');
+
+CREATE FUNCTION enum_echo(s status) returns status AS $$
+  return s;
+$$ LANGUAGE pljs;
+
+SELECT enum_echo('active');
+
+-- Custom type
+CREATE EXTENSION ltree;
+
+CREATE FUNCTION ltree_echo(l ltree) RETURNS ltree AS $$
+  return l;
+$$ LANGUAGE pljs;
+
+SELECT ltree_echo('1.2.3'::ltree);
