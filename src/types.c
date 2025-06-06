@@ -62,9 +62,9 @@ inline static bool Is_Date(JSValueConst obj) {
 }
 
 #if JSONB_DIRECT_CONVERSION
-static JSValue convert_jsonb(JSContext *ctx, JsonbContainer *in);
-static JSValue get_jsonb_value(JSContext *ctx, JsonbValue *scalarVal);
-static Jsonb *convert_object(JSContext *ctx, JSValue object);
+static JSValue convert_jsonb(JsonbContainer *in, JSContext *ctx);
+static JSValue get_jsonb_value(JsonbValue *scalarVal, JSContext *ctx);
+static Jsonb *convert_object(JSValue object, JSContext *ctx);
 #endif
 
 /**
@@ -136,7 +136,16 @@ static double timestamptz_to_epoch(TimestampTz tm) {
   return epoch + (POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE) * 86400000.0;
 }
 
-// allocate memory and copy data from the varlena text representation.
+/**
+ * @brief Makes a copy of a #text type from Postgres and returns a `cstring`.
+ *
+ * Takes the input of a Postgres `TEXT` field, allocates memory in the
+ * current memory context, and returns a `\0` terminated copy of the string
+ * that was stored.  It is up to the caller to free the memory allocated.
+ *
+ * @param what #text - string to duplicate
+ * @returns @c char * copy of the text field
+ */
 static char *dup_pgtext(text *what) {
   size_t len = VARSIZE(what) - VARHDRSZ;
   char *dup = palloc(len + 1);
@@ -188,11 +197,11 @@ static const char *spi_status_string(int status) {
 /**
  * @brief Helper for getting the length of a Javascript array.
  *
- * @param ctx #JSContext - Javascript context to execute in
  * @param obj JSValueConst - Javascript array to check the length of
+ * @param ctx #JSContext - Javascript context to execute in
  * @returns @c uint32_t
  */
-uint32_t js_array_length(JSContext *ctx, JSValueConst obj) {
+uint32_t pljs_js_array_length(JSValueConst obj, JSContext *ctx) {
   JSValue length = JS_GetPropertyStr(ctx, obj, "length");
   int32_t array_length_int;
   JS_ToInt32(ctx, &array_length_int, length);
@@ -271,7 +280,7 @@ JSValue pljs_datum_to_object(Datum arg, pljs_type *type, JSContext *ctx) {
   PG_CATCH();
   {
     ErrorData *edata = CopyErrorData();
-    JSValue error = js_throw(ctx, edata->message);
+    JSValue error = js_throw(edata->message, ctx);
     FlushErrorState();
     FreeErrorData(edata);
 
@@ -488,9 +497,9 @@ JSValue pljs_datum_to_jsvalue(Datum arg, Oid argtype, JSContext *ctx,
     if (JB_ROOT_IS_SCALAR(jsonb)) {
       JsonbValue jb;
       JsonbExtractScalar(&jsonb->root, &jb);
-      return_result = get_jsonb_value(ctx, &jb);
+      return_result = get_jsonb_value(&jb, ctx);
     } else {
-      return_result = convert_jsonb(ctx, &jsonb->root);
+      return_result = convert_jsonb(&jsonb->root, ctx);
     }
 #else
     // Get the datum.
@@ -555,7 +564,7 @@ Datum pljs_jsvalue_to_array(JSValue val, pljs_type *type, JSContext *ctx,
   int ndims[1];
   int lbs[] = {[0] = 1};
 
-  int32_t array_length = js_array_length(ctx, val);
+  int32_t array_length = pljs_js_array_length(val, ctx);
 
   values = (Datum *)palloc(sizeof(Datum) * array_length);
   nulls = (bool *)palloc(sizeof(bool) * array_length);
@@ -726,14 +735,14 @@ Datum pljs_jsvalue_to_record(JSValue val, pljs_type *type, JSContext *ctx,
  * with those bytes copied into the cstring.  When the `String` is variable,
  * a `varlena` will be used and the size set appropriately.
  *
- * @param ctx #JSContext - Javascript context
  * @param value #JSValue - Javascript to convert
- * @param rettype #Oid - type of the datum
  * @param isnull
+ * @param type #pljs_type - type of the datum
+ * @param ctx #JSContext - Javascript context
  * @returns #Datum conversion of the JSValue
  */
-static Datum jsvalue_to_datum_default(JSContext *ctx, JSValue value,
-                                      Oid rettype, bool *isnull) {
+static Datum jsvalue_to_datum_default(JSValue value, bool *isnull,
+                                      pljs_type type, JSContext *ctx) {
   Datum ret = 0;
 
   // Set whether the Datum is `NULL` or not.
@@ -745,10 +754,6 @@ static Datum jsvalue_to_datum_default(JSContext *ctx, JSValue value,
   if (*isnull) {
     return (Datum)0;
   }
-
-  pljs_type type;
-
-  pljs_type_fill(&type, rettype);
 
   // If the type is by value, it's a 32bit value.
   if (type.byval) {
@@ -775,7 +780,7 @@ static Datum jsvalue_to_datum_default(JSContext *ctx, JSValue value,
       // Allocate the memory for the type.
       char *return_data = palloc0(type.length);
 
-      if (length < type.length) {
+      if (length < (size_t)type.length) {
         memcpy(return_data, js_data, length);
       } else {
         memcpy(return_data, js_data, type.length);
@@ -968,7 +973,7 @@ Datum pljs_jsvalue_to_datum(JSValue val, Oid rettype, JSContext *ctx,
     JSValueConst *argv = &val;
 #if JSONB_DIRECT_CONVERSION
     {
-      Jsonb *obj = convert_object(ctx, argv[0]);
+      Jsonb *obj = convert_object(argv[0], ctx);
       PG_RETURN_JSONB_P(DatumGetJsonbP((unsigned long)obj));
     }
 #else // JSONB_DIRECT_CONVERSION
@@ -994,7 +999,7 @@ Datum pljs_jsvalue_to_datum(JSValue val, Oid rettype, JSContext *ctx,
 
     uint8_t *buffer;
 
-    uint32_t length = js_array_length(ctx, val);
+    uint32_t length = pljs_js_array_length(val, ctx);
 
     if (Is_ArrayType(val, JS_CLASS_UINT8_ARRAY) ||
         Is_ArrayType(val, JS_CLASS_INT8_ARRAY)) {
@@ -1116,7 +1121,7 @@ Datum pljs_jsvalue_to_datum(JSValue val, Oid rettype, JSContext *ctx,
     break;
 
   default:
-    return jsvalue_to_datum_default(ctx, val, rettype, isnull);
+    return jsvalue_to_datum_default(val, isnull, type, ctx);
   }
 
   // shut up, compiler
@@ -1129,13 +1134,14 @@ Datum pljs_jsvalue_to_datum(JSValue val, Oid rettype, JSContext *ctx,
  * Takes an array Javascript values and converts it into a Javascript
  * array of values, starting at the index requested.
  *
- * @param ctx #JSContext - Javascript context to execute in
  * @param array #JSValue - array of #JSValue values to convert
  * @param argc @c int - number of values to convert
  * @param start @c int - index to start the conversion
+ * @param ctx #JSContext - Javascript context to execute in
  * @returns #JSValue array of the results
  */
-JSValue values_to_array(JSContext *ctx, JSValue *array, int argc, int start) {
+JSValue pljs_values_to_array(JSValue *array, int argc, int start,
+                             JSContext *ctx) {
   JSValue ret = JS_NewArray(ctx);
 
   uint32_t current = 0;
@@ -1150,13 +1156,13 @@ JSValue values_to_array(JSContext *ctx, JSValue *array, int argc, int start) {
 /**
  * @brief Converts a Postgres #HeapTuple to a Javascript value.
  *
- * @param ctx #JSContext - Javascript context to execute in
  * @param tupledesc #TupleDesc
  * @param heap_tuple #HeapTuple - value to convert
+ * @param ctx #JSContext - Javascript context to execute in
  * @returns #JSValue of the tuple value passed
  */
-JSValue tuple_to_jsvalue(JSContext *ctx, TupleDesc tupledesc,
-                         HeapTuple heap_tuple) {
+JSValue pljs_tuple_to_jsvalue(TupleDesc tupledesc, HeapTuple heap_tuple,
+                              JSContext *ctx) {
   JSValue obj = JS_NewObject(ctx);
 
   for (int i = 0; i < tupledesc->natts; i++) {
@@ -1185,16 +1191,15 @@ JSValue tuple_to_jsvalue(JSContext *ctx, TupleDesc tupledesc,
 /**
  * @brief Converts a Postgres SPI result to a Javascript value.
  *
- * @param ctx #JSContext - Javascript context to execute in
  * @param status @c int - SPI status to convert
+ * @param ctx #JSContext - Javascript context to execute in
  * @returns #JSValue of the SPI status
  */
-
-JSValue spi_result_to_jsvalue(JSContext *ctx, int status) {
+JSValue pljs_spi_result_to_jsvalue(int status, JSContext *ctx) {
   JSValue result;
 
   if (status < 0) {
-    return js_throw(ctx, spi_status_string(status));
+    return js_throw(spi_status_string(status), ctx);
   }
 
   switch (status) {
@@ -1216,7 +1221,8 @@ JSValue spi_result_to_jsvalue(JSContext *ctx, int status) {
     JSValue obj = JS_NewArray(ctx);
 
     for (int r = 0; r < nrows; r++) {
-      JSValue value = tuple_to_jsvalue(ctx, tupdesc, SPI_tuptable->vals[r]);
+      JSValue value =
+          pljs_tuple_to_jsvalue(tupdesc, SPI_tuptable->vals[r], ctx);
 
       JS_SetPropertyUint32(ctx, obj, r, value);
     }
@@ -1233,97 +1239,137 @@ JSValue spi_result_to_jsvalue(JSContext *ctx, int status) {
 }
 
 #if JSONB_DIRECT_CONVERSION
-static JSValue get_jsonb_value(JSContext *ctx, JsonbValue *scalarVal) {
-  if (scalarVal->type == jbvNull) {
+/**
+ * @brief Converts a #JsonbValue to a #JSValue.
+ *
+ * @param scalar_value #JsonbValue - value to convert
+ * @param ctx #JSContext - Javascript context to execute in
+ * @returns #JSValue of the #JsonbValue
+ */
+static JSValue get_jsonb_value(JsonbValue *scalar_value, JSContext *ctx) {
+  // If the value is `null` then we return `null`.
+  if (scalar_value->type == jbvNull) {
     return JS_NULL;
-  } else if (scalarVal->type == jbvString) {
-    return JS_NewStringLen(ctx, scalarVal->val.string.val,
-                           scalarVal->val.string.len);
-  } else if (scalarVal->type == jbvNumeric) {
+  } else if (scalar_value->type == jbvString) {
+    // A `String`.
+    return JS_NewStringLen(ctx, scalar_value->val.string.val,
+                           scalar_value->val.string.len);
+  } else if (scalar_value->type == jbvNumeric) {
+    // `Number`.
     return JS_NewFloat64(
         ctx, DatumGetFloat8(DirectFunctionCall1(
-                 numeric_float8, PointerGetDatum(scalarVal->val.numeric))));
-  } else if (scalarVal->type == jbvBool) {
-    return JS_NewBool(ctx, scalarVal->val.boolean);
+                 numeric_float8, PointerGetDatum(scalar_value->val.numeric))));
+  } else if (scalar_value->type == jbvBool) {
+    // `Bool`.
+    return JS_NewBool(ctx, scalar_value->val.boolean);
   } else {
     elog(ERROR, "unknown jsonb scalar type");
     return JS_NULL;
   }
 }
 
-static JSValue jsonb_iterate(JSContext *ctx, JsonbIterator **it,
-                             JSValue container) {
-  JsonbValue val;
+/**
+ * @brief Iterates through a #JsonbIterator.
+ *
+ * Iterate through a `JSONB` object and creates the proper Javascript type
+ * for each: `Number`, `String`, `Bool`, `Date`, `Array`, `Object`.  This
+ * function is meant to be run recursively.
+ *
+ * @param it #JsonbIterator - `JSONB` iterator to iterate on
+ * @param container #JSValue - parent container to store the value in
+ * @param ctx #JSContext - Javascript context to execute in
+ * @returns #JSValue of `JSONB` value
+ */
+static JSValue jsonb_iterate(JsonbIterator **it, JSValue container,
+                             JSContext *ctx) {
+  JsonbValue value;
   int32 count = 0;
   JsonbIteratorToken token;
   JSValue key;
   char *key_string = NULL;
   JSValue obj;
 
-  token = JsonbIteratorNext(it, &val, false);
+  // Get the next value from the `JSONB` object.
+  token = JsonbIteratorNext(it, &value, false);
 
+  // Iterate through the values until the end of the `JSONB` object.
   while (token != WJB_DONE) {
     switch (token) {
+    // If it is a new Object, create one.
     case WJB_BEGIN_OBJECT:
       obj = JS_NewObject(ctx);
 
+      // If our container is an `Array`, append the object.
+      // Iterate through the `JSONB` array until we get to the end of the array.
       if (JS_IsArray(ctx, container)) {
         JS_SetPropertyUint32(ctx, container, count,
-                             jsonb_iterate(ctx, it, obj));
+                             jsonb_iterate(it, obj, ctx));
         count++;
       } else {
+        // Otherwise set the property of the `Object`.  We use the
+        // #key_string that we previously stored from the `JSONB` object.
+        // Iterate through the `JSONB` object until we get to the end of the
+        // object.
         JS_SetPropertyStr(ctx, container, key_string,
-                          jsonb_iterate(ctx, it, obj));
+                          jsonb_iterate(it, obj, ctx));
         JS_FreeCString(ctx, key_string);
         key_string = NULL;
       }
       break;
 
+      // If we are done with the object, return the container.
     case WJB_END_OBJECT:
       return container;
 
       break;
 
+      // Start of a new `Array`.
     case WJB_BEGIN_ARRAY:
       obj = JS_NewArray(ctx);
       if (JS_IsArray(ctx, container)) {
         JS_SetPropertyUint32(ctx, container, count,
-                             jsonb_iterate(ctx, it, obj));
+                             jsonb_iterate(it, obj, ctx));
         count++;
       } else {
         JS_SetPropertyStr(ctx, container, key_string,
-                          jsonb_iterate(ctx, it, obj));
+                          jsonb_iterate(it, obj, ctx));
         JS_FreeCString(ctx, key_string);
         key_string = NULL;
       }
       break;
 
+      // End of the array, return the container.
     case WJB_END_ARRAY:
       return container;
 
       break;
 
+      // Retrieve the key for an object and store it as `key_string`.
     case WJB_KEY:
-      key = get_jsonb_value(ctx, &val);
+      key = get_jsonb_value(&value, ctx);
       key_string = (char *)JS_ToCString(ctx, key);
       JS_FreeValue(ctx, key);
 
       break;
 
+      // Retrieve the object value and set it using `key_string`.
     case WJB_VALUE:
-      // object value
-      JS_SetPropertyStr(ctx, container, key_string, get_jsonb_value(ctx, &val));
+      JS_SetPropertyStr(ctx, container, key_string,
+                        get_jsonb_value(&value, ctx));
       JS_FreeCString(ctx, key_string);
+
+      // Clear the `key_string` so it cannot be re-used.
       key_string = NULL;
 
       break;
 
+      // Retrieve an array element and set it, then increment the count.
     case WJB_ELEM:
-      // array element
-      JS_SetPropertyUint32(ctx, container, count, get_jsonb_value(ctx, &val));
+      JS_SetPropertyUint32(ctx, container, count, get_jsonb_value(&value, ctx));
       count++;
       break;
 
+      // We are done, return the container.
     case WJB_DONE:
       return container;
       break;
@@ -1332,35 +1378,56 @@ static JSValue jsonb_iterate(JSContext *ctx, JsonbIterator **it,
       elog(ERROR, "unknown jsonb iterator value");
     }
 
-    token = JsonbIteratorNext(it, &val, false);
+    // Retrieve the next `JSONB` token for the loop.
+    token = JsonbIteratorNext(it, &value, false);
   }
 
   return container;
 }
 
-static JSValue convert_jsonb(JSContext *ctx, JsonbContainer *in) {
+/**
+ * @brief Converts a #JsonbContainer to a Javascript value.
+ *
+ * Entry function for the `JSONB` iterator, sets up a container to
+ * eventually be returned, then calls the iterator function to fill the
+ * container.
+ *
+ * @param in #JsonbContainer - the `JSONB` object to convert
+ * @param ctx #JSContext - Javascript context to execute in
+ * @returns #JSValue of the `JSONB` object
+ */
+static JSValue convert_jsonb(JsonbContainer *in, JSContext *ctx) {
   JsonbValue val;
   JsonbIterator *it = JsonbIteratorInit(in);
   JsonbIteratorToken token = JsonbIteratorNext(&it, &val, false);
 
+  // `JSONB` objects always need to be an `Array` or `Object`.
   JSValue container;
 
+  // If this is an array, then create an `Array`.
   if (token == WJB_BEGIN_ARRAY) {
     container = JS_NewArray(ctx);
   } else {
+    // Otherwise it is an `Object` by default.
     container = JS_NewObject(ctx);
   }
 
-  return jsonb_iterate(ctx, &it, container);
+  return jsonb_iterate(&it, container, ctx);
 }
 
-static JsonbValue *jsonb_object_from_object(JSContext *ctx,
+// Forward declarations of the conversion functions.
+static JsonbValue *jsonb_object_from_object(JSValue object,
                                             JsonbParseState **pstate,
-                                            JSValue object);
-static JsonbValue *jsonb_array_from_array(JSContext *ctx,
-                                          JsonbParseState **pstate,
-                                          JSValue object);
+                                            JSContext *ctx);
+static JsonbValue *
+jsonb_array_from_array(JSValue array, JsonbParseState **pstate, JSContext *ctx);
 
+/**
+ * @brief Converts a Postgres time in milliseconds to a 8601 datetime string.
+ *
+ * @param millis @c double - Postgres time in milliseconds
+ * @returns @c char * representation of the date and time
+ */
 static char *time_as_8601(double millis) {
   char tmp[100];
   char *buf = (char *)palloc(25);
@@ -1376,11 +1443,21 @@ static char *time_as_8601(double millis) {
   return buf;
 }
 
-static JsonbValue *jsonb_from_value(JSContext *ctx, JsonbParseState **pstate,
-                                    JSValue value, JsonbIteratorToken type) {
+/**
+ * @brief Converts a #JSValue into a `JSONB` value.
+ *
+ * @param parse_state #JsonbParseState - current state of the `JSONB` parsing
+ * @param value #JSValue - the value to convert
+ * @param type #JsonbIteratorToken
+ * @param ctx #JSContext - Javascript context to execute in
+ * @returns #JsonbValue `JSONB` result from the conversion
+ */
+static JsonbValue *jsonb_from_value(JSValue value,
+                                    JsonbParseState **parse_state,
+                                    JsonbIteratorToken type, JSContext *ctx) {
   JsonbValue val;
 
-  // if the token type is a key, the only valid value is jbvString
+  // If the token type is a key, the only valid value is `jbvString`.
   if (type == WJB_KEY) {
     val.type = jbvString;
     size_t len;
@@ -1392,6 +1469,7 @@ static JsonbValue *jsonb_from_value(JSContext *ctx, JsonbParseState **pstate,
 
     JS_FreeCString(ctx, key);
   } else {
+    // Otherwise make the conversion based on the #JSValue type.
     if (JS_IsBool(value)) {
       val.type = jbvBool;
       val.val.boolean = JS_ToBool(ctx, value);
@@ -1442,71 +1520,112 @@ static JsonbValue *jsonb_from_value(JSContext *ctx, JsonbParseState **pstate,
     }
   }
 
-  return pushJsonbValue(pstate, type, &val);
+  // Push the result into the parse_state.
+  return pushJsonbValue(parse_state, type, &val);
 }
 
-static JsonbValue *jsonb_array_from_array(JSContext *ctx,
-                                          JsonbParseState **pstate,
-                                          JSValue object) {
-  JsonbValue *val = pushJsonbValue(pstate, WJB_BEGIN_ARRAY, NULL);
+/**
+ * @brief Converts a #JSValue `Array` to a #JsonbValue array.
+ *
+ * @param array #JSValue - `Array` to convert
+ * @param parse_state #JsonbParseState - the parse state of the `JSONB` object
+ * @param ctx #JSContext - Javascript context to execute in
+ * @returns #JsonbValue of the `JSONB` array
+ */
+static JsonbValue *jsonb_array_from_array(JSValue array,
+                                          JsonbParseState **parse_state,
+                                          JSContext *ctx) {
+  // Push the beginning of the array into the parse state.
+  JsonbValue *value = pushJsonbValue(parse_state, WJB_BEGIN_ARRAY, NULL);
 
-  int32_t array_length = js_array_length(ctx, object);
+  // Get the length of the `Array`.
+  int32_t array_length = pljs_js_array_length(array, ctx);
 
+  // Iterate through the `Array`.
   for (int i = 0; i < array_length; i++) {
-    JSValue elem = JS_GetPropertyUint32(ctx, object, i);
+    // Get the current element.
+    JSValue elem = JS_GetPropertyUint32(ctx, array, i);
 
+    // For each type, set `value` to the result.
     if (JS_IsArray(ctx, elem)) {
-      val = jsonb_array_from_array(ctx, pstate, elem);
+      value = jsonb_array_from_array(elem, parse_state, ctx);
     } else if (JS_IsObject(elem)) {
-      val = jsonb_object_from_object(ctx, pstate, elem);
+      value = jsonb_object_from_object(elem, parse_state, ctx);
     } else {
-      val = jsonb_from_value(ctx, pstate, elem, WJB_ELEM);
+      value = jsonb_from_value(elem, parse_state, WJB_ELEM, ctx);
     }
 
+    // Free up the element.
     JS_FreeValue(ctx, elem);
   }
 
-  val = pushJsonbValue(pstate, WJB_END_ARRAY, NULL);
+  // Set the value to the end of the array.
+  value = pushJsonbValue(parse_state, WJB_END_ARRAY, NULL);
 
-  return val;
+  return value;
 }
 
-static JsonbValue *jsonb_object_from_object(JSContext *ctx,
-                                            JsonbParseState **pstate,
-                                            JSValue object) {
-  JsonbValue *val = pushJsonbValue(pstate, WJB_BEGIN_OBJECT, NULL);
+/**
+ * @brief Converts a #JSValue `Object` to a #JsonbValue object.
+ *
+ * @param object #JSValue - `Object` to convert
+ * @param parse_state #JsonbParseState - the parse state of the `JSONB` object
+ * @param ctx #JSContext - Javascript context to execute in
+ * @returns #JsonbValue of the `JSONB` object
+ */
+static JsonbValue *jsonb_object_from_object(JSValue object,
+                                            JsonbParseState **parse_state,
+                                            JSContext *ctx) {
+  // Push the beginning of the object intp the parse state.
+  JsonbValue *value = pushJsonbValue(parse_state, WJB_BEGIN_OBJECT, NULL);
 
   uint32_t object_keys_length = 0;
   JSPropertyEnum *tab;
 
+  // Get the keys of the `Object`.
   if (JS_GetOwnPropertyNames(ctx, &tab, &object_keys_length, object,
                              JS_GPN_STRING_MASK) < 0) {
     return false;
   }
 
+  // Iterate through the `Object` keys.
   for (uint32_t object_key = 0; object_key < object_keys_length; object_key++) {
+    // Get the value.
     JSValue o =
         JS_GetPropertyInternal(ctx, object, tab[object_key].atom, object, 0);
 
-    val = jsonb_from_value(ctx, pstate, o, WJB_KEY);
+    value = jsonb_from_value(o, parse_state, WJB_KEY, ctx);
 
+    // If the value is an `Array` the convert it.
     if (JS_IsArray(ctx, o)) {
-      val = jsonb_array_from_array(ctx, pstate, o);
+      value = jsonb_array_from_array(o, parse_state, ctx);
     } else if (JS_IsObject(o)) {
-      val = jsonb_object_from_object(ctx, pstate, o);
+      // Or convert an `Object`.
+      value = jsonb_object_from_object(o, parse_state, ctx);
     } else {
-      val = jsonb_from_value(ctx, pstate, o, WJB_VALUE);
+      // Or anything else.
+      value = jsonb_from_value(o, parse_state, WJB_VALUE, ctx);
     }
 
+    // Free up the memory.
     JS_FreeValue(ctx, o);
   }
 
-  val = pushJsonbValue(pstate, WJB_END_OBJECT, NULL);
-  return val;
+  // Push that we are at the end of an object.
+  value = pushJsonbValue(parse_state, WJB_END_OBJECT, NULL);
+
+  return value;
 }
 
-static Jsonb *convert_object(JSContext *ctx, JSValue object) {
-  // create a new memory context for conversion
+/**
+ * @brief Converts a #JSValue `Object` to a #Jsonb value.
+ *
+ * @param object #JSValue - `Object` to convert
+ * @param ctx #JSContext - Javascript context to execute in
+ * @returns #Jsonb the converted `JSONB` value
+ */
+static Jsonb *convert_object(JSValue object, JSContext *ctx) {
+  // Create a new memory context for conversion.
   MemoryContext oldcontext = CurrentMemoryContext;
   MemoryContext conversion_context;
 
@@ -1515,24 +1634,30 @@ static Jsonb *convert_object(JSContext *ctx, JSValue object) {
 
   MemoryContextSwitchTo(conversion_context);
 
-  JsonbParseState *pstate = NULL;
-  JsonbValue *val;
+  JsonbParseState *parse_state = NULL;
+  JsonbValue *value;
 
+  // Check the type and get its value.
   if (JS_IsArray(ctx, object)) {
-    val = jsonb_array_from_array(ctx, &pstate, object);
+    value = jsonb_array_from_array(object, &parse_state, ctx);
   } else if (JS_IsObject(object)) {
-    val = jsonb_object_from_object(ctx, &pstate, object);
+    value = jsonb_object_from_object(object, &parse_state, ctx);
   } else {
-    pushJsonbValue(&pstate, WJB_BEGIN_ARRAY, NULL);
-    jsonb_from_value(ctx, &pstate, object, WJB_ELEM);
-    val = pushJsonbValue(&pstate, WJB_END_ARRAY, NULL);
-    val->val.array.rawScalar = true;
+    pushJsonbValue(&parse_state, WJB_BEGIN_ARRAY, NULL);
+    jsonb_from_value(object, &parse_state, WJB_ELEM, ctx);
+    value = pushJsonbValue(&parse_state, WJB_END_ARRAY, NULL);
+    value->val.array.rawScalar = true;
   }
 
+  // Switch back to our old #MemoryContext.
   MemoryContextSwitchTo(oldcontext);
 
-  Jsonb *ret = JsonbValueToJsonb(val);
+  // Create the #Jsonb object to return.
+  Jsonb *ret = JsonbValueToJsonb(value);
+
+  // Delete the conversion #MemoryContext.
   MemoryContextDelete(conversion_context);
+
   return ret;
 }
 #endif

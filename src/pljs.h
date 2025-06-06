@@ -151,12 +151,12 @@ void pljs_cache_init(void);
 void pljs_setup_namespace(JSContext *ctx);
 
 // Throw a Javascript error
-JSValue js_throw(JSContext *, const char *);
+JSValue js_throw(const char *, JSContext *);
 
 // Functions
 JSValue pljs_compile_function(pljs_context *context, bool is_trigger);
 JSValue pljs_find_js_function(Oid fn_oid, JSContext *ctx);
-bool has_permission_to_execute(const char *signature);
+bool pljs_has_permission_to_execute(const char *signature);
 pljs_storage *pljs_storage_for_context(JSContext *ctx);
 
 // cache.c
@@ -185,8 +185,8 @@ JSValue pljs_datum_to_jsvalue(Datum arg, Oid type, JSContext *ctx,
                               bool skip_composite);
 JSValue pljs_datum_to_array(Datum arg, pljs_type *type, JSContext *ctx);
 JSValue pljs_datum_to_object(Datum arg, pljs_type *type, JSContext *ctx);
-JSValue tuple_to_jsvalue(JSContext *ctx, TupleDesc, HeapTuple);
-JSValue spi_result_to_jsvalue(JSContext *, int);
+JSValue pljs_tuple_to_jsvalue(TupleDesc, HeapTuple, JSContext *ctx);
+JSValue pljs_spi_result_to_jsvalue(int, JSContext *);
 
 // To Datum
 Datum pljs_jsvalue_to_array(JSValue, pljs_type *, JSContext *,
@@ -197,11 +197,11 @@ Datum pljs_jsvalue_to_record(JSValue val, pljs_type *type, JSContext *ctx,
                              bool *is_null, TupleDesc, Tuplestorestate *);
 
 // Utility
-uint32_t js_array_length(JSContext *, JSValue);
+uint32_t pljs_js_array_length(JSValue, JSContext *);
 void pljs_type_fill(pljs_type *, Oid);
 bool pljs_jsvalue_object_contains_all_column_names(JSValue val, JSContext *ctx,
                                                    TupleDesc tupdesc);
-JSValue values_to_array(JSContext *, JSValue *, int, int);
+JSValue pljs_values_to_array(JSValue *, int, int, JSContext *);
 void pljs_variable_param_setup(ParseState *, void *);
 ParamListInfo pljs_setup_variable_paramlist(pljs_param_state *, Datum *,
                                             char *);

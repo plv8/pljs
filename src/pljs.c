@@ -26,19 +26,19 @@ PG_FUNCTION_INFO_V1(pljs_call_handler);
 PG_FUNCTION_INFO_V1(pljs_call_validator);
 PG_FUNCTION_INFO_V1(pljs_inline_handler);
 
-static Datum pljs_call_function(PG_FUNCTION_ARGS, pljs_context *context,
-                                JSValueConst *argv);
-static Datum pljs_call_srf_function(PG_FUNCTION_ARGS, pljs_context *context,
-                                    JSValueConst *argv);
+static Datum call_function(PG_FUNCTION_ARGS, pljs_context *context,
+                           JSValueConst *argv);
+static Datum call_srf_function(PG_FUNCTION_ARGS, pljs_context *context,
+                               JSValueConst *argv);
 
-static void pljs_call_anonymous_function(JSContext *, const char *);
-static Datum pljs_call_trigger(FunctionCallInfo fcinfo, pljs_context *context);
+static void call_anonymous_function(const char *, JSContext *);
+static Datum call_trigger(FunctionCallInfo fcinfo, pljs_context *context);
 static void signal_handler(int sig_num);
 static int interrupt_handler(JSRuntime *rt, void *opaque);
-static void pljs_setup_storage_for_context(pljs_context *context,
-                                           FunctionCallInfo fcinfo);
-static void pljs_store_storage_in_context(pljs_context *context,
-                                          pljs_storage *storage);
+static void setup_storage_for_context(pljs_context *context,
+                                      FunctionCallInfo fcinfo);
+static void store_storage_in_context(pljs_context *context,
+                                     pljs_storage *storage);
 
 /** \brief QuickJS Runtime */
 JSRuntime *rt = NULL;
@@ -301,7 +301,7 @@ static bool setup_function(FunctionCallInfo fcinfo, HeapTuple proctuple,
  * @param signature @c char *
  * @returns @c bool
  */
-bool has_permission_to_execute(const char *signature) {
+bool pljs_has_permission_to_execute(const char *signature) {
   // Stack-allocate FunctionCallInfoBaseData with
   // space for 2 arguments:
   LOCAL_FCINFO(fake_fcinfo, 2);
@@ -348,7 +348,7 @@ bool has_permission_to_execute(const char *signature) {
  * Finds, verifies, and executes a `pljs.start_proc` if one is set.
  * This is executed whenever a new context is created.
  */
-static void pljs_setup_start_proc(JSContext *ctx) {
+static void setup_start_proc(JSContext *ctx) {
   JSValue func = JS_UNDEFINED;
 
   // Get a copy of the current memory context, we will need to switch to it in
@@ -358,7 +358,7 @@ static void pljs_setup_start_proc(JSContext *ctx) {
   PG_TRY();
   {
     // Check to see if we have permission to execute the startup procedure
-    if (has_permission_to_execute(configuration.start_proc)) {
+    if (pljs_has_permission_to_execute(configuration.start_proc)) {
       Oid funcoid;
       if (strchr(configuration.start_proc, '(') == NULL) {
         funcoid = DatumGetObjectId(DirectFunctionCall1(
@@ -474,6 +474,16 @@ static JSValueConst *convert_arguments_to_javascript(FunctionCallInfo fcinfo,
   return argv;
 }
 
+/**
+ * @brief Retrieves the #pljs_storage for a given #JSContext.
+ *
+ * We stash a #pljs_storage object as an opaque object connected to the
+ * `pljs` global Javascript object.  This contains important function
+ * call contexts that allow us to do the conversions that we need.
+ *
+ * @param ctx #JSContext
+ * @returns #pljs_storage
+ */
 pljs_storage *pljs_storage_for_context(JSContext *ctx) {
   JSValue global_obj = JS_GetGlobalObject(ctx);
 
@@ -484,8 +494,14 @@ pljs_storage *pljs_storage_for_context(JSContext *ctx) {
   return storage;
 }
 
-static void pljs_setup_storage_for_context(pljs_context *context,
-                                           FunctionCallInfo fcinfo) {
+/**
+ * @brief Sets up the #pljs_storage object and stores it in the #JSContext.
+ *
+ * @param context #pljs_context
+ * @param fcinfo #FunctionCalInfo
+ */
+static void setup_storage_for_context(pljs_context *context,
+                                      FunctionCallInfo fcinfo) {
   // Set up the pljs storage object.
   pljs_storage *storage = (pljs_storage *)palloc0(sizeof(pljs_storage));
 
@@ -501,11 +517,17 @@ static void pljs_setup_storage_for_context(pljs_context *context,
   // Current WindowObject.
   storage->window_object = PG_WINDOW_OBJECT();
 
-  pljs_store_storage_in_context(context, storage);
+  store_storage_in_context(context, storage);
 }
 
-static void pljs_store_storage_in_context(pljs_context *context,
-                                          pljs_storage *storage) {
+/**
+ * @brief Store the #pljs_storage object in the #JSContext.
+ *
+ * @param context #pljs_context
+ * @param storage #pljs_storage
+ */
+static void store_storage_in_context(pljs_context *context,
+                                     pljs_storage *storage) {
   JSValue global_obj = JS_GetGlobalObject(context->ctx);
 
   JSValue pljs = JS_GetPropertyStr(context->ctx, global_obj, "pljs");
@@ -566,7 +588,7 @@ Datum pljs_call_handler(PG_FUNCTION_ARGS) {
       // it.
       if (configuration.start_proc != NULL &&
           strlen(configuration.start_proc) != 0) {
-        pljs_setup_start_proc(ctx);
+        setup_start_proc(ctx);
       }
 
       // Save the context in the cache for this user id.
@@ -599,7 +621,7 @@ Datum pljs_call_handler(PG_FUNCTION_ARGS) {
     procStruct = (Form_pg_proc)GETSTRUCT(proctuple);
 
     context.function->rettype = procStruct->prorettype;
-    retval = pljs_call_trigger(fcinfo, &context);
+    retval = call_trigger(fcinfo, &context);
   } else {
     // Call as a function.
     JSValueConst *argv =
@@ -609,16 +631,16 @@ Datum pljs_call_handler(PG_FUNCTION_ARGS) {
     pljs_storage *old_storage = pljs_storage_for_context(context.ctx);
 
     // Set up a new storage object for this call.
-    pljs_setup_storage_for_context(&context, fcinfo);
+    setup_storage_for_context(&context, fcinfo);
 
     if (context.function->is_srf) {
-      retval = pljs_call_srf_function(fcinfo, &context, argv);
+      retval = call_srf_function(fcinfo, &context, argv);
     } else {
-      retval = pljs_call_function(fcinfo, &context, argv);
+      retval = call_function(fcinfo, &context, argv);
     }
 
     // Reset to the old storage now that the call is over.
-    pljs_store_storage_in_context(&context, old_storage);
+    store_storage_in_context(&context, old_storage);
   }
 
   return retval;
@@ -660,7 +682,7 @@ Datum pljs_inline_handler(PG_FUNCTION_ARGS) {
     // it.
     if (configuration.start_proc != NULL &&
         strlen(configuration.start_proc) != 0) {
-      pljs_setup_start_proc(ctx);
+      setup_start_proc(ctx);
     }
 
     // Save the context
@@ -672,7 +694,7 @@ Datum pljs_inline_handler(PG_FUNCTION_ARGS) {
   }
 
   // Call the function.
-  pljs_call_anonymous_function(ctx, sourcecode);
+  call_anonymous_function(sourcecode, ctx);
 
   SPI_finish();
 
@@ -813,11 +835,10 @@ JSValue pljs_compile_function(pljs_context *context, bool is_trigger) {
  * Compiles an anonymous function inside the #JSContext passed, then
  * executes it within the context passed.
  *
- * @param ctx #JSContext - the Javascript context to compile and execute
- * in
  * @param source @c char * - the source code of the function to compile
+ * @param ctx #JSContext - the Javascript context to compile and execute in
  */
-static void pljs_call_anonymous_function(JSContext *ctx, const char *source) {
+static void call_anonymous_function(const char *source, JSContext *ctx) {
   StringInfoData src;
 
   initStringInfo(&src);
@@ -850,7 +871,7 @@ static void pljs_call_anonymous_function(JSContext *ctx, const char *source) {
  * @param context #pljs_context
  * @returns #Datum containing the return value from the trigger
  */
-static Datum pljs_call_trigger(FunctionCallInfo fcinfo, pljs_context *context) {
+static Datum call_trigger(FunctionCallInfo fcinfo, pljs_context *context) {
   TriggerData *trig = (TriggerData *)fcinfo->context;
   Relation rel = trig->tg_relation;
   TriggerEvent event = trig->tg_event;
@@ -858,7 +879,7 @@ static Datum pljs_call_trigger(FunctionCallInfo fcinfo, pljs_context *context) {
   Datum result = (Datum)0;
 
   MemoryContext execution_context = AllocSetContextCreate(
-      CurrentMemoryContext, "PLJS Trigger Memory Context (pljs_call_trigger)",
+      CurrentMemoryContext, "PLJS Trigger Memory Context (call_trigger)",
       ALLOCSET_SMALL_SIZES);
   MemoryContext old_context = MemoryContextSwitchTo(execution_context);
 
@@ -868,7 +889,8 @@ static Datum pljs_call_trigger(FunctionCallInfo fcinfo, pljs_context *context) {
     if (TRIGGER_FIRED_BY_INSERT(event)) {
       result = PointerGetDatum(trig->tg_trigtuple);
       // NEW
-      argv[0] = tuple_to_jsvalue(context->ctx, tupdesc, trig->tg_trigtuple);
+      argv[0] =
+          pljs_tuple_to_jsvalue(tupdesc, trig->tg_trigtuple, context->ctx);
       // OLD
       argv[1] = JS_UNDEFINED;
     } else if (TRIGGER_FIRED_BY_DELETE(event)) {
@@ -876,13 +898,15 @@ static Datum pljs_call_trigger(FunctionCallInfo fcinfo, pljs_context *context) {
       // NEW
       argv[0] = JS_UNDEFINED;
       // OLD
-      argv[1] = tuple_to_jsvalue(context->ctx, tupdesc, trig->tg_trigtuple);
+      argv[1] =
+          pljs_tuple_to_jsvalue(tupdesc, trig->tg_trigtuple, context->ctx);
     } else if (TRIGGER_FIRED_BY_UPDATE(event)) {
       result = PointerGetDatum(trig->tg_newtuple);
       // NEW
-      argv[0] = tuple_to_jsvalue(context->ctx, tupdesc, trig->tg_newtuple);
+      argv[0] = pljs_tuple_to_jsvalue(tupdesc, trig->tg_newtuple, context->ctx);
       // OLD
-      argv[1] = tuple_to_jsvalue(context->ctx, tupdesc, trig->tg_trigtuple);
+      argv[1] =
+          pljs_tuple_to_jsvalue(tupdesc, trig->tg_trigtuple, context->ctx);
     }
   } else {
     argv[0] = argv[1] = JS_UNDEFINED;
@@ -987,10 +1011,10 @@ static Datum pljs_call_trigger(FunctionCallInfo fcinfo, pljs_context *context) {
  * @param argv #JSValueConst - array of arguments as Javascript values
  * @returns #Datum containing the return value from the function
  */
-static Datum pljs_call_function(FunctionCallInfo fcinfo, pljs_context *context,
-                                JSValueConst *argv) {
+static Datum call_function(FunctionCallInfo fcinfo, pljs_context *context,
+                           JSValueConst *argv) {
   MemoryContext execution_context = AllocSetContextCreate(
-      CurrentMemoryContext, "PLJS Function Memory Context (pljs_call_function)",
+      CurrentMemoryContext, "PLJS Function Memory Context (call_function)",
       ALLOCSET_SMALL_SIZES);
   MemoryContext old_context = MemoryContextSwitchTo(execution_context);
 
@@ -1071,12 +1095,12 @@ static Datum pljs_call_function(FunctionCallInfo fcinfo, pljs_context *context,
  * @param argv #JSValueConst - array of arguments as Javascript values
  * @returns #Datum containing the return value from the function
  */
-static Datum pljs_call_srf_function(FunctionCallInfo fcinfo,
-                                    pljs_context *context, JSValueConst *argv) {
+static Datum call_srf_function(FunctionCallInfo fcinfo, pljs_context *context,
+                               JSValueConst *argv) {
   pljs_return_state *state = NULL;
   MemoryContext execution_context = AllocSetContextCreate(
       CurrentMemoryContext,
-      "PLJS Set Returning Memory Context (pljs_call_srf_function)",
+      "PLJS Set Returning Memory Context (call_srf_function)",
       ALLOCSET_SMALL_SIZES);
   MemoryContext old_context = MemoryContextSwitchTo(execution_context);
 
@@ -1169,7 +1193,8 @@ static Datum pljs_call_srf_function(FunctionCallInfo fcinfo,
                                state->tuple_desc, state->tuple_store_state);
       } else {
         if (JS_IsArray(context->ctx, ret)) {
-          for (uint32_t i = 0; i < js_array_length(context->ctx, ret); i++) {
+          for (uint32_t i = 0; i < pljs_js_array_length(ret, context->ctx);
+               i++) {
             JSValue val = JS_GetPropertyUint32(context->ctx, ret, i);
 
             Datum result = pljs_jsvalue_to_datum(
@@ -1209,11 +1234,11 @@ static Datum pljs_call_srf_function(FunctionCallInfo fcinfo,
  * with as much context as it can derive from the current state of Postgres
  * when the exception is called.
  *
- * @param ctx #JSContext - Javascript context to execute in
  * @param message @c const char * - message to throw with
+ * @param ctx #JSContext - Javascript context to execute in
  * @returns #JSValue of the exception
  */
-JSValue js_throw(JSContext *ctx, const char *message) {
+JSValue js_throw(const char *message, JSContext *ctx) {
   JSValue error = JS_NewError(ctx);
   JSValue message_value = JS_NewString(ctx, message);
   JS_SetPropertyStr(ctx, error, "message", message_value);

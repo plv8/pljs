@@ -7,5 +7,6 @@ regression.out
 
 .clangd
 .depend
-docs
+docs/html
+docs/latex
 pljs--*.sql

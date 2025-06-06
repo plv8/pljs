@@ -178,7 +178,7 @@ static JSValue pljs_elog(JSContext *ctx, JSValueConst this_val, int argc,
     case ERROR:
       break;
     default:
-      return js_throw(ctx, "invalid error level");
+      return js_throw("invalid error level", ctx);
     }
 
     StringInfoData msg;
@@ -208,7 +208,7 @@ static JSValue pljs_elog(JSContext *ctx, JSValueConst this_val, int argc,
     PG_CATCH();
     {
       ErrorData *edata = CopyErrorData();
-      JSValue error = js_throw(ctx, edata->message);
+      JSValue error = js_throw(edata->message, ctx);
       FlushErrorState();
       FreeErrorData(edata);
 
@@ -249,12 +249,12 @@ static JSValue pljs_execute(JSContext *ctx, JSValueConst this_val, int argc,
       params = argv[1];
     } else {
       /* Consume trailing elements as an array. */
-      params = values_to_array(ctx, argv, argc, 1);
+      params = pljs_values_to_array(argv, argc, 1, ctx);
       cleanup_params = true;
     }
   }
 
-  nparam = js_array_length(ctx, params);
+  nparam = pljs_js_array_length(params, ctx);
   m_resowner = CurrentResourceOwner;
   m_mcontext = CurrentMemoryContext;
 
@@ -277,7 +277,7 @@ static JSValue pljs_execute(JSContext *ctx, JSValueConst this_val, int argc,
   PG_CATCH();
   {
     ErrorData *edata = CopyErrorData();
-    JSValue error = js_throw(ctx, edata->message);
+    JSValue error = js_throw(edata->message, ctx);
 
     RollbackAndReleaseCurrentSubTransaction();
     MemoryContextSwitchTo(m_mcontext);
@@ -305,7 +305,7 @@ static JSValue pljs_execute(JSContext *ctx, JSValueConst this_val, int argc,
   MemoryContextSwitchTo(m_mcontext);
   CurrentResourceOwner = m_resowner;
 
-  JSValue ret = spi_result_to_jsvalue(ctx, status);
+  JSValue ret = pljs_spi_result_to_jsvalue(status, ctx);
 
   return ret;
 }
@@ -322,7 +322,7 @@ static JSValue pljs_execute(JSContext *ctx, JSValueConst this_val, int argc,
  */
 static int pljs_execute_params(const char *sql, JSValue params,
                                JSContext *ctx) {
-  int nparams = js_array_length(ctx, params);
+  int nparams = pljs_js_array_length(params, ctx);
   int status;
   Datum *values = palloc(sizeof(Datum) * nparams);
   char *nulls = palloc(sizeof(char) * nparams);
@@ -383,12 +383,12 @@ static JSValue pljs_plan_execute(JSContext *ctx, JSValueConst this_val,
       params = argv[0];
     } else {
       /* Consume trailing elements as an array. */
-      params = values_to_array(ctx, argv, argc, 0);
+      params = pljs_values_to_array(argv, argc, 0, ctx);
       cleanup_params = true;
     }
   }
 
-  nparams = js_array_length(ctx, params);
+  nparams = pljs_js_array_length(params, ctx);
 
   JSValue ptr = JS_GetPropertyStr(ctx, this_val, "plan");
 
@@ -397,7 +397,7 @@ static JSValue pljs_plan_execute(JSContext *ctx, JSValueConst this_val,
   JS_FreeValue(ctx, ptr);
 
   if (plan == NULL) {
-    return js_throw(ctx, "Invalid plan");
+    return js_throw("Invalid plan", ctx);
   }
 
   if (plan->parstate) {
@@ -454,7 +454,7 @@ static JSValue pljs_plan_execute(JSContext *ctx, JSValueConst this_val,
   PG_CATCH();
   {
     ErrorData *edata = CopyErrorData();
-    JSValue error = js_throw(ctx, edata->message);
+    JSValue error = js_throw(edata->message, ctx);
 
     RollbackAndReleaseCurrentSubTransaction();
     MemoryContextSwitchTo(m_mcontext);
@@ -482,7 +482,7 @@ static JSValue pljs_plan_execute(JSContext *ctx, JSValueConst this_val,
   MemoryContextSwitchTo(m_mcontext);
   CurrentResourceOwner = m_resowner;
 
-  JSValue ret = spi_result_to_jsvalue(ctx, status);
+  JSValue ret = pljs_spi_result_to_jsvalue(status, ctx);
   SPI_freetuptable(SPI_tuptable);
 
   if (values) {
@@ -569,12 +569,12 @@ static JSValue pljs_prepare(JSContext *ctx, JSValueConst this_val, int argc,
       params = argv[1];
     } else {
       /* Consume trailing elements as an array. */
-      params = values_to_array(ctx, argv, argc, 1);
+      params = pljs_values_to_array(argv, argc, 1, ctx);
       cleanup_params = true;
     }
   }
 
-  nparams = js_array_length(ctx, params);
+  nparams = pljs_js_array_length(params, ctx);
 
   if (nparams) {
     types = palloc(sizeof(Oid) * nparams);
@@ -615,7 +615,7 @@ static JSValue pljs_prepare(JSContext *ctx, JSValueConst this_val, int argc,
     }
 
     JS_FreeCString(ctx, sql);
-    return js_throw(ctx, "Unable to prepare parameters");
+    return js_throw("Unable to prepare parameters", ctx);
   }
 
   PG_END_TRY();
@@ -691,12 +691,12 @@ static JSValue pljs_plan_cursor(JSContext *ctx, JSValueConst this_val, int argc,
       params = argv[0];
     } else {
       /* Consume trailing elements as an array. */
-      params = values_to_array(ctx, argv, argc, 0);
+      params = pljs_values_to_array(argv, argc, 0, ctx);
       cleanup_params = true;
     }
   }
 
-  nparams = js_array_length(ctx, params);
+  nparams = pljs_js_array_length(params, ctx);
 
   if (plan->parstate) {
     argcount = plan->parstate->nparams;
@@ -741,7 +741,7 @@ static JSValue pljs_plan_cursor(JSContext *ctx, JSValueConst this_val, int argc,
       JS_FreeValue(ctx, params);
     }
 
-    return js_throw(ctx, "Error executing");
+    return js_throw("Error executing", ctx);
   }
 
   PG_END_TRY();
@@ -778,7 +778,7 @@ static JSValue pljs_plan_cursor_fetch(JSContext *ctx, JSValueConst this_val,
   Portal cursor = SPI_cursor_find(plan_name);
 
   if (cursor == NULL) {
-    return js_throw(ctx, "Unable to find cursor");
+    return js_throw("Unable to find cursor", ctx);
   }
 
   if (argc >= 1) {
@@ -799,19 +799,19 @@ static JSValue pljs_plan_cursor_fetch(JSContext *ctx, JSValueConst this_val,
   {
     SPI_rollback();
     SPI_finish();
-    return js_throw(ctx, "Unable to fetch");
+    return js_throw("Unable to fetch", ctx);
   }
   PG_END_TRY();
 
   if (SPI_processed > 0) {
     if (!wantarray) {
-      JSValue value =
-          tuple_to_jsvalue(ctx, SPI_tuptable->tupdesc, SPI_tuptable->vals[0]);
+      JSValue value = pljs_tuple_to_jsvalue(SPI_tuptable->tupdesc,
+                                            SPI_tuptable->vals[0], ctx);
       SPI_freetuptable(SPI_tuptable);
 
       return value;
     } else {
-      JSValue obj = spi_result_to_jsvalue(ctx, SPI_processed);
+      JSValue obj = pljs_spi_result_to_jsvalue(SPI_processed, ctx);
 
       SPI_freetuptable(SPI_tuptable);
 
@@ -843,7 +843,7 @@ static JSValue pljs_plan_cursor_move(JSContext *ctx, JSValueConst this_val,
   JS_FreeValue(ctx, name);
 
   if (cursor == NULL) {
-    return js_throw(ctx, "Unable to find plan");
+    return js_throw("Unable to find plan", ctx);
   }
 
   if (argc < 1) {
@@ -863,7 +863,7 @@ static JSValue pljs_plan_cursor_move(JSContext *ctx, JSValueConst this_val,
   }
   PG_CATCH();
   {
-    return js_throw(ctx, "Unable to fetch");
+    return js_throw("Unable to fetch", ctx);
   }
   PG_END_TRY();
 
@@ -888,7 +888,7 @@ static JSValue pljs_plan_cursor_close(JSContext *ctx, JSValueConst this_val,
   JS_FreeValue(ctx, name);
 
   if (!cursor) {
-    return js_throw(ctx, "Unable to find cursor");
+    return js_throw("Unable to find cursor", ctx);
   }
 
   PG_TRY();
@@ -899,7 +899,7 @@ static JSValue pljs_plan_cursor_close(JSContext *ctx, JSValueConst this_val,
   {
     SPI_rollback();
     SPI_finish();
-    return js_throw(ctx, "Unable to close cursor");
+    return js_throw("Unable to close cursor", ctx);
   }
   PG_END_TRY();
 
@@ -935,7 +935,7 @@ static JSValue pljs_commit(JSContext *ctx, JSValueConst this_val, int argc,
   }
   PG_CATCH();
   {
-    return js_throw(ctx, "Unable to commit");
+    return js_throw("Unable to commit", ctx);
   }
   PG_END_TRY();
 
@@ -959,7 +959,7 @@ static JSValue pljs_rollback(JSContext *ctx, JSValueConst this_val, int argc,
   }
   PG_CATCH();
   {
-    return js_throw(ctx, "Unable to rollback");
+    return js_throw("Unable to rollback", ctx);
   }
   PG_END_TRY();
 
@@ -985,7 +985,7 @@ static JSValue pljs_find_function(JSContext *ctx, JSValueConst this_val,
   {
     Oid funcoid;
 
-    if (!has_permission_to_execute(signature)) {
+    if (!pljs_has_permission_to_execute(signature)) {
       return func;
     } else {
       if (strchr(signature, '(') == NULL) {
@@ -1012,7 +1012,7 @@ static JSValue pljs_find_function(JSContext *ctx, JSValueConst this_val,
 
     JS_FreeCString(ctx, signature);
 
-    return js_throw(ctx, NameStr(str));
+    return js_throw(NameStr(str), ctx);
   }
   PG_END_TRY();
 
@@ -1035,18 +1035,18 @@ static JSValue pljs_return_next(JSContext *ctx, JSValueConst this_val, int argc,
   pljs_return_state *retstate = storage->return_state;
 
   if (retstate == NULL) {
-    return js_throw(ctx,
-                    "return_next called in context that cannot accept a set");
+    return js_throw("return_next called in context that cannot accept a set",
+                    ctx);
   }
 
   if (retstate->is_composite) {
     if (!JS_IsObject(argv[0])) {
-      return js_throw(ctx, "argument must be an object");
+      return js_throw("argument must be an object", ctx);
     }
 
     if (!pljs_jsvalue_object_contains_all_column_names(argv[0], ctx,
                                                        retstate->tuple_desc)) {
-      return js_throw(ctx, "field name / property name mismatch");
+      return js_throw("field name / property name mismatch", ctx);
     }
 
     bool is_null = false;
@@ -1082,7 +1082,7 @@ static JSValue pljs_window_get_partition_local(JSContext *ctx,
     JS_ToInt32(ctx, &input_size, argv[0]);
 
     if (input_size < 0) {
-      return js_throw(ctx, "allocation size cannot be negative");
+      return js_throw("allocation size cannot be negative", ctx);
     }
 
     if (input_size) {
@@ -1104,7 +1104,7 @@ static JSValue pljs_window_get_partition_local(JSContext *ctx,
   }
   PG_CATCH();
   {
-    return js_throw(ctx, "Unable to retrieve window storage");
+    return js_throw("Unable to retrieve window storage", ctx);
   }
   PG_END_TRY();
 
@@ -1166,7 +1166,7 @@ static JSValue pljs_window_set_partition_local(JSContext *ctx,
 
   if (window_storage->max_length != 0 &&
       window_storage->max_length < size + sizeof(pljs_window_storage)) {
-    return js_throw(ctx, "window local memory overflow");
+    return js_throw("window local memory overflow", ctx);
   } else if (window_storage->max_length == 0) {
     /* new allocation */
     window_storage->max_length = size;
@@ -1314,7 +1314,7 @@ static JSValue pljs_window_get_func_arg_in_partition(JSContext *ctx,
                                                      JSValueConst *argv) {
   /* Since we return undefined in "isout" case, throw if arg isn't enough. */
   if (argc < 4) {
-    return js_throw(ctx, "not enough arguments for get_func_arg_in_partition");
+    return js_throw("not enough arguments for get_func_arg_in_partition", ctx);
   }
 
   int argno;
@@ -1361,7 +1361,7 @@ static JSValue pljs_window_get_func_arg_in_frame(JSContext *ctx,
                                                  int argc, JSValueConst *argv) {
   /* Since we return undefined in "isout" case, throw if arg isn't enough. */
   if (argc < 4) {
-    return js_throw(ctx, "not enough arguments for get_func_arg_in_partition");
+    return js_throw("not enough arguments for get_func_arg_in_partition", ctx);
   }
 
   int argno;
@@ -1467,7 +1467,7 @@ static JSValue pljs_get_window_object(JSContext *ctx, JSValueConst this_val,
 
   if (storage->window_object == NULL ||
       !WindowObjectIsValid(storage->window_object)) {
-    return js_throw(ctx, "get_window_object called in wrong context");
+    return js_throw("get_window_object called in wrong context", ctx);
   }
   // Create the window object that we will return.
   JSValue window_obj = JS_NewObjectClass(ctx, js_window_id);
