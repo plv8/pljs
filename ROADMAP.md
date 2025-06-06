@@ -32,7 +32,6 @@ Current Release Version: `0.8`
 - [x] procedures/transactions
 - [x] find function
 - [x] `BigInt`
-- [ ] full PLV8 parity
 
 # 1.1
 

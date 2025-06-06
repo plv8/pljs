@@ -65,16 +65,19 @@ static JSValue pljs_window_get_func_arg_current(JSContext *, JSValueConst, int,
 static JSValue pljs_window_object_to_string(JSContext *, JSValueConst, int,
                                             JSValueConst *);
 
+#ifdef EXPOSE_GC
+static JSValue pljs_gc(JSContext *, JSValueConst, int, JSValueConst *);
+#endif
+
+// Set up any stored procedures we export to Postgres.
+Datum pljs_version(PG_FUNCTION_ARGS);
+PG_FUNCTION_INFO_V1(pljs_version);
+
 /**
  * @brief toString Javascript method for the pljs object.
  *
  * @returns #JSValue containing the string "[object pljs]"
  */
-#ifdef EXPOSE_GC
-static JSValue pljs_gc(JSContext *, JSValueConst, int, JSValueConst *);
-#endif
-
-// The toString for the pljs object.
 static JSValue pljs_object_to_string(JSContext *ctx, JSValueConst this_obj,
                                      int argc, JSValueConst *argv) {
   return JS_NewString(ctx, "[object pljs]");
@@ -1492,3 +1495,19 @@ static JSValue pljs_gc(JSContext *ctx, JSValueConst this_val, int argc,
   return JS_UNDEFINED;
 }
 #endif
+
+/**
+ * @brief Returns the `PLJS_VERSION` to Postgres.
+ *
+ * Callable function from Postgres `SELECT pljs_version();` which returns
+ * a `TEXT` copy of the current compiled version.
+ */
+Datum pljs_version(PG_FUNCTION_ARGS) {
+  int32 length = strlen(PLJS_VERSION);
+  text *version = (text *)palloc0(sizeof(text) + length);
+
+  memcpy(VARDATA(version), PLJS_VERSION, length);
+  SET_VARSIZE(version, VARHDRSZ + length);
+
+  PG_RETURN_TEXT_P(version);
+}
