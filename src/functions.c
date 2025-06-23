@@ -1,10 +1,14 @@
+#include "deps/quickjs/list.h"
 #include "deps/quickjs/quickjs.h"
+
 #include "postgres.h"
 
 #include "access/xact.h"
 #include "executor/spi.h"
+#include "fmgr.h"
 #include "nodes/params.h"
 #include "parser/parse_type.h"
+#include "utils/builtins.h"
 #include "utils/elog.h"
 #include "utils/fmgrprotos.h"
 #include "utils/palloc.h"
@@ -70,8 +74,11 @@ static JSValue pljs_gc(JSContext *, JSValueConst, int, JSValueConst *);
 #endif
 
 // Set up any stored procedures we export to Postgres.
-Datum pljs_version(PG_FUNCTION_ARGS);
+PGDLLEXPORT Datum pljs_version(PG_FUNCTION_ARGS);
+PGDLLEXPORT Datum pljs_info(PG_FUNCTION_ARGS);
+
 PG_FUNCTION_INFO_V1(pljs_version);
+PG_FUNCTION_INFO_V1(pljs_info);
 
 /**
  * @brief toString Javascript method for the pljs object.
@@ -1510,4 +1517,122 @@ Datum pljs_version(PG_FUNCTION_ARGS) {
   SET_VARSIZE(version, VARHDRSZ + length);
 
   PG_RETURN_TEXT_P(version);
+}
+
+struct JSString {
+  JSRefCountHeader header; /* must come first, 32-bit */
+  uint32_t len : 31;
+  uint8_t is_wide_char : 1; /* 0 = 8 bits, 1 = 16 bits characters */
+  /* for JS_ATOM_TYPE_SYMBOL: hash = weakref_count, atom_type = 3,
+     for JS_ATOM_TYPE_PRIVATE: hash = JS_ATOM_HASH_PRIVATE, atom_type = 3
+     XXX: could change encoding to have one more bit in hash */
+  uint32_t hash : 30;
+  uint8_t atom_type : 2; /* != 0 if atom, JS_ATOM_TYPE_x */
+  uint32_t hash_next;    /* atom_index for JS_ATOM_TYPE_SYMBOL */
+#ifdef DUMP_LEAKS
+  struct list_head link; /* string list */
+#endif
+  union {
+    uint8_t str8[0]; /* 8 bit strings will get an extra null terminator */
+    uint16_t str16[0];
+  } u;
+};
+
+typedef enum {
+  JS_GC_PHASE_NONE,
+  JS_GC_PHASE_DECREF,
+  JS_GC_PHASE_REMOVE_CYCLES,
+} JSGCPhaseEnum;
+
+typedef struct JSShapeProperty {
+  uint32_t hash_next : 26; /* 0 if last in list */
+  uint32_t flags : 6;      /* JS_PROP_XXX */
+  JSAtom atom;             /* JS_ATOM_NULL = free property entry */
+} JSShapeProperty;
+
+struct local_JSRuntime {
+  JSMallocFunctions mf;
+  JSMallocState malloc_state;
+  const char *rt_info;
+
+  int atom_hash_size; /* power of two */
+  int atom_count;
+  int atom_size;
+  int atom_count_resize; /* resize hash table at this count */
+  uint32_t *atom_hash;
+  struct JSString **atom_array;
+  int atom_free_index; /* 0 = none */
+
+  int class_count; /* size of class_array */
+  JSClass *class_array;
+
+  struct list_head context_list; /* list of JSContext.link */
+  /* list of JSGCObjectHeader.link. List of allocated GC objects (used
+     by the garbage collector) */
+  struct list_head gc_obj_list;
+  /* list of JSGCObjectHeader.link. Used during JS_FreeValueRT() */
+  struct list_head gc_zero_ref_count_list;
+  struct list_head tmp_obj_list; /* used during GC */
+  JSGCPhaseEnum gc_phase : 8;
+  size_t malloc_gc_threshold;
+  struct list_head weakref_list; /* list of JSWeakRefHeader.link */
+#ifdef DUMP_LEAKS
+  struct list_head string_list; /* list of JSString.link */
+#endif
+  /* stack limitation */
+  uintptr_t stack_size; /* in bytes, 0 if no limit */
+  uintptr_t stack_top;
+  uintptr_t stack_limit; /* lower stack limit */
+
+  JSValue current_exception;
+  /* true if inside an out of memory error, to avoid recursing */
+  int in_out_of_memory : 8;
+
+  struct JSStackFrame *current_stack_frame;
+
+  JSInterruptHandler *interrupt_handler;
+  void *interrupt_opaque;
+
+  JSHostPromiseRejectionTracker *host_promise_rejection_tracker;
+  void *host_promise_rejection_tracker_opaque;
+
+  struct list_head job_list; /* list of JSJobEntry.link */
+
+  JSModuleNormalizeFunc *module_normalize_func;
+  JSModuleLoaderFunc *module_loader_func;
+  void *module_loader_opaque;
+  /* timestamp for internal use in module evaluation */
+  int64_t module_async_evaluation_next_timestamp;
+
+  int can_block : 8; /* TRUE if Atomics.wait can block */
+  /* used to allocate, free and clone SharedArrayBuffers */
+  JSSharedArrayBufferFunctions sab_funcs;
+  /* see JS_SetStripInfo() */
+  uint8_t strip_flags;
+
+  /* Shape hash table */
+  int shape_hash_bits;
+  int shape_hash_size;
+  int shape_hash_count; /* number of hashed shapes */
+  void **shape_hash;
+  void *user_opaque;
+};
+
+Datum pljs_info(PG_FUNCTION_ARGS) {
+  struct local_JSRuntime *local_rt = (struct local_JSRuntime *)rt;
+
+  size_t malloc_count = local_rt->malloc_state.malloc_count;
+  size_t malloc_size = local_rt->malloc_state.malloc_size;
+  size_t malloc_limit = local_rt->malloc_state.malloc_limit;
+  size_t stack_size = local_rt->stack_size;
+  size_t stack_limit = local_rt->stack_limit;
+
+  char *ret = palloc0(512);
+  sprintf(
+      ret,
+      "{ \"malloc_count\": %ld, \"malloc_size\": %ld, \"malloc_limit\": %ld, "
+      "\"stack_size\": %ld, \"stack_limit\": %ld }",
+      malloc_count, malloc_size, malloc_limit, stack_size, stack_limit);
+
+  return (Datum)CStringGetTextDatum(ret);
 }
