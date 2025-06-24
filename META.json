@@ -1,32 +1,52 @@
 {
-  "name": "pljs",
-  "abstract": "Javascript language extension for PostgreSQL",
-  "description": "This is the Javascript language extension for PostgreSQL, providing the ability to run Javascript functions and procedures inside of PostgreSQL.",
-  "version": "0.8.1",
-  "maintainer": ["Jerry Sievert <code@legitimatesounding.com>"],
-  "license": "postgresql",
-  "provides": {
-    "pljs": {
-      "abstract": "Javascript language extension for PostgreSQL",
-      "file": "pljs.sql",
-      "docfile": "README.md",
-      "version": "0.8.1"
-    }
-  },
-  "resources": {
-    "bugtracker": {
-      "web": "https://github.com/plv8/pljs/issues/"
-    },
-    "repository": {
-      "url": "git://github.com/plv8/pljs.git",
-      "web": "https://github.com/plv8/pljs/",
-      "type": "git"
-    }
-  },
-  "generated_by": "Jerry Sievert",
-  "meta-spec": {
+    "name": "pljs",
+    "abstract": "PLJS trusted procedural language",
+    "description": "PLJS is a QuickJS-based Javascript Language Extension for \"modern\" PostgreSQL. It is compact, lightweight, and decently fast.",
     "version": "1.0.0",
-    "url": "https://pgxn.org/meta/spec.txt"
-  },
-  "tags": ["language", "javascript", "ecmascript", "js", "plv8", "quickjs"]
+    "maintainer": [
+        "Jerry Sievert <code@legitimatesounding.com>"
+    ],
+    "license": {
+        "PostgreSQL": "http://www.postgresql.org/about/licence"
+    },
+    "release_status": "stable",
+    "prereqs": {
+        "runtime": {
+            "requires": {
+                "PostgreSQL": "14.0.0"
+            }
+        }
+    },
+    "provides": {
+        "pljs": {
+            "file": "pljs--1.0.0.sql",
+            "docfile": "README.md",
+            "version": "1.0.0",
+            "abstract": "PLJS trusted procedural language"
+        }
+    },
+    "no_index": {
+        "directory": [ "deps" ]
+    },
+    "resources": {
+        "homepage": "https://github.com/plv8/pljs",
+        "bugtracker": {
+            "web": "https://github.com/plv8/pljs/issues"
+        },
+        "repository": {
+            "url": "https://github.com/plv8/pljs",
+            "web": "https://github.com/plv8/pljs.git",
+            "type": "git"
+        }
+    },
+    "meta-spec": {
+        "version": "1.0.0",
+        "url": "http://pgxn.org/meta/spec.txt"
+    },
+    "tags": [
+        "PL",
+        "JavaScript",
+        "QuickJS",
+        "pljs"
+    ]
 }
