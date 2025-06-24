@@ -10,3 +10,4 @@ regression.out
 docs/html
 docs/latex
 pljs--*.sql
+compile_commands.json

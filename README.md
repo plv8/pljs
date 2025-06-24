@@ -1,38 +1,45 @@
 # PLJS
 
-PLJS is a Javascript Language Extension for _"modern"_ PostgreSQL.
+PLJS is a trusted JavaScript Language Extension for PostgreSQL.
 
-It is compact, lightweight, and decently fast.
+It is compact, lightweight, and fast.
+
+A [Discord](https://discord.gg/XYGSCfVNBC) available for general questions, discussions and support. Please check there before opening an issue.
 
 ## Technology
 
-Javascript: [QuickJS](https://bellard.org/quickjs/quickjs.html)
+JavaScript: [QuickJS](https://bellard.org/quickjs/quickjs.html)
 
 PostgreSQL: 14+
 
 ### Current Status
 
-Currently 1.0.0 alpha release.
+1.0.0 released.
 
-Missing:
+## Using PLJS
 
-- Windows
+Once the extension has been installed (see [Building](docs/DEVELOPMENT.md)), you can run:
 
-Also, WASM will likely never be added to this extension.
+```sql
+CREATE EXTENSION pljs;
+```
 
-## Building
+from your SQL REPL.
 
-Building is meant to be easy, but not all platforms have been worked out as far as the build instructions. Please use this as an example of how to build in the meantime.
-
-## MacOS
-
-### Requirements
-
-- XCode
-- git
-
-### Building
+You can test that it works by executing:
 
 ```
-$ make install
+DO $$ pljs.elog(NOTICE, "Hello, World!") $$ LANGUAGE pljs;
 ```
+
+## Documentation
+
+- [Integrations](docs/INTEGRATION.md) - How PLJS integrates with Postgres
+- [Types](docs/TYPES.md) - Type conversion between Postgres and JavaScript
+- [Functions](docs/FUNCTIONS.md) - Functions and functionality provided by PLJS
+- [Configuration](docs/CONFIGURATION.md) - Configuration options
+- [Development](docs/DEVELOPMENT.md) - How to build and develop PLJS
+- [Versioning](docs/VERSIONING.md) - PLJS's versioning policies
+- [Change Log](docs/CHANGELOG.md) - Release change log
+- [Roadmap](docs/ROADMAP.md) - PLJS's development roadmap
+- [Benchmarks](docs/BENCHMARKS.md) - Benchmarks and comparisons with [PLV8](https://github.com/plv8/pljs)

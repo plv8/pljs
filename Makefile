@@ -1,6 +1,6 @@
 .PHONY: lintcheck format cleansql docs clean test all
 
-PLJS_VERSION = 1.0.0alpha
+PLJS_VERSION = 1.0.0
 
 PG_CONFIG = pg_config
 PGXS := $(shell $(PG_CONFIG) --pgxs)
@@ -33,6 +33,10 @@ endif
 
 ifneq ($(DISABLE_DIRECT_JSONB_CONVERSION), 1)
 PG_CFLAGS += -DJSONB_DIRECT_CONVERSION
+endif
+
+ifeq ($(EXPOSE_GC), 1)
+PG_CFLAGS += -DEXPOSE_GC
 endif
 
 REGRESS = init-extension function json jsonb json_conv types bytea context \

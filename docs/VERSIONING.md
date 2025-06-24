@@ -2,7 +2,7 @@
 
 PLJS generally follows [Semantic Versioning](https://semver.org) with some PLJS specific changes.
 
-Support for major and minor versions of PLJS ends three (3) years after the release of the following version. On a case-by-case basis, support will be extended for back-ported regressions.
+Support for major and minor versions of PLJS ends three (3) years after the release of the following version. On a case-by-case basis, we will extend support for back-ported regressions.
 
 ### Determining your PLJS Version
 
@@ -24,10 +24,11 @@ Major versions increments with major changes in the codebase that could affect u
 
 ## Minor Version
 
-Minor versions increments when there is a possibility of changes that can affect execution, but that where the amount of code changed is minimal and thus those changes have minimal impact on user code. Changes would include:
+Minor versions increment when there is a possibility of changes that can affect execution, but where the amount of code changed is minimal and thus those changes have minimal impact on user code. Changes could include:
 
 - Additional functionality added as per the roadmap
 - Bug fixes and refinements
+- Fixes for diagnostic issues such as avoiding the use of `is` in code, as flagged by PLJS diagnostics
 
 The goal is to avoid disruptive changes between minor releases.
 
@@ -41,7 +42,7 @@ PLJS versions are generally supported at the minor release level for three (3) y
 
 | PLJS Version | PLJS Release Date | End of PLJS Support Date |
 | ------------ | ----------------- | ------------------------ |
-| 1.0          |                   |                          |
+| 1.0          | June 25, 2025     |                          |
 
 ## Bugs
 

@@ -1,8 +1,8 @@
 # PLJS Types
 
-In PLJS, types are converted between Postgres native types and Javascript types. This is not always a 1:1 mapping, but where possible there are direct conversions:
+In PLJS, types are converted between Postgres native types and JavaScript types. This is not always a 1:1 mapping, but where possible there are direct conversions:
 
-| PostgreSQL Type  | Javascript Type      |
+| PostgreSQL Type  | JavaScript Type      |
 | ---------------- | -------------------- |
 | `TEXT`           | `String`             |
 | `VARCHAR`        | `String`             |

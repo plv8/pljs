@@ -1,16 +1,16 @@
 # Benchmarking PLJS vs PLV8
 
-PLV8 uses Google's V8 Javascript engine, whereas PLJS uses the QuickJS Javascript engine. In general, which QuickJS is fairly fast, its limitations vs V8 are [well known](https://bellard.org/quickjs/bench.html).
+PLV8 uses Google's V8 JavaScript engine, whereas PLJS uses the QuickJS engine. QuickJS's performance relative to V8 is well-documented [here](https://bellard.org/quickjs/bench.html).
 
-Since Postgres stored procedures are typically very short lived, in general providing for data transformations, we are instead concentrating on specific metrics such as type conversions between Postgres and Javascript, and startup times.
+Since Postgres stored procedures are typically short-lived, which primarily serve data transformations, we focus instead on specific metrics such as type conversions between PostgreSQL and JavaScript, and startup times.
 
 ## Benchmarks
 
-The benchmarks are currently separated into two sections: type conversion, and general performance; type conversions are general Postgres to Javascript and back type conversions.
+The benchmarks are currently separated into two sections: type conversion, and general performance; type conversions are general PostgreSQL to JavaScript and back type conversions.
 
 ### Conversion
 
-Conversions are benchmarked by executing an `SPI` `SELECT` of the value, which converts from Javascript to Postgres, and back.
+Benchmarking conversions involves executing an `SPI` `SELECT` of the value, which converts from JavaScript to Postgres, and back.
 
 | Test                    | Count  | Description             |
 | ----------------------- | ------ | ----------------------- |
@@ -25,12 +25,14 @@ Conversions are benchmarked by executing an `SPI` `SELECT` of the value, which c
 
 ### Performance
 
-Performance is predicated on two specific benchmarks: engine startup and a simple array search test. The array search test gives a quick view into overall variable performance, and the startup is very important for the initialization of the extension and quickly being able to execute stored procedures.
+Performance depends on two specific benchmarks: engine startup and a simple array search test. The array search test provides insight into variable performance, and startup is critical for initializing the extension and executing stored procedures quickly.
+
+It should be noted that once a context is created, it is active until the Postgres process is disconnected.
 
 | Test                      | Count | Description                                 |
 | ------------------------- | ----- | ------------------------------------------- |
 | Array Creation and Search | 10000 | Create an array and search it               |
-| Context Creation          | 1000  | Create a new Javascript context and execute |
+| Context Creation          | 1000  | Create a new JavaScript context and execute |
 
 ## Tested Platforms
 
@@ -44,7 +46,7 @@ Tested platforms were against ARM64/AARCH64 running both MacOS and Linux, and x8
 
 ## Results
 
-The results are varied, based on operating system and CPU.
+The results show variation based on operating system and CPU.
 
 ### AARCH64 - MacOS
 
@@ -90,3 +92,7 @@ The results are varied, based on operating system and CPU.
 | TIMESTAMP conversion (100000)     | 1926.551ms  | 3376.927ms |
 | Array creation and search (10000) | 13970.188ms | 6276.774ms |
 | Context creation (1000)           | 23741.54ms  | 5037.147ms |
+
+```
+
+```
