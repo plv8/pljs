@@ -1,8 +1,8 @@
-CREATE FUNCTION valid_json(json text) RETURNS boolean
+CREATE FUNCTION valid_json(json_val text) RETURNS boolean
 LANGUAGE pljs IMMUTABLE STRICT
 AS $$
   try {
-    JSON.parse(json);
+    JSON.parse(json_val);
     return true;
   } catch(e) {
     return false;

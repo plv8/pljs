@@ -13,7 +13,7 @@ Current Release Version: `0.8`
 - [x] functions
 - [x] inline functions
 - [x] triggers
-- [x] type conversion and coercian
+- [x] type conversion and coercion
 - [x] SQL executions
 - [x] cursors
 - [x] memory management
@@ -25,13 +25,13 @@ Current Release Version: `0.8`
 
 ## Major Features
 
-- [ ] set returning functions
-- [ ] windows
-- [ ] startup functions
-- [ ] procedures/transactions
-- [ ] find function
-- [ ] `BigInt`
-- [ ] full PLV8 parity
+- [x] caching of contexts and functions
+- [x] set returning functions
+- [x] windows
+- [x] startup functions
+- [x] procedures/transactions
+- [x] find function
+- [x] `BigInt`
 
 # 1.1
 

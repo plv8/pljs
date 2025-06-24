@@ -1,8 +1,12 @@
 *.o
 *.so
+*.dylib
 results
 regression.diffs
 regression.out
 
 .clangd
 .depend
+docs/html
+docs/latex
+pljs--*.sql

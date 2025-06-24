@@ -62,13 +62,24 @@ SELECT one_inout(5, 'ABC');
 
 CREATE FUNCTION one_out(OUT o text, i integer) AS
 $$
-return 'ABC' + i;
+return "ABC" + i;
 $$
 LANGUAGE pljs;
 SELECT one_out(123);
  one_out 
 ---------
  ABC123
+(1 row)
+
+CREATE FUNCTION two_out(OUT o text, OUT o2 text, i integer) AS
+$$
+return { o: "ABC" + i, o2: i + "ABC" };
+$$
+LANGUAGE pljs;
+SELECT two_out(123);
+     two_out     
+-----------------
+ (ABC123,123ABC)
 (1 row)
 
 -- polymorphic types
@@ -81,5 +92,174 @@ SELECT polymorphic(ARRAY[10, 11]), polymorphic(ARRAY['foo', 'bar']);
  polymorphic | polymorphic 
 -------------+-------------
           10 | foo
+(1 row)
+
+-- RECORD TYPES
+CREATE TYPE rec AS (i integer, t text);
+CREATE FUNCTION scalar_to_record(i integer, t text) RETURNS rec AS
+$$
+	return { "i": i, "t": t };
+$$
+LANGUAGE pljs;
+SELECT scalar_to_record(1, 'a');
+ scalar_to_record 
+------------------
+ (1,a)
+(1 row)
+
+CREATE FUNCTION record_to_text(x rec) RETURNS text AS
+$$
+	return JSON.stringify(x);
+$$
+LANGUAGE pljs;
+SELECT record_to_text('(1,a)'::rec);
+ record_to_text  
+-----------------
+ {"i":1,"t":"a"}
+(1 row)
+
+CREATE FUNCTION return_record(i integer, t text) RETURNS record AS
+$$
+	return { "i": i, "t": t };
+$$
+LANGUAGE pljs;
+SELECT * FROM return_record(1, 'a');
+ERROR:  a column definition list is required for functions returning "record"
+LINE 1: SELECT * FROM return_record(1, 'a');
+                      ^
+SELECT * FROM return_record(1, 'a') AS t(j integer, s text);
+ j | s 
+---+---
+   | 
+(1 row)
+
+SELECT * FROM return_record(1, 'a') AS t(x text, y text);
+ x | y 
+---+---
+   | 
+(1 row)
+
+SELECT * FROM return_record(1, 'a') AS t(i integer, t text);
+ i | t 
+---+---
+ 1 | a
+(1 row)
+
+CREATE FUNCTION set_of_records() RETURNS SETOF rec AS
+$$
+	pljs.return_next( { "i": 1, "t": "a" } );
+	pljs.return_next( { "i": 2, "t": "b" } );
+	pljs.return_next( { "i": 3, "t": "c" } );
+$$
+LANGUAGE pljs;
+SELECT * FROM set_of_records();
+ i | t 
+---+---
+ 1 | a
+ 2 | b
+ 3 | c
+(3 rows)
+
+CREATE FUNCTION set_of_record_but_non_obj() RETURNS SETOF rec AS
+$$
+	pljs.return_next( "abc" );
+$$
+LANGUAGE pljs;
+SELECT * FROM set_of_record_but_non_obj();
+ERROR:  execution error
+DETAIL:  Error: argument must be an object
+    at set_of_record_but_non_obj (<function>:3:18)
+
+CREATE FUNCTION set_of_integers() RETURNS SETOF integer AS
+$$
+	pljs.return_next( 1 );
+	pljs.return_next( 2 );
+	pljs.return_next( 3 );
+$$
+LANGUAGE pljs;
+SELECT * FROM set_of_integers();
+ set_of_integers 
+-----------------
+               1
+               2
+               3
+(3 rows)
+
+CREATE FUNCTION set_of_nest() RETURNS SETOF float AS
+$$
+	pljs.return_next( -0.2 );
+	var rows = pljs.execute( "SELECT set_of_integers() AS i" );
+	pljs.return_next( rows[0].i );
+	return 0.2;
+$$
+LANGUAGE pljs;
+SELECT * FROM set_of_nest();
+ set_of_nest 
+-------------
+        -0.2
+           1
+         0.2
+(3 rows)
+
+CREATE FUNCTION set_of_unnamed_records() RETURNS SETOF record AS
+$$
+	return [ { i: true } ];
+$$
+LANGUAGE pljs;
+SELECT set_of_unnamed_records();
+ERROR:  function returning record called in context that cannot accept type record
+SELECT * FROM set_of_unnamed_records() t (i bool);
+ i 
+---
+ t
+(1 row)
+
+CREATE OR REPLACE FUNCTION set_of_unnamed_records() RETURNS SETOF record AS
+$$
+    pljs.return_next({"a": 1, "b": 2});
+    return;
+$$ LANGUAGE pljs;
+-- not enough fields specified
+SELECT * FROM set_of_unnamed_records() AS x(a int);
+ a 
+---
+ 1
+(1 row)
+
+-- field names mismatch
+SELECT * FROM set_of_unnamed_records() AS x(a int, c int);
+ERROR:  execution error
+DETAIL:  Error: field name / property name mismatch
+    at set_of_unnamed_records (<function>:3:21)
+
+-- name counts and values match
+SELECT * FROM set_of_unnamed_records() AS x(a int, b int);
+ a | b 
+---+---
+ 1 | 2
+(1 row)
+
+-- execute with an array of arguments
+CREATE FUNCTION execute_with_array() RETURNS VOID AS
+$$
+  pljs.execute( "SELECT $1, $2", [1, 2]);
+$$
+LANGUAGE pljs;
+SELECT * FROM execute_with_array();
+ execute_with_array 
+--------------------
+ 
+(1 row)
+
+-- execute without an array of arguments
+CREATE FUNCTION execute_without_array() RETURNS VOID AS
+$$
+  pljs.execute( "SELECT $1, $2", 1, 2);
+$$
+LANGUAGE pljs;
+SELECT * FROM execute_without_array();
+ execute_without_array 
+-----------------------
+ 
 (1 row)
 

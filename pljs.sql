@@ -11,3 +11,14 @@ CREATE OR REPLACE TRUSTED LANGUAGE pljs
  HANDLER pljs_call_handler
  INLINE pljs_inline_handler
  VALIDATOR pljs_call_validator;
+
+CREATE OR REPLACE FUNCTION pljs_version()
+ RETURNS TEXT
+ AS 'MODULE_PATHNAME', 'pljs_version'
+ LANGUAGE C STRICT IMMUTABLE;
+
+CREATE FUNCTION pljs_info() RETURNS JSON
+ AS 'MODULE_PATHNAME', 'pljs_info'
+ LANGUAGE C;
+
+ REVOKE ALL ON FUNCTION pljs_info() FROM PUBLIC;
