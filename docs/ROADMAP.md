@@ -2,7 +2,7 @@
 
 The intention of this document is to provide a past, current, and future roadmap to the development of PLJS. The current version is tracked, along with the current status of implementation.
 
-Current Release Version: `0.8`
+Current Release Version: `1.0.0`
 
 # 0.8
 
