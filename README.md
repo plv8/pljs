@@ -4,7 +4,7 @@ PLJS is a trusted JavaScript Language Extension for PostgreSQL.
 
 It is compact, lightweight, and fast.
 
-A [Discord](https://discord.gg/XYGSCfVNBC) available for general questions, discussions and support. Please check there before opening an issue.
+A [Discord](https://discord.gg/XYGSCfVNBC) is available for general questions, discussions, and support. Please check there before opening an issue.
 
 ## Technology
 
