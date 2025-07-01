@@ -14,7 +14,7 @@ PostgreSQL: 14+
 
 ### Current Status
 
-1.0.0 released.
+1.0.1 released.
 
 ## Using PLJS
 
