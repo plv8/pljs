@@ -17,7 +17,6 @@
 #include "deps/quickjs/quickjs.h"
 
 #include "pljs.h"
-#include "varatt.h"
 
 #include <string.h>
 
