@@ -1,0 +1,2 @@
+-- fix for https://github.com/plv8/pljs/issues/10
+DO $$ pljs.elog(NOTICE, `👋 Hello!`); $$ LANGUAGE pljs;

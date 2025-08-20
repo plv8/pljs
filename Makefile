@@ -2,7 +2,7 @@
 
 PLJS_VERSION = 1.0.1
 
-PG_CONFIG = pg_config
+PG_CONFIG ?= pg_config
 PGXS := $(shell $(PG_CONFIG) --pgxs)
 INCLUDEDIR := ${shell $(PG_CONFIG) --includedir}
 INCLUDEDIR_SERVER := ${shell $(PG_CONFIG) --includedir-server}
@@ -28,7 +28,7 @@ endif
 
 ifeq ($(DEBUG_MEMORY), 1)
 PG_CFLAGS += -fno-omit-frame-pointer -fsanitize=address
-PG_SHLIB_LINK += -fsanitize=address
+SHLIB_LINK += -fsanitize=address
 endif
 
 ifneq ($(DISABLE_DIRECT_JSONB_CONVERSION), 1)
@@ -41,7 +41,7 @@ endif
 
 REGRESS = init-extension function json jsonb json_conv types bytea context \
 	cursor array_spread plv8_regressions memory_limits inline composites \
-	trigger procedure find_function start_proc window
+	trigger procedure find_function start_proc window regressions
 
 all: deps/quickjs/quickjs.h deps/quickjs/libquickjs.a pljs--$(PLJS_VERSION).sql
 
