@@ -22,3 +22,9 @@ Released _August 20, 2025_.
 - Fix function name collision with QuickJS
 - Add missing `subtransaction` support
 - Fix memory context switching before `CopyErrorData()`
+
+### 1.0.3
+
+Released _August 20, 2025_.
+
+- PGXN release went out with an incorrect control file
