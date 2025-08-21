@@ -14,3 +14,8 @@ Release _July 1, 2025_.
 
 - Remove extraneous include from `types.c` that stopped PG14/15 compilation
 - Add PG14/15 compilation to the CI
+
+### 1.0.2
+
+- Fix function name collision with quickjs
+- Add missing `subtransaction` support
