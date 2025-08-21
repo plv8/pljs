@@ -263,3 +263,54 @@ SELECT * FROM execute_without_array();
  
 (1 row)
 
+CREATE FUNCTION test_sql_error() RETURNS void AS $$ pljs.execute("ERROR") $$ LANGUAGE pljs;
+SELECT test_sql_error();
+ERROR:  execution error
+DETAIL:  Error: syntax error at or near "ERROR"
+    at test_sql_error (<function>:2:14)
+
+-- subtransaction()
+CREATE TABLE subtrant(a int);
+CREATE FUNCTION test_subtransaction_catch() RETURNS void AS $$
+try {
+	pljs.subtransaction(function(){
+	pljs.execute("INSERT INTO subtrant VALUES(1)");
+	pljs.execute("INSERT INTO subtrant VALUES(1/0)");
+	});
+} catch (e) {
+	pljs.elog(NOTICE, e);
+	pljs.execute("INSERT INTO subtrant VALUES(2)");
+}
+$$ LANGUAGE pljs;
+SELECT test_subtransaction_catch();
+NOTICE:  Error: division by zero
+ test_subtransaction_catch 
+---------------------------
+ 
+(1 row)
+
+SELECT * FROM subtrant;
+ a 
+---
+ 2
+(1 row)
+
+TRUNCATE subtrant;
+CREATE FUNCTION test_subtransaction_throw() RETURNS void AS $$
+pljs.subtransaction(function(){
+	pljs.execute("INSERT INTO subtrant VALUES(1)");
+	pljs.execute("INSERT INTO subtrant VALUES(1/0)");
+});
+$$ LANGUAGE pljs;
+SELECT test_subtransaction_throw();
+ERROR:  execution error
+DETAIL:  Error: division by zero
+    at <anonymous> (<function>:5:14)
+    at subtransaction (native)
+    at test_subtransaction_throw (<function>:3:20)
+
+SELECT * FROM subtrant;
+ a 
+---
+(0 rows)
+

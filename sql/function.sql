@@ -163,3 +163,32 @@ $$
 $$
 LANGUAGE pljs;
 SELECT * FROM execute_without_array();
+
+CREATE FUNCTION test_sql_error() RETURNS void AS $$ pljs.execute("ERROR") $$ LANGUAGE pljs;
+SELECT test_sql_error();
+
+-- subtransaction()
+CREATE TABLE subtrant(a int);
+CREATE FUNCTION test_subtransaction_catch() RETURNS void AS $$
+try {
+	pljs.subtransaction(function(){
+	pljs.execute("INSERT INTO subtrant VALUES(1)");
+	pljs.execute("INSERT INTO subtrant VALUES(1/0)");
+	});
+} catch (e) {
+	pljs.elog(NOTICE, e);
+	pljs.execute("INSERT INTO subtrant VALUES(2)");
+}
+$$ LANGUAGE pljs;
+SELECT test_subtransaction_catch();
+SELECT * FROM subtrant;
+
+TRUNCATE subtrant;
+CREATE FUNCTION test_subtransaction_throw() RETURNS void AS $$
+pljs.subtransaction(function(){
+	pljs.execute("INSERT INTO subtrant VALUES(1)");
+	pljs.execute("INSERT INTO subtrant VALUES(1/0)");
+});
+$$ LANGUAGE pljs;
+SELECT test_subtransaction_throw();
+SELECT * FROM subtrant;

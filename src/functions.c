@@ -68,6 +68,8 @@ static JSValue pljs_window_get_func_arg_current(JSContext *, JSValueConst, int,
                                                 JSValueConst *);
 static JSValue pljs_window_object_to_string(JSContext *, JSValueConst, int,
                                             JSValueConst *);
+static JSValue pljs_subtransaction(JSContext *, JSValueConst, int,
+                                   JSValueConst *);
 
 #ifdef EXPOSE_GC
 static JSValue pljs_gc(JSContext *, JSValueConst, int, JSValueConst *);
@@ -137,6 +139,10 @@ void pljs_setup_namespace(JSContext *ctx) {
   JS_SetPropertyStr(
       ctx, pljs, "get_window_object",
       JS_NewCFunction(ctx, pljs_get_window_object, "get_window_object", 0));
+
+  JS_SetPropertyStr(
+      ctx, pljs, "subtransaction",
+      JS_NewCFunction(ctx, pljs_subtransaction, "subtransaction", 0));
 
 #ifdef EXPOSE_GC
   JS_SetPropertyStr(ctx, pljs, "gc", JS_NewCFunction(ctx, pljs_gc, "gc", 0));
@@ -1492,6 +1498,37 @@ static JSValue pljs_get_window_object(JSContext *ctx, JSValueConst this_val,
                     JS_NewInt32(ctx, WINDOW_SEEK_TAIL));
 
   return window_obj;
+}
+
+static JSValue pljs_subtransaction(JSContext *ctx, JSValueConst this_val,
+                                   int argc, JSValueConst *argv) {
+  JSValue result = JS_UNDEFINED;
+
+  if (argc < 1) {
+    return JS_UNDEFINED;
+  }
+
+  if (!IsTransactionOrTransactionBlock()) {
+    return js_throw("out of transaction", ctx);
+  }
+
+  if (!JS_IsFunction(ctx, argv[0])) {
+    return JS_UNDEFINED;
+  }
+
+  ResourceOwner m_resowner = CurrentResourceOwner;
+  MemoryContext m_mcontext = CurrentMemoryContext;
+
+  BeginInternalSubTransaction(NULL);
+  MemoryContextSwitchTo(m_mcontext);
+
+  result = JS_Call(ctx, argv[0], JS_UNDEFINED, 0, NULL);
+
+  RollbackAndReleaseCurrentSubTransaction();
+  MemoryContextSwitchTo(m_mcontext);
+  CurrentResourceOwner = m_resowner;
+
+  return result;
 }
 
 #ifdef EXPOSE_GC
