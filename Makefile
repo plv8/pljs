@@ -53,6 +53,7 @@ deps/quickjs/quickjs.h:
 	mkdir -p deps
 	git submodule update --init --recursive
 	patch -p1 <patches/01-shared-lib-build
+	patch -p1 <patches/02-unicode-conflict
 
 deps/quickjs/libquickjs.a: deps/quickjs/quickjs.h
 	cd deps/quickjs && make

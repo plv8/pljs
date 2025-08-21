@@ -1,0 +1,294 @@
+diff --git a/deps/quickjs/cutils.c b/deps/quickjs/cutils.c
+index c038cf4..236ba4a 100644
+--- a/deps/quickjs/cutils.c
++++ b/deps/quickjs/cutils.c
+@@ -205,7 +205,7 @@ void dbuf_free(DynBuf *s)
+
+ /* Note: at most 31 bits are encoded. At most UTF8_CHAR_LEN_MAX bytes
+    are output. */
+-int unicode_to_utf8(uint8_t *buf, unsigned int c)
++int qjs_unicode_to_utf8(uint8_t *buf, unsigned int c)
+ {
+     uint8_t *q = buf;
+
+@@ -250,7 +250,7 @@ static const unsigned char utf8_first_code_mask[5] = {
+
+ /* return -1 if error. *pp is not updated in this case. max_len must
+    be >= 1. The maximum length for a UTF8 byte sequence is 6 bytes. */
+-int unicode_from_utf8(const uint8_t *p, int max_len, const uint8_t **pp)
++int qjs_unicode_from_utf8(const uint8_t *p, int max_len, const uint8_t **pp)
+ {
+     int l, c, b, i;
+
+diff --git a/deps/quickjs/cutils.h b/deps/quickjs/cutils.h
+index 32b9757..9d79db9 100644
+--- a/deps/quickjs/cutils.h
++++ b/deps/quickjs/cutils.h
+@@ -295,8 +295,8 @@ static inline void dbuf_set_error(DynBuf *s)
+
+ #define UTF8_CHAR_LEN_MAX 6
+
+-int unicode_to_utf8(uint8_t *buf, unsigned int c);
+-int unicode_from_utf8(const uint8_t *p, int max_len, const uint8_t **pp);
++int qjs_unicode_to_utf8(uint8_t *buf, unsigned int c);
++int qjs_unicode_from_utf8(const uint8_t *p, int max_len, const uint8_t **pp);
+
+ static inline BOOL is_surrogate(uint32_t c)
+ {
+diff --git a/deps/quickjs/libregexp.c b/deps/quickjs/libregexp.c
+index 8c47389..6af8643 100644
+--- a/deps/quickjs/libregexp.c
++++ b/deps/quickjs/libregexp.c
+@@ -731,7 +731,7 @@ static int get_class_atom(REParseState *s, CharRange *cr,
+     normal_char:
+         /* normal char */
+         if (c >= 128) {
+-            c = unicode_from_utf8(p, UTF8_CHAR_LEN_MAX, &p);
++            c = qjs_unicode_from_utf8(p, UTF8_CHAR_LEN_MAX, &p);
+             if ((unsigned)c > 0xffff && !s->is_unicode) {
+                 /* XXX: should handle non BMP-1 code points */
+                 return re_parse_error(s, "malformed unicode char");
+@@ -987,9 +987,9 @@ static int re_parse_group_name(char *buf, int buf_size, const uint8_t **pp)
+         } else if (c == '>') {
+             break;
+         } else if (c >= 128) {
+-            c = unicode_from_utf8(p, UTF8_CHAR_LEN_MAX, &p);
++            c = qjs_unicode_from_utf8(p, UTF8_CHAR_LEN_MAX, &p);
+             if (is_hi_surrogate(c)) {
+-                d = unicode_from_utf8(p, UTF8_CHAR_LEN_MAX, &p1);
++                d = qjs_unicode_from_utf8(p, UTF8_CHAR_LEN_MAX, &p1);
+                 if (is_lo_surrogate(d)) {
+                     c = from_surrogate(c, d);
+                     p = p1;
+@@ -1012,7 +1012,7 @@ static int re_parse_group_name(char *buf, int buf_size, const uint8_t **pp)
+         if (c < 128) {
+             *q++ = c;
+         } else {
+-            q += unicode_to_utf8((uint8_t*)q, c);
++            q += qjs_unicode_to_utf8((uint8_t*)q, c);
+         }
+     }
+     if (q == buf)
+diff --git a/deps/quickjs/quickjs-libc.c b/deps/quickjs/quickjs-libc.c
+index 0788d8c..7045e26 100644
+--- a/deps/quickjs/quickjs-libc.c
++++ b/deps/quickjs/quickjs-libc.c
+@@ -268,7 +268,7 @@ static JSValue js_printf_internal(JSContext *ctx,
+                     string_arg = JS_ToCString(ctx, argv[i++]);
+                     if (!string_arg)
+                         goto fail;
+-                    int32_arg = unicode_from_utf8((const uint8_t *)string_arg, UTF8_CHAR_LEN_MAX, &p);
++                    int32_arg = qjs_unicode_from_utf8((const uint8_t *)string_arg, UTF8_CHAR_LEN_MAX, &p);
+                     JS_FreeCString(ctx, string_arg);
+                 } else {
+                     if (JS_ToInt32(ctx, &int32_arg, argv[i++]))
+@@ -278,7 +278,7 @@ static JSValue js_printf_internal(JSContext *ctx,
+                 if ((unsigned)int32_arg > 0x10FFFF)
+                     int32_arg = 0xFFFD;
+                 /* ignore conversion flags, width and precision */
+-                len = unicode_to_utf8(cbuf, int32_arg);
++                len = qjs_unicode_to_utf8(cbuf, int32_arg);
+                 dbuf_put(&dbuf, cbuf, len);
+                 break;
+
+diff --git a/deps/quickjs/quickjs.c b/deps/quickjs/quickjs.c
+index adfd93e..3b255ac 100644
+--- a/deps/quickjs/quickjs.c
++++ b/deps/quickjs/quickjs.c
+@@ -3000,7 +3000,7 @@ static const char *JS_AtomGetStrRT(JSRuntime *rt, char *buf, int buf_size,
+                     if (c < 128) {
+                         *q++ = c;
+                     } else {
+-                        q += unicode_to_utf8((uint8_t *)q, c);
++                        q += qjs_unicode_to_utf8((uint8_t *)q, c);
+                     }
+                 }
+             }
+@@ -3817,7 +3817,7 @@ JSValue JS_NewStringLen(JSContext *ctx, const char *buf, size_t buf_len)
+                 string_buffer_putc8(b, *p++);
+             } else {
+                 /* parse utf-8 sequence, return 0xFFFFFFFF for error */
+-                c = unicode_from_utf8(p, p_end - p, &p_next);
++                c = qjs_unicode_from_utf8(p, p_end - p, &p_next);
+                 if (c < 0x10000) {
+                     p = p_next;
+                 } else if (c <= 0x10FFFF) {
+@@ -3972,7 +3972,7 @@ const char *JS_ToCStringLen2(JSContext *ctx, size_t *plen, JSValueConst val1, BO
+                         /* c = 0xfffd; */ /* error */
+                     }
+                 }
+-                q += unicode_to_utf8(q, c);
++                q += qjs_unicode_to_utf8(q, c);
+             }
+         }
+     }
+@@ -10443,7 +10443,7 @@ static int skip_spaces(const char *pc)
+                 break;
+             p++;
+         } else {
+-            c = unicode_from_utf8(p, UTF8_CHAR_LEN_MAX, &p_next);
++            c = qjs_unicode_from_utf8(p, UTF8_CHAR_LEN_MAX, &p_next);
+             if (!lre_is_space(c))
+                 break;
+             p = p_next;
+@@ -20468,7 +20468,7 @@ static __exception int js_parse_template_part(JSParseState *s, const uint8_t *p)
+         }
+         if (c >= 0x80) {
+             const uint8_t *p_next;
+-            c = unicode_from_utf8(p - 1, UTF8_CHAR_LEN_MAX, &p_next);
++            c = qjs_unicode_from_utf8(p - 1, UTF8_CHAR_LEN_MAX, &p_next);
+             if (c > 0x10FFFF) {
+                 js_parse_error_pos(s, p - 1, "invalid UTF-8 sequence");
+                 goto fail;
+@@ -20578,7 +20578,7 @@ static __exception int js_parse_string(JSParseState *s, int sep,
+                     }
+                 } else if (c >= 0x80) {
+                     const uint8_t *p_next;
+-                    c = unicode_from_utf8(p, UTF8_CHAR_LEN_MAX, &p_next);
++                    c = qjs_unicode_from_utf8(p, UTF8_CHAR_LEN_MAX, &p_next);
+                     if (c > 0x10FFFF) {
+                         goto invalid_utf8;
+                     }
+@@ -20605,7 +20605,7 @@ static __exception int js_parse_string(JSParseState *s, int sep,
+             }
+         } else if (c >= 0x80) {
+             const uint8_t *p_next;
+-            c = unicode_from_utf8(p - 1, UTF8_CHAR_LEN_MAX, &p_next);
++            c = qjs_unicode_from_utf8(p - 1, UTF8_CHAR_LEN_MAX, &p_next);
+             if (c > 0x10FFFF)
+                 goto invalid_utf8;
+             p = p_next;
+@@ -20678,7 +20678,7 @@ static __exception int js_parse_regexp(JSParseState *s)
+                 goto eof_error;
+             else if (c >= 0x80) {
+                 const uint8_t *p_next;
+-                c = unicode_from_utf8(p - 1, UTF8_CHAR_LEN_MAX, &p_next);
++                c = qjs_unicode_from_utf8(p - 1, UTF8_CHAR_LEN_MAX, &p_next);
+                 if (c > 0x10FFFF) {
+                     goto invalid_utf8;
+                 }
+@@ -20688,7 +20688,7 @@ static __exception int js_parse_regexp(JSParseState *s)
+             }
+         } else if (c >= 0x80) {
+             const uint8_t *p_next;
+-            c = unicode_from_utf8(p - 1, UTF8_CHAR_LEN_MAX, &p_next);
++            c = qjs_unicode_from_utf8(p - 1, UTF8_CHAR_LEN_MAX, &p_next);
+             if (c > 0x10FFFF) {
+             invalid_utf8:
+                 js_parse_error_pos(s, p - 1, "invalid UTF-8 sequence");
+@@ -20711,7 +20711,7 @@ static __exception int js_parse_regexp(JSParseState *s)
+         const uint8_t *p_next = p;
+         c = *p_next++;
+         if (c >= 0x80) {
+-            c = unicode_from_utf8(p, UTF8_CHAR_LEN_MAX, &p_next);
++            c = qjs_unicode_from_utf8(p, UTF8_CHAR_LEN_MAX, &p_next);
+             if (c > 0x10FFFF) {
+                 p++;
+                 goto invalid_utf8;
+@@ -20825,14 +20825,14 @@ static JSAtom parse_ident(JSParseState *s, const uint8_t **pp,
+         if (c < 128) {
+             buf[ident_pos++] = c;
+         } else {
+-            ident_pos += unicode_to_utf8((uint8_t*)buf + ident_pos, c);
++            ident_pos += qjs_unicode_to_utf8((uint8_t*)buf + ident_pos, c);
+         }
+         c = *p1++;
+         if (c == '\\' && *p1 == 'u') {
+             c = lre_parse_escape(&p1, TRUE);
+             *pident_has_escape = TRUE;
+         } else if (c >= 128) {
+-            c = unicode_from_utf8(p, UTF8_CHAR_LEN_MAX, &p1);
++            c = qjs_unicode_from_utf8(p, UTF8_CHAR_LEN_MAX, &p1);
+         }
+         if (!lre_js_is_ident_next(c))
+             break;
+@@ -20922,7 +20922,7 @@ static __exception int next_token(JSParseState *s)
+                     s->got_lf = TRUE; /* considered as LF for ASI */
+                     p++;
+                 } else if (*p >= 0x80) {
+-                    c = unicode_from_utf8(p, UTF8_CHAR_LEN_MAX, &p);
++                    c = qjs_unicode_from_utf8(p, UTF8_CHAR_LEN_MAX, &p);
+                     if (c == CP_LS || c == CP_PS) {
+                         s->got_lf = TRUE; /* considered as LF for ASI */
+                     } else if (c == -1) {
+@@ -20943,7 +20943,7 @@ static __exception int next_token(JSParseState *s)
+                 if (*p == '\r' || *p == '\n')
+                     break;
+                 if (*p >= 0x80) {
+-                    c = unicode_from_utf8(p, UTF8_CHAR_LEN_MAX, &p);
++                    c = qjs_unicode_from_utf8(p, UTF8_CHAR_LEN_MAX, &p);
+                     /* LS or PS are considered as line terminator */
+                     if (c == CP_LS || c == CP_PS) {
+                         break;
+@@ -21016,7 +21016,7 @@ static __exception int next_token(JSParseState *s)
+             if (c == '\\' && *p1 == 'u') {
+                 c = lre_parse_escape(&p1, TRUE);
+             } else if (c >= 128) {
+-                c = unicode_from_utf8(p, UTF8_CHAR_LEN_MAX, &p1);
++                c = qjs_unicode_from_utf8(p, UTF8_CHAR_LEN_MAX, &p1);
+             }
+             if (!lre_js_is_ident_first(c)) {
+                 js_parse_error(s, "invalid first character of private name");
+@@ -21067,7 +21067,7 @@ static __exception int next_token(JSParseState *s)
+                 goto fail;
+             /* reject `10instanceof Number` */
+             if (JS_VALUE_IS_NAN(ret) ||
+-                lre_js_is_ident_next(unicode_from_utf8(p, UTF8_CHAR_LEN_MAX, &p1))) {
++                lre_js_is_ident_next(qjs_unicode_from_utf8(p, UTF8_CHAR_LEN_MAX, &p1))) {
+                 JS_FreeValue(s->ctx, ret);
+                 js_parse_error(s, "invalid number literal");
+                 goto fail;
+@@ -21261,7 +21261,7 @@ static __exception int next_token(JSParseState *s)
+     default:
+         if (c >= 128) {
+             /* unicode value */
+-            c = unicode_from_utf8(p, UTF8_CHAR_LEN_MAX, &p);
++            c = qjs_unicode_from_utf8(p, UTF8_CHAR_LEN_MAX, &p);
+             switch(c) {
+             case CP_PS:
+             case CP_LS:
+@@ -21399,7 +21399,7 @@ static __exception int json_next_token(JSParseState *s)
+                     break;
+                 }
+                 if (*p >= 0x80) {
+-                    c = unicode_from_utf8(p, UTF8_CHAR_LEN_MAX, &p);
++                    c = qjs_unicode_from_utf8(p, UTF8_CHAR_LEN_MAX, &p);
+                     if (c == -1) {
+                         p++; /* skip invalid UTF-8 */
+                     }
+@@ -21417,7 +21417,7 @@ static __exception int json_next_token(JSParseState *s)
+                 if (*p == '\r' || *p == '\n')
+                     break;
+                 if (*p >= 0x80) {
+-                    c = unicode_from_utf8(p, UTF8_CHAR_LEN_MAX, &p);
++                    c = qjs_unicode_from_utf8(p, UTF8_CHAR_LEN_MAX, &p);
+                     /* LS or PS are considered as line terminator */
+                     if (c == CP_LS || c == CP_PS) {
+                         break;
+@@ -21522,7 +21522,7 @@ static int match_identifier(const uint8_t *p, const char *s) {
+     }
+     c = *p;
+     if (c >= 128)
+-        c = unicode_from_utf8(p, UTF8_CHAR_LEN_MAX, &p);
++        c = qjs_unicode_from_utf8(p, UTF8_CHAR_LEN_MAX, &p);
+     return !lre_js_is_ident_next(c);
+ }
+
+@@ -21608,7 +21608,7 @@ static int simple_next_token(const uint8_t **pp, BOOL no_line_terminator)
+             break;
+         default:
+             if (c >= 128) {
+-                c = unicode_from_utf8(p - 1, UTF8_CHAR_LEN_MAX, &p);
++                c = qjs_unicode_from_utf8(p - 1, UTF8_CHAR_LEN_MAX, &p);
+                 if (no_line_terminator && (c == CP_PS || c == CP_LS))
+                     return '\n';
+             }
+@@ -21639,7 +21639,7 @@ static void skip_shebang(const uint8_t **pp, const uint8_t *buf_end)
+             if (*p == '\n' || *p == '\r') {
+                 break;
+             } else if (*p >= 0x80) {
+-                c = unicode_from_utf8(p, UTF8_CHAR_LEN_MAX, &p);
++                c = qjs_unicode_from_utf8(p, UTF8_CHAR_LEN_MAX, &p);
+                 if (c == CP_LS || c == CP_PS) {
+                     break;
+                 } else if (c == -1) {
