@@ -19,3 +19,4 @@ Release _July 1, 2025_.
 
 - Fix function name collision with quickjs
 - Add missing `subtransaction` support
+- Fix memory context switching before `CopyErrorData()`

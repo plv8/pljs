@@ -215,6 +215,7 @@ static JSValue pljs_elog(JSContext *ctx, JSValueConst this_val, int argc,
     }
 
     const char *full_message = msg.data;
+    MemoryContext m_mcontext = CurrentMemoryContext;
 
     /* ERROR case. */
     PG_TRY();
@@ -223,6 +224,7 @@ static JSValue pljs_elog(JSContext *ctx, JSValueConst this_val, int argc,
     }
     PG_CATCH();
     {
+      MemoryContextSwitchTo(m_mcontext);
       ErrorData *edata = CopyErrorData();
       JSValue error = js_throw(edata->message, ctx);
       FlushErrorState();
@@ -292,6 +294,8 @@ static JSValue pljs_execute(JSContext *ctx, JSValueConst this_val, int argc,
   }
   PG_CATCH();
   {
+    MemoryContextSwitchTo(m_mcontext);
+
     ErrorData *edata = CopyErrorData();
     JSValue error = js_throw(edata->message, ctx);
 
@@ -469,11 +473,11 @@ static JSValue pljs_plan_execute(JSContext *ctx, JSValueConst this_val,
 
   PG_CATCH();
   {
+    MemoryContextSwitchTo(m_mcontext);
     ErrorData *edata = CopyErrorData();
     JSValue error = js_throw(edata->message, ctx);
 
     RollbackAndReleaseCurrentSubTransaction();
-    MemoryContextSwitchTo(m_mcontext);
     CurrentResourceOwner = m_resowner;
 
     if (values) {
@@ -1524,7 +1528,14 @@ static JSValue pljs_subtransaction(JSContext *ctx, JSValueConst this_val,
 
   result = JS_Call(ctx, argv[0], JS_UNDEFINED, 0, NULL);
 
-  RollbackAndReleaseCurrentSubTransaction();
+  bool success = !JS_IsException(result);
+
+  if (success) {
+    ReleaseCurrentSubTransaction();
+  } else {
+    RollbackAndReleaseCurrentSubTransaction();
+  }
+
   MemoryContextSwitchTo(m_mcontext);
   CurrentResourceOwner = m_resowner;
 
