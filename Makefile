@@ -1,6 +1,6 @@
 .PHONY: lintcheck format cleansql docs clean test all
 
-PLJS_VERSION = 1.0.1
+PLJS_VERSION = 1.0.2
 
 PG_CONFIG ?= pg_config
 PGXS := $(shell $(PG_CONFIG) --pgxs)
