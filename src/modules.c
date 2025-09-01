@@ -9,8 +9,6 @@
 
 #include "pljs.h"
 
-#include <execinfo.h>
-
 enum module_data_access {
   Amodule_path = 1,
   Amodule_source,
@@ -46,49 +44,7 @@ static Oid get_pljs_module_index_relid(void) {
   return get_relname_relid("pljs_modules_path", get_pljs_schema_oid());
 }
 
-int pljs_js_module_set_import_meta(JSContext *ctx, JSValueConst func_val,
-                                   JS_BOOL use_realpath, JS_BOOL is_main) {
-  JSModuleDef *m;
-  char buf[PATH_MAX + 16];
-  JSValue meta_obj;
-  JSAtom module_name_atom;
-  const char *module_name;
-
-  if (JS_VALUE_GET_TAG(func_val) != JS_TAG_MODULE) {
-    elog(ERROR, "Bad Magic");
-    return -1;
-  }
-
-  m = JS_VALUE_GET_PTR(func_val);
-
-  module_name_atom = JS_GetModuleName(ctx, m);
-  module_name = JS_AtomToCString(ctx, module_name_atom);
-  JS_FreeAtom(ctx, module_name_atom);
-  if (!module_name)
-    return -1;
-  if (!strchr(module_name, ':')) {
-    strcpy(buf, "file://");
-    {
-      strcat(buf, module_name);
-    }
-  } else {
-    strncpy(buf, module_name, sizeof(buf));
-  }
-  JS_FreeCString(ctx, module_name);
-
-  meta_obj = JS_GetImportMeta(ctx, m);
-  if (JS_IsException(meta_obj))
-    return -1;
-  elog(NOTICE, "url: %s", buf);
-  JS_DefinePropertyValueStr(ctx, meta_obj, "url", JS_NewString(ctx, buf),
-                            JS_PROP_C_W_E);
-  JS_DefinePropertyValueStr(ctx, meta_obj, "main", JS_NewBool(ctx, is_main),
-                            JS_PROP_C_W_E);
-  JS_FreeValue(ctx, meta_obj);
-  return 0;
-}
-
-uint8_t *pljs_read_module(size_t *pbuf_len, const char *filename) {
+static uint8_t *pljs_read_module(size_t *pbuf_len, const char *filename) {
   // Initialize any return data.
   uint8_t *ret = NULL;
   *pbuf_len = 0;
@@ -166,13 +122,8 @@ JSValue pljs_module_load(JSContext *ctx, const char *module_name) {
     return JS_EXCEPTION;
   }
 
-  /* XXX: could propagate the exception */
-  pljs_js_module_set_import_meta(ctx, func_val, true, false);
-
   return func_val;
 }
-
-void log_type(JSContext *ctx, JSValue val);
 
 /**
  * @brief Import a JavaScript module from the databse.
@@ -188,16 +139,6 @@ void log_type(JSContext *ctx, JSValue val);
 JSModuleDef *pljs_defaultjs_module_loader(JSContext *ctx,
                                           const char *module_name,
                                           void *opaque) {
-  // Retrieve the stacktrace
-  void *array[10];
-  size_t size = backtrace(array, 10);
-  char **strings = backtrace_symbols(array, size);
-
-  // Log the stacktrace
-  for (size_t i = 0; i < size; i++) {
-    elog(NOTICE, "Stacktrace: %s", strings[i]);
-  }
-
   JSModuleDef *m;
 
   JSValue func_val = pljs_module_load(ctx, module_name);
@@ -210,7 +151,5 @@ JSModuleDef *pljs_defaultjs_module_loader(JSContext *ctx,
   m = JS_VALUE_GET_PTR(func_val);
   JS_FreeValue(ctx, func_val);
 
-  JSValue v = JS_GetModuleNamespace(ctx, m);
-  log_type(ctx, v);
   return m;
 }

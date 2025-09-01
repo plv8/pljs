@@ -450,6 +450,7 @@ static JSValue pljs_plan_execute(JSContext *ctx, JSValueConst this_val,
     values[i] = pljs_jsvalue_to_datum(
         plan->parstate ? plan->parstate->param_types[i] : 0, param, &is_null,
         ctx, NULL);
+    nulls[i] = is_null ? 'n' : ' ';
 
     JS_FreeValue(ctx, param);
   }
@@ -748,6 +749,7 @@ static JSValue pljs_plan_cursor(JSContext *ctx, JSValueConst this_val, int argc,
     values[i] = pljs_jsvalue_to_datum(
         plan->parstate ? plan->parstate->param_types[i] : 0, param, &is_null,
         ctx, NULL);
+    nulls[i] = is_null ? 'n' : ' ';
   }
 
   PG_TRY();
@@ -796,13 +798,13 @@ static JSValue pljs_plan_cursor_fetch(JSContext *ctx, JSValueConst this_val,
   JSValue name = JS_GetPropertyStr(ctx, this_val, "name");
   const char *plan_name = JS_ToCString(ctx, name);
 
-  JS_FreeCString(ctx, plan_name);
-  JS_FreeValue(ctx, name);
-
   int nfetch = 1;
   bool forward = true, wantarray = false;
 
   Portal cursor = SPI_cursor_find(plan_name);
+
+  JS_FreeCString(ctx, plan_name);
+  JS_FreeValue(ctx, name);
 
   if (cursor == NULL) {
     return js_throw("Unable to find cursor", ctx);
@@ -1564,75 +1566,6 @@ static JSValue pljs_gc(JSContext *ctx, JSValueConst this_val, int argc,
 }
 #endif
 
-static inline bool JS_IsModule(JSValueConst v) {
-  return JS_VALUE_GET_TAG(v) == JS_TAG_MODULE;
-}
-
-void log_names_for_object(JSContext *ctx, JSValue val) {
-  uint32_t object_keys_length = 0;
-  JSPropertyEnum *tab;
-
-  if (JS_GetOwnPropertyNames(ctx, &tab, &object_keys_length, val,
-                             JS_GPN_STRING_MASK) < 0) {
-    elog(NOTICE, "no properties");
-    return;
-  }
-
-  elog(NOTICE, "object has %d properties", object_keys_length);
-
-  for (uint32_t object_key = 0; object_key < object_keys_length; object_key++) {
-    const char *atom = JS_AtomToCString(ctx, tab[object_key].atom);
-
-    elog(NOTICE, "property: %s", atom);
-    JS_FreeCString(ctx, atom);
-  }
-}
-
-void log_type(JSContext *ctx, JSValue val) {
-  if (JS_IsUndefined(val)) {
-    elog(NOTICE, "is undefined");
-  }
-
-  if (JS_IsException(val)) {
-    elog(NOTICE, "is exception");
-  }
-
-  if (JS_IsNumber(val)) {
-    elog(NOTICE, "is number");
-  }
-
-  if (JS_IsString(val)) {
-    elog(NOTICE, "is string");
-  }
-
-  if (JS_IsObject(val)) {
-    elog(NOTICE, "is object");
-    log_names_for_object(ctx, val);
-  }
-
-  if (JS_IsNull(val)) {
-    elog(NOTICE, "is null");
-  }
-
-  if (JS_IsArray(ctx, val)) {
-    elog(NOTICE, "is array");
-  }
-
-  if (JS_IsFunction(ctx, val)) {
-    elog(NOTICE, "is function");
-  }
-
-  if (JS_IsSymbol(val)) {
-    elog(NOTICE, "is symbol");
-  }
-
-  if (JS_IsModule(val)) {
-    elog(NOTICE, "is module");
-  }
-}
-
-int js_resolve_module(JSContext *ctx, JSModuleDef *m);
-
 static JSValue pljs_import(JSContext *ctx, JSValueConst this_val, int argc,
                            JSValueConst *argv) {
   if (argc != 1) {
@@ -1644,23 +1577,34 @@ static JSValue pljs_import(JSContext *ctx, JSValueConst this_val, int argc,
   }
 
   const char *path = JS_ToCString(ctx, argv[0]);
-  elog(NOTICE, "Calling module load");
   JSValue ret = pljs_module_load(ctx, path);
-  elog(NOTICE, "have ret");
-  log_type(ctx, ret);
+  JS_FreeCString(ctx, path);
+
+  if (JS_IsException(ret)) {
+    return JS_EXCEPTION;
+  }
+
+  /* Resolve the module dependencies. */
+  if (JS_ResolveModule(ctx, ret) < 0) {
+    JS_FreeValue(ctx, ret);
+    return JS_EXCEPTION;
+  }
+
+  /* Evaluate the module. */
+  JSValue mod_res = JS_EvalFunction(ctx, JS_DupValue(ctx, ret));
+  mod_res = js_std_await(ctx, mod_res);
+
+  if (JS_IsException(mod_res)) {
+    JS_FreeValue(ctx, ret);
+    return JS_EXCEPTION;
+  }
+  JS_FreeValue(ctx, mod_res);
+
+  /* Get the module namespace from the compiled module object. */
   JSModuleDef *m = JS_VALUE_GET_PTR(ret);
   JS_FreeValue(ctx, ret);
 
-  js_resolve_module(ctx, m);
-
-  JSValue v = JS_GetModuleNamespace(ctx, m);
-  log_type(ctx, v);
-
-  // ret = js_std_await(ctx, ret);
-  // log_type(ctx, ret);
-  elog(NOTICE, "returning");
-
-  return v;
+  return JS_GetModuleNamespace(ctx, m);
 }
 
 /**

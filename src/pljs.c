@@ -844,13 +844,11 @@ static void call_anonymous_function(const char *source, JSContext *ctx) {
   initStringInfo(&src);
 
   // generate the function as javascript with all of its arguments
-  // appendStringInfo(&src, "(function () {%s})();", source);
-  appendStringInfo(&src, "%s", source);
+  appendStringInfo(&src, "(function () {%s})();", source);
   JS_SetInterruptHandler(JS_GetRuntime(ctx), interrupt_handler, NULL);
   os_pending_signals &= ~((uint64_t)1 << SIGINT);
 
-  JSValue val = JS_Eval(ctx, src.data, strlen(src.data), "<function>",
-                        JS_EVAL_TYPE_MODULE);
+  JSValue val = JS_Eval(ctx, src.data, strlen(src.data), "<function>", 0);
 
   if (!JS_IsException(val)) {
     pfree(src.data);
