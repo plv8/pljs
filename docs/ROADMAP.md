@@ -42,6 +42,7 @@ Current Release Version: `1.0.0`
 
 - [ ] initial hook management
 - [ ] module imports via `import`
+- [ ] resetting of contexts (`pljs_reset()`)
 
 # 1.2
 

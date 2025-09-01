@@ -207,3 +207,9 @@ JSValue pljs_values_to_array(JSValue *, int, int, JSContext *);
 void pljs_variable_param_setup(ParseState *, void *);
 ParamListInfo pljs_setup_variable_paramlist(pljs_param_state *, Datum *,
                                             char *);
+
+// modules.c
+JSModuleDef *pljs_defaultjs_module_loader(JSContext *ctx,
+                                          const char *module_name,
+                                          void *opaque);
+JSValue pljs_module_load(JSContext *ctx, const char *module_name);

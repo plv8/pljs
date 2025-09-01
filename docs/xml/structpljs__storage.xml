@@ -1,0 +1,111 @@
+<?xml version='1.0' encoding='UTF-8' standalone='no'?>
+<doxygen xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="compound.xsd" version="1.14.0" xml:lang="en-US">
+  <compounddef id="structpljs__storage" kind="struct" language="C++" prot="public">
+    <compoundname>pljs_storage</compoundname>
+    <includes refid="pljs_8h" local="no">pljs.h</includes>
+    <sectiondef kind="public-attrib">
+      <memberdef kind="variable" id="structpljs__storage_1ae177619f8f9f93bbf812e5f8cb36824b" prot="public" static="no" mutable="no">
+        <type><ref refid="structpljs__return__state" kindref="compound">pljs_return_state</ref> *</type>
+        <definition>pljs_return_state* pljs_storage::return_state</definition>
+        <argsstring></argsstring>
+        <name>return_state</name>
+        <qualifiedname>pljs_storage::return_state</qualifiedname>
+        <briefdescription>
+        </briefdescription>
+        <detaileddescription>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="src/pljs.h" line="122" column="21" bodyfile="src/pljs.h" bodystart="122" bodyend="-1"/>
+      </memberdef>
+      <memberdef kind="variable" id="structpljs__storage_1aafe9452d9c468e01b9f111626f2ddf64" prot="public" static="no" mutable="no">
+        <type><ref refid="structpljs__func" kindref="compound">pljs_func</ref> *</type>
+        <definition>pljs_func* pljs_storage::function</definition>
+        <argsstring></argsstring>
+        <name>function</name>
+        <qualifiedname>pljs_storage::function</qualifiedname>
+        <briefdescription>
+        </briefdescription>
+        <detaileddescription>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="src/pljs.h" line="123" column="13" bodyfile="src/pljs.h" bodystart="123" bodyend="-1"/>
+      </memberdef>
+      <memberdef kind="variable" id="structpljs__storage_1a5ee47f2daae565d33adf4da1a8d70981" prot="public" static="no" mutable="no">
+        <type>FunctionCallInfo</type>
+        <definition>FunctionCallInfo pljs_storage::fcinfo</definition>
+        <argsstring></argsstring>
+        <name>fcinfo</name>
+        <qualifiedname>pljs_storage::fcinfo</qualifiedname>
+        <briefdescription>
+        </briefdescription>
+        <detaileddescription>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="src/pljs.h" line="124" column="20" bodyfile="src/pljs.h" bodystart="124" bodyend="-1"/>
+      </memberdef>
+      <memberdef kind="variable" id="structpljs__storage_1ab8959d35866367a1faec231c6cc5c498" prot="public" static="no" mutable="no">
+        <type>WindowObject</type>
+        <definition>WindowObject pljs_storage::window_object</definition>
+        <argsstring></argsstring>
+        <name>window_object</name>
+        <qualifiedname>pljs_storage::window_object</qualifiedname>
+        <briefdescription>
+        </briefdescription>
+        <detaileddescription>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="src/pljs.h" line="125" column="16" bodyfile="src/pljs.h" bodystart="125" bodyend="-1"/>
+      </memberdef>
+      <memberdef kind="variable" id="structpljs__storage_1a71639941493b9e873307f5689ab46fdb" prot="public" static="no" mutable="no">
+        <type>MemoryContext</type>
+        <definition>MemoryContext pljs_storage::execution_memory_context</definition>
+        <argsstring></argsstring>
+        <name>execution_memory_context</name>
+        <qualifiedname>pljs_storage::execution_memory_context</qualifiedname>
+        <briefdescription>
+        </briefdescription>
+        <detaileddescription>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="src/pljs.h" line="126" column="17" bodyfile="src/pljs.h" bodystart="126" bodyend="-1"/>
+      </memberdef>
+    </sectiondef>
+    <briefdescription>
+    </briefdescription>
+    <detaileddescription>
+    </detaileddescription>
+    <collaborationgraph>
+      <node id="3">
+        <label>pljs_func</label>
+        <link refid="structpljs__func"/>
+      </node>
+      <node id="2">
+        <label>pljs_return_state</label>
+        <link refid="structpljs__return__state"/>
+      </node>
+      <node id="1">
+        <label>pljs_storage</label>
+        <link refid="structpljs__storage"/>
+        <childnode refid="2" relation="usage">
+          <edgelabel>return_state</edgelabel>
+        </childnode>
+        <childnode refid="3" relation="usage">
+          <edgelabel>function</edgelabel>
+        </childnode>
+      </node>
+    </collaborationgraph>
+    <location file="src/pljs.h" line="121" column="1" bodyfile="src/pljs.h" bodystart="121" bodyend="127"/>
+    <listofallmembers>
+      <member refid="structpljs__storage_1a71639941493b9e873307f5689ab46fdb" prot="public" virt="non-virtual"><scope>pljs_storage</scope><name>execution_memory_context</name></member>
+      <member refid="structpljs__storage_1a5ee47f2daae565d33adf4da1a8d70981" prot="public" virt="non-virtual"><scope>pljs_storage</scope><name>fcinfo</name></member>
+      <member refid="structpljs__storage_1aafe9452d9c468e01b9f111626f2ddf64" prot="public" virt="non-virtual"><scope>pljs_storage</scope><name>function</name></member>
+      <member refid="structpljs__storage_1ae177619f8f9f93bbf812e5f8cb36824b" prot="public" virt="non-virtual"><scope>pljs_storage</scope><name>return_state</name></member>
+      <member refid="structpljs__storage_1ab8959d35866367a1faec231c6cc5c498" prot="public" virt="non-virtual"><scope>pljs_storage</scope><name>window_object</name></member>
+    </listofallmembers>
+  </compounddef>
+</doxygen>

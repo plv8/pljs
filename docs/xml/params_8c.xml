@@ -1,0 +1,370 @@
+<?xml version='1.0' encoding='UTF-8' standalone='no'?>
+<doxygen xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="compound.xsd" version="1.14.0" xml:lang="en-US">
+  <compounddef id="params_8c" kind="file" language="C++">
+    <compoundname>params.c</compoundname>
+    <includes refid="pljs_8h" local="yes">pljs.h</includes>
+    <includes local="no">limits.h</includes>
+    <includes local="yes">nodes/params.h</includes>
+    <includes local="yes">parser/parse_node.h</includes>
+    <includes local="yes">utils/builtins.h</includes>
+    <includes local="yes">utils/lsyscache.h</includes>
+    <incdepgraph>
+      <node id="1">
+        <label>src/params.c</label>
+        <link refid="params_8c"/>
+        <childnode refid="2" relation="include">
+        </childnode>
+        <childnode refid="16" relation="include">
+        </childnode>
+        <childnode refid="10" relation="include">
+        </childnode>
+        <childnode refid="11" relation="include">
+        </childnode>
+        <childnode refid="17" relation="include">
+        </childnode>
+        <childnode refid="18" relation="include">
+        </childnode>
+      </node>
+      <node id="2">
+        <label>pljs.h</label>
+        <link refid="pljs_8h"/>
+        <childnode refid="3" relation="include">
+        </childnode>
+        <childnode refid="4" relation="include">
+        </childnode>
+        <childnode refid="5" relation="include">
+        </childnode>
+        <childnode refid="6" relation="include">
+        </childnode>
+        <childnode refid="7" relation="include">
+        </childnode>
+        <childnode refid="8" relation="include">
+        </childnode>
+        <childnode refid="9" relation="include">
+        </childnode>
+        <childnode refid="10" relation="include">
+        </childnode>
+        <childnode refid="11" relation="include">
+        </childnode>
+        <childnode refid="12" relation="include">
+        </childnode>
+        <childnode refid="13" relation="include">
+        </childnode>
+        <childnode refid="14" relation="include">
+        </childnode>
+        <childnode refid="15" relation="include">
+        </childnode>
+      </node>
+      <node id="4">
+        <label>access/heapam.h</label>
+      </node>
+      <node id="5">
+        <label>access/htup.h</label>
+      </node>
+      <node id="6">
+        <label>access/tupdesc.h</label>
+      </node>
+      <node id="14">
+        <label>deps/quickjs/quickjs-libc.h</label>
+      </node>
+      <node id="15">
+        <label>deps/quickjs/quickjs.h</label>
+      </node>
+      <node id="7">
+        <label>executor/spi.h</label>
+      </node>
+      <node id="8">
+        <label>fmgr.h</label>
+      </node>
+      <node id="9">
+        <label>funcapi.h</label>
+      </node>
+      <node id="16">
+        <label>limits.h</label>
+      </node>
+      <node id="10">
+        <label>nodes/params.h</label>
+      </node>
+      <node id="11">
+        <label>parser/parse_node.h</label>
+      </node>
+      <node id="3">
+        <label>postgres.h</label>
+      </node>
+      <node id="17">
+        <label>utils/builtins.h</label>
+      </node>
+      <node id="18">
+        <label>utils/lsyscache.h</label>
+      </node>
+      <node id="12">
+        <label>utils/palloc.h</label>
+      </node>
+      <node id="13">
+        <label>windowapi.h</label>
+      </node>
+    </incdepgraph>
+    <sectiondef kind="func">
+      <memberdef kind="function" id="params_8c_1a177e77cd6ce7b916066167be62ef9579" prot="public" static="yes" const="no" explicit="no" inline="no" virt="non-virtual">
+        <type>Node *</type>
+        <definition>static Node * pljs_variable_paramref_hook</definition>
+        <argsstring>(ParseState *pstate, ParamRef *pref)</argsstring>
+        <name>pljs_variable_paramref_hook</name>
+        <param>
+          <type>ParseState *</type>
+          <declname>pstate</declname>
+        </param>
+        <param>
+          <type>ParamRef *</type>
+          <declname>pref</declname>
+        </param>
+        <briefdescription>
+        </briefdescription>
+        <detaileddescription>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="src/params.c" line="23" column="13" bodyfile="src/params.c" bodystart="23" bodyend="70" declfile="src/params.c" declline="10" declcolumn="13"/>
+      </memberdef>
+      <memberdef kind="function" id="params_8c_1a645b67a38334dfce8c540c96d0d73fbd" prot="public" static="yes" const="no" explicit="no" inline="no" virt="non-virtual">
+        <type>Node *</type>
+        <definition>static Node * pljs_variable_coerce_param_hook</definition>
+        <argsstring>(ParseState *pstate, Param *param, Oid targetTypeId, int32 targetTypeMod, int location)</argsstring>
+        <name>pljs_variable_coerce_param_hook</name>
+        <param>
+          <type>ParseState *</type>
+          <declname>pstate</declname>
+        </param>
+        <param>
+          <type>Param *</type>
+          <declname>param</declname>
+        </param>
+        <param>
+          <type>Oid</type>
+          <declname>targetTypeId</declname>
+        </param>
+        <param>
+          <type>int32</type>
+          <declname>targetTypeMod</declname>
+        </param>
+        <param>
+          <type>int</type>
+          <declname>location</declname>
+        </param>
+        <briefdescription>
+        </briefdescription>
+        <detaileddescription>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="src/params.c" line="72" column="13" bodyfile="src/params.c" bodystart="72" bodyend="134" declfile="src/params.c" declline="11" declcolumn="13"/>
+      </memberdef>
+      <memberdef kind="function" id="params_8c_1a927d7c6f39d45d0dd09869d197c783b9" prot="public" static="no" const="no" explicit="no" inline="no" virt="non-virtual">
+        <type>void</type>
+        <definition>void pljs_variable_param_setup</definition>
+        <argsstring>(ParseState *pstate, void *arg)</argsstring>
+        <name>pljs_variable_param_setup</name>
+        <param>
+          <type>ParseState *</type>
+          <declname>pstate</declname>
+        </param>
+        <param>
+          <type>void *</type>
+          <declname>arg</declname>
+        </param>
+        <briefdescription>
+        </briefdescription>
+        <detaileddescription>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="src/params.c" line="15" column="6" bodyfile="src/params.c" bodystart="15" bodyend="21"/>
+      </memberdef>
+      <memberdef kind="function" id="params_8c_1af59767f85f8cd652c06c89913540f0d8" prot="public" static="no" const="no" explicit="no" inline="no" virt="non-virtual">
+        <type>ParamListInfo</type>
+        <definition>ParamListInfo pljs_setup_variable_paramlist</definition>
+        <argsstring>(pljs_param_state *parstate, Datum *values, char *nulls)</argsstring>
+        <name>pljs_setup_variable_paramlist</name>
+        <param>
+          <type><ref refid="structpljs__param__state" kindref="compound">pljs_param_state</ref> *</type>
+          <declname>parstate</declname>
+        </param>
+        <param>
+          <type>Datum *</type>
+          <declname>values</declname>
+        </param>
+        <param>
+          <type>char *</type>
+          <declname>nulls</declname>
+        </param>
+        <briefdescription>
+        </briefdescription>
+        <detaileddescription>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="src/params.c" line="136" column="15" bodyfile="src/params.c" bodystart="136" bodyend="153"/>
+      </memberdef>
+    </sectiondef>
+    <briefdescription>
+    </briefdescription>
+    <detaileddescription>
+    </detaileddescription>
+    <programlisting>
+<codeline lineno="1"><highlight class="preprocessor">#include<sp/>&quot;<ref refid="pljs_8h" kindref="compound">pljs.h</ref>&quot;</highlight><highlight class="normal"></highlight></codeline>
+<codeline lineno="2"><highlight class="normal"></highlight></codeline>
+<codeline lineno="3"><highlight class="normal"></highlight><highlight class="preprocessor">#include<sp/>&lt;limits.h&gt;</highlight><highlight class="normal"></highlight></codeline>
+<codeline lineno="4"><highlight class="normal"></highlight></codeline>
+<codeline lineno="5"><highlight class="normal"></highlight><highlight class="preprocessor">#include<sp/>&quot;nodes/params.h&quot;</highlight><highlight class="normal"></highlight></codeline>
+<codeline lineno="6"><highlight class="normal"></highlight><highlight class="preprocessor">#include<sp/>&quot;parser/parse_node.h&quot;</highlight><highlight class="normal"></highlight></codeline>
+<codeline lineno="7"><highlight class="normal"></highlight><highlight class="preprocessor">#include<sp/>&quot;utils/builtins.h&quot;</highlight><highlight class="normal"></highlight></codeline>
+<codeline lineno="8"><highlight class="normal"></highlight><highlight class="preprocessor">#include<sp/>&quot;utils/lsyscache.h&quot;</highlight><highlight class="normal"></highlight></codeline>
+<codeline lineno="9"><highlight class="normal"></highlight></codeline>
+<codeline lineno="10"><highlight class="normal"></highlight><highlight class="keyword">static</highlight><highlight class="normal"><sp/>Node<sp/>*<ref refid="params_8c_1a177e77cd6ce7b916066167be62ef9579" kindref="member">pljs_variable_paramref_hook</ref>(ParseState<sp/>*pstate,<sp/>ParamRef<sp/>*pref);</highlight></codeline>
+<codeline lineno="11"><highlight class="normal"></highlight><highlight class="keyword">static</highlight><highlight class="normal"><sp/>Node<sp/>*<ref refid="params_8c_1a645b67a38334dfce8c540c96d0d73fbd" kindref="member">pljs_variable_coerce_param_hook</ref>(ParseState<sp/>*pstate,<sp/>Param<sp/>*param,</highlight></codeline>
+<codeline lineno="12"><highlight class="normal"><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/>Oid<sp/>targetTypeId,</highlight></codeline>
+<codeline lineno="13"><highlight class="normal"><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/>int32<sp/>targetTypeMod,<sp/></highlight><highlight class="keywordtype">int</highlight><highlight class="normal"><sp/>location);</highlight></codeline>
+<codeline lineno="14"><highlight class="normal"></highlight></codeline>
+<codeline lineno="15"><highlight class="normal"></highlight><highlight class="keywordtype">void</highlight><highlight class="normal"><sp/><ref refid="params_8c_1a927d7c6f39d45d0dd09869d197c783b9" kindref="member">pljs_variable_param_setup</ref>(ParseState<sp/>*pstate,<sp/></highlight><highlight class="keywordtype">void</highlight><highlight class="normal"><sp/>*arg)<sp/>{</highlight></codeline>
+<codeline lineno="16"><highlight class="normal"><sp/><sp/><ref refid="structpljs__param__state" kindref="compound">pljs_param_state</ref><sp/>*parstate<sp/>=<sp/>(<ref refid="structpljs__param__state" kindref="compound">pljs_param_state</ref><sp/>*)arg;</highlight></codeline>
+<codeline lineno="17"><highlight class="normal"></highlight></codeline>
+<codeline lineno="18"><highlight class="normal"><sp/><sp/>pstate-&gt;p_ref_hook_state<sp/>=<sp/>(</highlight><highlight class="keywordtype">void</highlight><highlight class="normal"><sp/>*)parstate;</highlight></codeline>
+<codeline lineno="19"><highlight class="normal"><sp/><sp/>pstate-&gt;p_paramref_hook<sp/>=<sp/><ref refid="params_8c_1a177e77cd6ce7b916066167be62ef9579" kindref="member">pljs_variable_paramref_hook</ref>;</highlight></codeline>
+<codeline lineno="20"><highlight class="normal"><sp/><sp/>pstate-&gt;p_coerce_param_hook<sp/>=<sp/><ref refid="params_8c_1a645b67a38334dfce8c540c96d0d73fbd" kindref="member">pljs_variable_coerce_param_hook</ref>;</highlight></codeline>
+<codeline lineno="21"><highlight class="normal">}</highlight></codeline>
+<codeline lineno="22"><highlight class="normal"></highlight></codeline>
+<codeline lineno="23"><highlight class="normal"></highlight><highlight class="keyword">static</highlight><highlight class="normal"><sp/>Node<sp/>*<ref refid="params_8c_1a177e77cd6ce7b916066167be62ef9579" kindref="member">pljs_variable_paramref_hook</ref>(ParseState<sp/>*pstate,<sp/>ParamRef<sp/>*pref)<sp/>{</highlight></codeline>
+<codeline lineno="24"><highlight class="normal"><sp/><sp/><ref refid="structpljs__param__state" kindref="compound">pljs_param_state</ref><sp/>*parstate<sp/>=<sp/>(<ref refid="structpljs__param__state" kindref="compound">pljs_param_state</ref><sp/>*)pstate-&gt;p_ref_hook_state;</highlight></codeline>
+<codeline lineno="25"><highlight class="normal"><sp/><sp/></highlight><highlight class="keywordtype">int</highlight><highlight class="normal"><sp/>paramno<sp/>=<sp/>pref-&gt;number;</highlight></codeline>
+<codeline lineno="26"><highlight class="normal"><sp/><sp/>Oid<sp/>*pptype;</highlight></codeline>
+<codeline lineno="27"><highlight class="normal"><sp/><sp/>Param<sp/>*param;</highlight></codeline>
+<codeline lineno="28"><highlight class="normal"></highlight></codeline>
+<codeline lineno="29"><highlight class="normal"><sp/><sp/></highlight><highlight class="comment">/*<sp/>Check<sp/>parameter<sp/>number<sp/>is<sp/>in<sp/>range<sp/>*/</highlight><highlight class="normal"></highlight></codeline>
+<codeline lineno="30"><highlight class="normal"><sp/><sp/></highlight><highlight class="keywordflow">if</highlight><highlight class="normal"><sp/>(paramno<sp/>&lt;=<sp/>0<sp/>||<sp/>paramno<sp/>&gt;<sp/>(</highlight><highlight class="keywordtype">int</highlight><highlight class="normal">)(INT_MAX<sp/>/<sp/></highlight><highlight class="keyword">sizeof</highlight><highlight class="normal">(Oid)))</highlight></codeline>
+<codeline lineno="31"><highlight class="normal"><sp/><sp/><sp/><sp/>ereport(ERROR,<sp/>(errcode(ERRCODE_UNDEFINED_PARAMETER),</highlight></codeline>
+<codeline lineno="32"><highlight class="normal"><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/>errmsg(</highlight><highlight class="stringliteral">&quot;missing<sp/>parameter<sp/>$%d&quot;</highlight><highlight class="normal">,<sp/>paramno),</highlight></codeline>
+<codeline lineno="33"><highlight class="normal"><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/>parser_errposition(pstate,<sp/>pref-&gt;location)));</highlight></codeline>
+<codeline lineno="34"><highlight class="normal"><sp/><sp/></highlight><highlight class="keywordflow">if</highlight><highlight class="normal"><sp/>(paramno<sp/>&gt;<sp/>parstate-&gt;nparams)<sp/>{</highlight></codeline>
+<codeline lineno="35"><highlight class="normal"><sp/><sp/><sp/><sp/>MemoryContext<sp/>oldcontext;</highlight></codeline>
+<codeline lineno="36"><highlight class="normal"></highlight></codeline>
+<codeline lineno="37"><highlight class="normal"><sp/><sp/><sp/><sp/>oldcontext<sp/>=<sp/>MemoryContextSwitchTo(parstate-&gt;memory_context);</highlight></codeline>
+<codeline lineno="38"><highlight class="normal"><sp/><sp/><sp/><sp/></highlight><highlight class="comment">/*<sp/>Need<sp/>to<sp/>enlarge<sp/>param<sp/>array<sp/>*/</highlight><highlight class="normal"></highlight></codeline>
+<codeline lineno="39"><highlight class="normal"><sp/><sp/><sp/><sp/></highlight><highlight class="keywordflow">if</highlight><highlight class="normal"><sp/>(parstate-&gt;param_types)<sp/>{</highlight></codeline>
+<codeline lineno="40"><highlight class="normal"><sp/><sp/><sp/><sp/><sp/><sp/>parstate-&gt;param_types<sp/>=</highlight></codeline>
+<codeline lineno="41"><highlight class="normal"><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/>(Oid<sp/>*)repalloc(parstate-&gt;param_types,<sp/>paramno<sp/>*<sp/></highlight><highlight class="keyword">sizeof</highlight><highlight class="normal">(Oid));</highlight></codeline>
+<codeline lineno="42"><highlight class="normal"><sp/><sp/><sp/><sp/>}<sp/></highlight><highlight class="keywordflow">else</highlight><highlight class="normal"><sp/>{</highlight></codeline>
+<codeline lineno="43"><highlight class="normal"><sp/><sp/><sp/><sp/><sp/><sp/>parstate-&gt;param_types<sp/>=<sp/>(Oid<sp/>*)palloc(paramno<sp/>*<sp/></highlight><highlight class="keyword">sizeof</highlight><highlight class="normal">(Oid));</highlight></codeline>
+<codeline lineno="44"><highlight class="normal"><sp/><sp/><sp/><sp/>}</highlight></codeline>
+<codeline lineno="45"><highlight class="normal"></highlight></codeline>
+<codeline lineno="46"><highlight class="normal"><sp/><sp/><sp/><sp/></highlight><highlight class="comment">/*<sp/>Zero<sp/>out<sp/>the<sp/>previously-unreferenced<sp/>slots<sp/>*/</highlight><highlight class="normal"></highlight></codeline>
+<codeline lineno="47"><highlight class="normal"><sp/><sp/><sp/><sp/>MemSet(parstate-&gt;param_types<sp/>+<sp/>parstate-&gt;nparams,<sp/>0,</highlight></codeline>
+<codeline lineno="48"><highlight class="normal"><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/>(paramno<sp/>-<sp/>parstate-&gt;nparams)<sp/>*<sp/></highlight><highlight class="keyword">sizeof</highlight><highlight class="normal">(Oid));</highlight></codeline>
+<codeline lineno="49"><highlight class="normal"><sp/><sp/><sp/><sp/>parstate-&gt;nparams<sp/>=<sp/>paramno;</highlight></codeline>
+<codeline lineno="50"><highlight class="normal"></highlight></codeline>
+<codeline lineno="51"><highlight class="normal"><sp/><sp/><sp/><sp/>MemoryContextSwitchTo(oldcontext);</highlight></codeline>
+<codeline lineno="52"><highlight class="normal"><sp/><sp/>}</highlight></codeline>
+<codeline lineno="53"><highlight class="normal"></highlight></codeline>
+<codeline lineno="54"><highlight class="normal"><sp/><sp/></highlight><highlight class="comment">/*<sp/>Locate<sp/>param&apos;s<sp/>slot<sp/>in<sp/>array<sp/>*/</highlight><highlight class="normal"></highlight></codeline>
+<codeline lineno="55"><highlight class="normal"><sp/><sp/>pptype<sp/>=<sp/>&amp;(parstate-&gt;param_types)[paramno<sp/>-<sp/>1];</highlight></codeline>
+<codeline lineno="56"><highlight class="normal"></highlight></codeline>
+<codeline lineno="57"><highlight class="normal"><sp/><sp/></highlight><highlight class="comment">/*<sp/>If<sp/>not<sp/>seen<sp/>before,<sp/>initialize<sp/>to<sp/>UNKNOWN<sp/>type<sp/>*/</highlight><highlight class="normal"></highlight></codeline>
+<codeline lineno="58"><highlight class="normal"><sp/><sp/></highlight><highlight class="keywordflow">if</highlight><highlight class="normal"><sp/>(*pptype<sp/>==<sp/>InvalidOid)</highlight></codeline>
+<codeline lineno="59"><highlight class="normal"><sp/><sp/><sp/><sp/>*pptype<sp/>=<sp/>UNKNOWNOID;</highlight></codeline>
+<codeline lineno="60"><highlight class="normal"></highlight></codeline>
+<codeline lineno="61"><highlight class="normal"><sp/><sp/>param<sp/>=<sp/>makeNode(Param);</highlight></codeline>
+<codeline lineno="62"><highlight class="normal"><sp/><sp/>param-&gt;paramkind<sp/>=<sp/>PARAM_EXTERN;</highlight></codeline>
+<codeline lineno="63"><highlight class="normal"><sp/><sp/>param-&gt;paramid<sp/>=<sp/>paramno;</highlight></codeline>
+<codeline lineno="64"><highlight class="normal"><sp/><sp/>param-&gt;paramtype<sp/>=<sp/>*pptype;</highlight></codeline>
+<codeline lineno="65"><highlight class="normal"><sp/><sp/>param-&gt;paramtypmod<sp/>=<sp/>-1;</highlight></codeline>
+<codeline lineno="66"><highlight class="normal"><sp/><sp/>param-&gt;paramcollid<sp/>=<sp/>get_typcollation(param-&gt;paramtype);</highlight></codeline>
+<codeline lineno="67"><highlight class="normal"><sp/><sp/>param-&gt;location<sp/>=<sp/>pref-&gt;location;</highlight></codeline>
+<codeline lineno="68"><highlight class="normal"></highlight></codeline>
+<codeline lineno="69"><highlight class="normal"><sp/><sp/></highlight><highlight class="keywordflow">return</highlight><highlight class="normal"><sp/>(Node<sp/>*)param;</highlight></codeline>
+<codeline lineno="70"><highlight class="normal">}</highlight></codeline>
+<codeline lineno="71"><highlight class="normal"></highlight></codeline>
+<codeline lineno="72"><highlight class="normal"></highlight><highlight class="keyword">static</highlight><highlight class="normal"><sp/>Node<sp/>*<ref refid="params_8c_1a645b67a38334dfce8c540c96d0d73fbd" kindref="member">pljs_variable_coerce_param_hook</ref>(ParseState<sp/>*pstate,<sp/>Param<sp/>*param,</highlight></codeline>
+<codeline lineno="73"><highlight class="normal"><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/>Oid<sp/>targetTypeId,</highlight></codeline>
+<codeline lineno="74"><highlight class="normal"><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/>int32<sp/>targetTypeMod,</highlight></codeline>
+<codeline lineno="75"><highlight class="normal"><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/></highlight><highlight class="keywordtype">int</highlight><highlight class="normal"><sp/>location)<sp/>{</highlight></codeline>
+<codeline lineno="76"><highlight class="normal"><sp/><sp/></highlight><highlight class="keywordflow">if</highlight><highlight class="normal"><sp/>(param-&gt;paramkind<sp/>==<sp/>PARAM_EXTERN<sp/>&amp;&amp;<sp/>param-&gt;paramtype<sp/>==<sp/>UNKNOWNOID)<sp/>{</highlight></codeline>
+<codeline lineno="77"><highlight class="normal"><sp/><sp/><sp/><sp/></highlight><highlight class="comment">/*</highlight></codeline>
+<codeline lineno="78"><highlight class="comment"><sp/><sp/><sp/><sp/><sp/>*<sp/>Input<sp/>is<sp/>a<sp/>Param<sp/>of<sp/>previously<sp/>undetermined<sp/>type,<sp/>and<sp/>we<sp/>want<sp/>to</highlight></codeline>
+<codeline lineno="79"><highlight class="comment"><sp/><sp/><sp/><sp/><sp/>*<sp/>update<sp/>our<sp/>knowledge<sp/>of<sp/>the<sp/>Param&apos;s<sp/>type.</highlight></codeline>
+<codeline lineno="80"><highlight class="comment"><sp/><sp/><sp/><sp/><sp/>*/</highlight><highlight class="normal"></highlight></codeline>
+<codeline lineno="81"><highlight class="normal"><sp/><sp/><sp/><sp/><ref refid="structpljs__param__state" kindref="compound">pljs_param_state</ref><sp/>*parstate<sp/>=<sp/>(<ref refid="structpljs__param__state" kindref="compound">pljs_param_state</ref><sp/>*)pstate-&gt;p_ref_hook_state;</highlight></codeline>
+<codeline lineno="82"><highlight class="normal"><sp/><sp/><sp/><sp/>Oid<sp/>*paramTypes<sp/>=<sp/>parstate-&gt;param_types;</highlight></codeline>
+<codeline lineno="83"><highlight class="normal"><sp/><sp/><sp/><sp/></highlight><highlight class="keywordtype">int</highlight><highlight class="normal"><sp/>paramno<sp/>=<sp/>param-&gt;paramid;</highlight></codeline>
+<codeline lineno="84"><highlight class="normal"></highlight></codeline>
+<codeline lineno="85"><highlight class="normal"><sp/><sp/><sp/><sp/></highlight><highlight class="keywordflow">if</highlight><highlight class="normal"><sp/>(paramno<sp/>&lt;=<sp/>0<sp/>||<sp/></highlight><highlight class="comment">/*<sp/>shouldn&apos;t<sp/>happen,<sp/>but...<sp/>*/</highlight><highlight class="normal"></highlight></codeline>
+<codeline lineno="86"><highlight class="normal"><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/>paramno<sp/>&gt;<sp/>parstate-&gt;nparams)</highlight></codeline>
+<codeline lineno="87"><highlight class="normal"><sp/><sp/><sp/><sp/><sp/><sp/>ereport(ERROR,<sp/>(errcode(ERRCODE_UNDEFINED_PARAMETER),</highlight></codeline>
+<codeline lineno="88"><highlight class="normal"><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/>errmsg(</highlight><highlight class="stringliteral">&quot;there<sp/>is<sp/>no<sp/>parameter<sp/>$%d&quot;</highlight><highlight class="normal">,<sp/>paramno),</highlight></codeline>
+<codeline lineno="89"><highlight class="normal"><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/>parser_errposition(pstate,<sp/>param-&gt;location)));</highlight></codeline>
+<codeline lineno="90"><highlight class="normal"></highlight></codeline>
+<codeline lineno="91"><highlight class="normal"><sp/><sp/><sp/><sp/></highlight><highlight class="keywordflow">if</highlight><highlight class="normal"><sp/>(paramTypes[paramno<sp/>-<sp/>1]<sp/>==<sp/>UNKNOWNOID)<sp/>{</highlight></codeline>
+<codeline lineno="92"><highlight class="normal"><sp/><sp/><sp/><sp/><sp/><sp/></highlight><highlight class="comment">/*<sp/>We&apos;ve<sp/>successfully<sp/>resolved<sp/>the<sp/>type<sp/>*/</highlight><highlight class="normal"></highlight></codeline>
+<codeline lineno="93"><highlight class="normal"><sp/><sp/><sp/><sp/><sp/><sp/>paramTypes[paramno<sp/>-<sp/>1]<sp/>=<sp/>targetTypeId;</highlight></codeline>
+<codeline lineno="94"><highlight class="normal"><sp/><sp/><sp/><sp/>}<sp/></highlight><highlight class="keywordflow">else</highlight><highlight class="normal"><sp/></highlight><highlight class="keywordflow">if</highlight><highlight class="normal"><sp/>(paramTypes[paramno<sp/>-<sp/>1]<sp/>==<sp/>targetTypeId)<sp/>{</highlight></codeline>
+<codeline lineno="95"><highlight class="normal"><sp/><sp/><sp/><sp/><sp/><sp/></highlight><highlight class="comment">/*<sp/>We<sp/>previously<sp/>resolved<sp/>the<sp/>type,<sp/>and<sp/>it<sp/>matches<sp/>*/</highlight><highlight class="normal"></highlight></codeline>
+<codeline lineno="96"><highlight class="normal"><sp/><sp/><sp/><sp/>}<sp/></highlight><highlight class="keywordflow">else</highlight><highlight class="normal"><sp/>{</highlight></codeline>
+<codeline lineno="97"><highlight class="normal"><sp/><sp/><sp/><sp/><sp/><sp/></highlight><highlight class="comment">/*<sp/>Ooops<sp/>*/</highlight><highlight class="normal"></highlight></codeline>
+<codeline lineno="98"><highlight class="normal"><sp/><sp/><sp/><sp/><sp/><sp/>ereport(</highlight></codeline>
+<codeline lineno="99"><highlight class="normal"><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/>ERROR,</highlight></codeline>
+<codeline lineno="100"><highlight class="normal"><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/>(errcode(ERRCODE_AMBIGUOUS_PARAMETER),</highlight></codeline>
+<codeline lineno="101"><highlight class="normal"><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/>errmsg(</highlight><highlight class="stringliteral">&quot;inconsistent<sp/>types<sp/>deduced<sp/>for<sp/>parameter<sp/>$%d&quot;</highlight><highlight class="normal">,<sp/>paramno),</highlight></codeline>
+<codeline lineno="102"><highlight class="normal"><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/>errdetail(</highlight><highlight class="stringliteral">&quot;%s<sp/>versus<sp/>%s&quot;</highlight><highlight class="normal">,<sp/>format_type_be(paramTypes[paramno<sp/>-<sp/>1]),</highlight></codeline>
+<codeline lineno="103"><highlight class="normal"><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/>format_type_be(targetTypeId)),</highlight></codeline>
+<codeline lineno="104"><highlight class="normal"><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/>parser_errposition(pstate,<sp/>param-&gt;location)));</highlight></codeline>
+<codeline lineno="105"><highlight class="normal"><sp/><sp/><sp/><sp/>}</highlight></codeline>
+<codeline lineno="106"><highlight class="normal"></highlight></codeline>
+<codeline lineno="107"><highlight class="normal"><sp/><sp/><sp/><sp/>param-&gt;paramtype<sp/>=<sp/>targetTypeId;</highlight></codeline>
+<codeline lineno="108"><highlight class="normal"></highlight></codeline>
+<codeline lineno="109"><highlight class="normal"><sp/><sp/><sp/><sp/></highlight><highlight class="comment">/*</highlight></codeline>
+<codeline lineno="110"><highlight class="comment"><sp/><sp/><sp/><sp/><sp/>*<sp/>Note:<sp/>it<sp/>is<sp/>tempting<sp/>here<sp/>to<sp/>set<sp/>the<sp/>Param&apos;s<sp/>paramtypmod<sp/>to</highlight></codeline>
+<codeline lineno="111"><highlight class="comment"><sp/><sp/><sp/><sp/><sp/>*<sp/>targetTypeMod,<sp/>but<sp/>that<sp/>is<sp/>probably<sp/>unwise<sp/>because<sp/>we<sp/>have<sp/>no</highlight></codeline>
+<codeline lineno="112"><highlight class="comment"><sp/><sp/><sp/><sp/><sp/>*<sp/>infrastructure<sp/>that<sp/>enforces<sp/>that<sp/>the<sp/>value<sp/>delivered<sp/>for<sp/>a<sp/>Param</highlight></codeline>
+<codeline lineno="113"><highlight class="comment"><sp/><sp/><sp/><sp/><sp/>*<sp/>will<sp/>match<sp/>any<sp/>particular<sp/>typmod.<sp/><sp/>Leaving<sp/>it<sp/>-1<sp/>ensures<sp/>that<sp/>a</highlight></codeline>
+<codeline lineno="114"><highlight class="comment"><sp/><sp/><sp/><sp/><sp/>*<sp/>run-time<sp/>length<sp/>check/coercion<sp/>will<sp/>occur<sp/>if<sp/>needed.</highlight></codeline>
+<codeline lineno="115"><highlight class="comment"><sp/><sp/><sp/><sp/><sp/>*/</highlight><highlight class="normal"></highlight></codeline>
+<codeline lineno="116"><highlight class="normal"><sp/><sp/><sp/><sp/>param-&gt;paramtypmod<sp/>=<sp/>-1;</highlight></codeline>
+<codeline lineno="117"><highlight class="normal"></highlight></codeline>
+<codeline lineno="118"><highlight class="normal"><sp/><sp/><sp/><sp/></highlight><highlight class="comment">/*</highlight></codeline>
+<codeline lineno="119"><highlight class="comment"><sp/><sp/><sp/><sp/><sp/>*<sp/>This<sp/>module<sp/>always<sp/>sets<sp/>a<sp/>Param&apos;s<sp/>collation<sp/>to<sp/>be<sp/>the<sp/>default<sp/>for</highlight></codeline>
+<codeline lineno="120"><highlight class="comment"><sp/><sp/><sp/><sp/><sp/>*<sp/>its<sp/>datatype.<sp/><sp/>If<sp/>that&apos;s<sp/>not<sp/>what<sp/>you<sp/>want,<sp/>you<sp/>should<sp/>be<sp/>using<sp/>the</highlight></codeline>
+<codeline lineno="121"><highlight class="comment"><sp/><sp/><sp/><sp/><sp/>*<sp/>more<sp/>general<sp/>parser<sp/>substitution<sp/>hooks.</highlight></codeline>
+<codeline lineno="122"><highlight class="comment"><sp/><sp/><sp/><sp/><sp/>*/</highlight><highlight class="normal"></highlight></codeline>
+<codeline lineno="123"><highlight class="normal"><sp/><sp/><sp/><sp/>param-&gt;paramcollid<sp/>=<sp/>get_typcollation(param-&gt;paramtype);</highlight></codeline>
+<codeline lineno="124"><highlight class="normal"></highlight></codeline>
+<codeline lineno="125"><highlight class="normal"><sp/><sp/><sp/><sp/></highlight><highlight class="comment">/*<sp/>Use<sp/>the<sp/>leftmost<sp/>of<sp/>the<sp/>param&apos;s<sp/>and<sp/>coercion&apos;s<sp/>locations<sp/>*/</highlight><highlight class="normal"></highlight></codeline>
+<codeline lineno="126"><highlight class="normal"><sp/><sp/><sp/><sp/></highlight><highlight class="keywordflow">if</highlight><highlight class="normal"><sp/>(location<sp/>&gt;=<sp/>0<sp/>&amp;&amp;<sp/>(param-&gt;location<sp/>&lt;<sp/>0<sp/>||<sp/>location<sp/>&lt;<sp/>param-&gt;location))</highlight></codeline>
+<codeline lineno="127"><highlight class="normal"><sp/><sp/><sp/><sp/><sp/><sp/>param-&gt;location<sp/>=<sp/>location;</highlight></codeline>
+<codeline lineno="128"><highlight class="normal"></highlight></codeline>
+<codeline lineno="129"><highlight class="normal"><sp/><sp/><sp/><sp/></highlight><highlight class="keywordflow">return</highlight><highlight class="normal"><sp/>(Node<sp/>*)param;</highlight></codeline>
+<codeline lineno="130"><highlight class="normal"><sp/><sp/>}</highlight></codeline>
+<codeline lineno="131"><highlight class="normal"></highlight></codeline>
+<codeline lineno="132"><highlight class="normal"><sp/><sp/></highlight><highlight class="comment">/*<sp/>Else<sp/>signal<sp/>to<sp/>proceed<sp/>with<sp/>normal<sp/>coercion<sp/>*/</highlight><highlight class="normal"></highlight></codeline>
+<codeline lineno="133"><highlight class="normal"><sp/><sp/></highlight><highlight class="keywordflow">return</highlight><highlight class="normal"><sp/>NULL;</highlight></codeline>
+<codeline lineno="134"><highlight class="normal">}</highlight></codeline>
+<codeline lineno="135"><highlight class="normal"></highlight></codeline>
+<codeline lineno="136"><highlight class="normal">ParamListInfo<sp/><ref refid="params_8c_1af59767f85f8cd652c06c89913540f0d8" kindref="member">pljs_setup_variable_paramlist</ref>(<ref refid="structpljs__param__state" kindref="compound">pljs_param_state</ref><sp/>*parstate,</highlight></codeline>
+<codeline lineno="137"><highlight class="normal"><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/>Datum<sp/>*values,<sp/></highlight><highlight class="keywordtype">char</highlight><highlight class="normal"><sp/>*nulls)<sp/>{</highlight></codeline>
+<codeline lineno="138"><highlight class="normal"></highlight></codeline>
+<codeline lineno="139"><highlight class="normal"><sp/><sp/>ParamListInfo<sp/>param_li<sp/>=</highlight></codeline>
+<codeline lineno="140"><highlight class="normal"><sp/><sp/><sp/><sp/><sp/><sp/>(ParamListInfo)palloc0(offsetof(ParamListInfoData,<sp/>params)<sp/>+</highlight></codeline>
+<codeline lineno="141"><highlight class="normal"><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/></highlight><highlight class="keyword">sizeof</highlight><highlight class="normal">(ParamExternData)<sp/>*<sp/>parstate-&gt;<ref refid="structpljs__param__state_1ae34c0c06c44fb3b1634aec3f43d4dbac" kindref="member">nparams</ref>);</highlight></codeline>
+<codeline lineno="142"><highlight class="normal"><sp/><sp/>param_li-&gt;numParams<sp/>=<sp/>parstate-&gt;<ref refid="structpljs__param__state_1ae34c0c06c44fb3b1634aec3f43d4dbac" kindref="member">nparams</ref>;</highlight></codeline>
+<codeline lineno="143"><highlight class="normal"><sp/><sp/></highlight><highlight class="keywordflow">for</highlight><highlight class="normal"><sp/>(</highlight><highlight class="keywordtype">int</highlight><highlight class="normal"><sp/>i<sp/>=<sp/>0;<sp/>i<sp/>&lt;<sp/>parstate-&gt;<ref refid="structpljs__param__state_1ae34c0c06c44fb3b1634aec3f43d4dbac" kindref="member">nparams</ref>;<sp/>i++)<sp/>{</highlight></codeline>
+<codeline lineno="144"><highlight class="normal"><sp/><sp/><sp/><sp/>ParamExternData<sp/>*param<sp/>=<sp/>&amp;param_li-&gt;params[i];</highlight></codeline>
+<codeline lineno="145"><highlight class="normal"></highlight></codeline>
+<codeline lineno="146"><highlight class="normal"><sp/><sp/><sp/><sp/>param-&gt;value<sp/>=<sp/>values[i];</highlight></codeline>
+<codeline lineno="147"><highlight class="normal"><sp/><sp/><sp/><sp/>param-&gt;isnull<sp/>=<sp/>nulls[i]<sp/>==<sp/></highlight><highlight class="charliteral">&apos;n&apos;</highlight><highlight class="normal">;</highlight></codeline>
+<codeline lineno="148"><highlight class="normal"><sp/><sp/><sp/><sp/>param-&gt;pflags<sp/>=<sp/>PARAM_FLAG_CONST;</highlight></codeline>
+<codeline lineno="149"><highlight class="normal"><sp/><sp/><sp/><sp/>param-&gt;ptype<sp/>=<sp/>parstate-&gt;<ref refid="structpljs__param__state_1aa2e33085da1b0db6c99b3e2b42f76392" kindref="member">param_types</ref>[i];</highlight></codeline>
+<codeline lineno="150"><highlight class="normal"><sp/><sp/>}</highlight></codeline>
+<codeline lineno="151"><highlight class="normal"></highlight></codeline>
+<codeline lineno="152"><highlight class="normal"><sp/><sp/></highlight><highlight class="keywordflow">return</highlight><highlight class="normal"><sp/>param_li;</highlight></codeline>
+<codeline lineno="153"><highlight class="normal">}</highlight></codeline>
+    </programlisting>
+    <location file="src/params.c"/>
+  </compounddef>
+</doxygen>

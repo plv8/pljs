@@ -1,0 +1,58 @@
+<?xml version='1.0' encoding='UTF-8' standalone='no'?>
+<doxygen xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="compound.xsd" version="1.14.0" xml:lang="en-US">
+  <compounddef id="_r_e_a_d_m_e_8md" kind="file" language="Markdown">
+    <compoundname>README.md</compoundname>
+    <briefdescription>
+    </briefdescription>
+    <detaileddescription>
+    </detaileddescription>
+    <programlisting>
+<codeline><highlight class="normal">#<sp/>PLJS</highlight></codeline>
+<codeline></codeline>
+<codeline><highlight class="normal">PLJS<sp/>is<sp/>a<sp/>trusted<sp/>JavaScript<sp/>Language<sp/>Extension<sp/>for<sp/>PostgreSQL.</highlight></codeline>
+<codeline></codeline>
+<codeline><highlight class="normal">It<sp/>is<sp/>compact,<sp/>lightweight,<sp/>and<sp/>fast.</highlight></codeline>
+<codeline></codeline>
+<codeline><highlight class="normal">A<sp/>[Discord](https://discord.gg/XYGSCfVNBC)<sp/>is<sp/>available<sp/>for<sp/>general<sp/>questions,<sp/>discussions,<sp/>and<sp/>support.<sp/>Please<sp/>check<sp/>there<sp/>before<sp/>opening<sp/>an<sp/>issue.</highlight></codeline>
+<codeline></codeline>
+<codeline><highlight class="normal">##<sp/>Technology</highlight></codeline>
+<codeline></codeline>
+<codeline><highlight class="normal">JavaScript:<sp/>[QuickJS](https://bellard.org/quickjs/quickjs.html)</highlight></codeline>
+<codeline></codeline>
+<codeline><highlight class="normal">PostgreSQL:<sp/>14+</highlight></codeline>
+<codeline></codeline>
+<codeline><highlight class="normal">###<sp/>Current<sp/>Status</highlight></codeline>
+<codeline></codeline>
+<codeline><highlight class="normal">1.0.1<sp/>released.</highlight></codeline>
+<codeline></codeline>
+<codeline><highlight class="normal">##<sp/>Using<sp/>PLJS</highlight></codeline>
+<codeline></codeline>
+<codeline><highlight class="normal">Once<sp/>the<sp/>extension<sp/>has<sp/>been<sp/>installed<sp/>(see<sp/>[Building](docs/DEVELOPMENT.md)),<sp/>you<sp/>can<sp/>run:</highlight></codeline>
+<codeline></codeline>
+<codeline><highlight class="normal">```sql</highlight></codeline>
+<codeline><highlight class="normal">CREATE<sp/>EXTENSION<sp/>pljs;</highlight></codeline>
+<codeline><highlight class="normal">```</highlight></codeline>
+<codeline></codeline>
+<codeline><highlight class="normal">from<sp/>your<sp/>SQL<sp/>REPL.</highlight></codeline>
+<codeline></codeline>
+<codeline><highlight class="normal">You<sp/>can<sp/>test<sp/>that<sp/>it<sp/>works<sp/>by<sp/>executing:</highlight></codeline>
+<codeline></codeline>
+<codeline><highlight class="normal">```</highlight></codeline>
+<codeline><highlight class="normal">DO<sp/>$$<sp/>pljs.elog(NOTICE,<sp/>&quot;Hello,<sp/>World!&quot;)<sp/>$$<sp/>LANGUAGE<sp/>pljs;</highlight></codeline>
+<codeline><highlight class="normal">```</highlight></codeline>
+<codeline></codeline>
+<codeline><highlight class="normal">##<sp/>Documentation</highlight></codeline>
+<codeline></codeline>
+<codeline><highlight class="normal">-<sp/>[Integrations](docs/INTEGRATION.md)<sp/>-<sp/>How<sp/>PLJS<sp/>integrates<sp/>with<sp/>Postgres</highlight></codeline>
+<codeline><highlight class="normal">-<sp/>[Types](docs/TYPES.md)<sp/>-<sp/>Type<sp/>conversion<sp/>between<sp/>Postgres<sp/>and<sp/>JavaScript</highlight></codeline>
+<codeline><highlight class="normal">-<sp/>[Functions](docs/FUNCTIONS.md)<sp/>-<sp/>Functions<sp/>and<sp/>functionality<sp/>provided<sp/>by<sp/>PLJS</highlight></codeline>
+<codeline><highlight class="normal">-<sp/>[Configuration](docs/CONFIGURATION.md)<sp/>-<sp/>Configuration<sp/>options</highlight></codeline>
+<codeline><highlight class="normal">-<sp/>[Development](docs/DEVELOPMENT.md)<sp/>-<sp/>How<sp/>to<sp/>build<sp/>and<sp/>develop<sp/>PLJS</highlight></codeline>
+<codeline><highlight class="normal">-<sp/>[Versioning](docs/VERSIONING.md)<sp/>-<sp/>PLJS&apos;s<sp/>versioning<sp/>policies</highlight></codeline>
+<codeline><highlight class="normal">-<sp/>[Change<sp/>Log](docs/CHANGELOG.md)<sp/>-<sp/>Release<sp/>change<sp/>log</highlight></codeline>
+<codeline><highlight class="normal">-<sp/>[Roadmap](docs/ROADMAP.md)<sp/>-<sp/>PLJS&apos;s<sp/>development<sp/>roadmap</highlight></codeline>
+<codeline><highlight class="normal">-<sp/>[Benchmarks](docs/BENCHMARKS.md)<sp/>-<sp/>Benchmarks<sp/>and<sp/>comparisons<sp/>with<sp/>[PLV8](https://github.com/plv8/pljs)</highlight></codeline>
+    </programlisting>
+    <location file="README.md"/>
+  </compounddef>
+</doxygen>

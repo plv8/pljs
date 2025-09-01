@@ -75,12 +75,16 @@ static JSValue pljs_subtransaction(JSContext *, JSValueConst, int,
 static JSValue pljs_gc(JSContext *, JSValueConst, int, JSValueConst *);
 #endif
 
+static JSValue pljs_import(JSContext *, JSValueConst, int, JSValueConst *);
+
 // Set up any stored procedures we export to Postgres.
 PGDLLEXPORT Datum pljs_version(PG_FUNCTION_ARGS);
 PGDLLEXPORT Datum pljs_info(PG_FUNCTION_ARGS);
+PGDLLEXPORT Datum pljs_reset(PG_FUNCTION_ARGS);
 
 PG_FUNCTION_INFO_V1(pljs_version);
 PG_FUNCTION_INFO_V1(pljs_info);
+PG_FUNCTION_INFO_V1(pljs_reset);
 
 /**
  * @brief toString Javascript method for the pljs object.
@@ -148,10 +152,13 @@ void pljs_setup_namespace(JSContext *ctx) {
   JS_SetPropertyStr(ctx, pljs, "gc", JS_NewCFunction(ctx, pljs_gc, "gc", 0));
 #endif
 
-  JS_SetPropertyStr(ctx, global_obj, "pljs", pljs);
-
   // Version.
   JS_SetPropertyStr(ctx, pljs, "version", JS_NewString(ctx, PLJS_VERSION));
+
+  JS_SetPropertyStr(ctx, pljs, "import",
+                    JS_NewCFunction(ctx, pljs_import, "import", 1));
+
+  JS_SetPropertyStr(ctx, global_obj, "pljs", pljs);
 
   // Set up logging levels in the context.
   JS_SetPropertyStr(ctx, global_obj, "DEBUG5", JS_NewInt32(ctx, DEBUG5));
@@ -1557,6 +1564,66 @@ static JSValue pljs_gc(JSContext *ctx, JSValueConst this_val, int argc,
 }
 #endif
 
+void log_type(JSContext *ctx, JSValue val) {
+  if (JS_IsException(val)) {
+    elog(NOTICE, "is exception");
+  }
+
+  if (JS_IsException(val)) {
+    elog(NOTICE, "is exception");
+  }
+
+  if (JS_IsNumber(val)) {
+    elog(NOTICE, "is number");
+  }
+
+  if (JS_IsString(val)) {
+    elog(NOTICE, "is string");
+  }
+
+  if (JS_IsObject(val)) {
+    elog(NOTICE, "is object");
+  }
+
+  if (JS_IsNull(val)) {
+    elog(NOTICE, "is null");
+  }
+
+  if (JS_IsArray(ctx, val)) {
+    elog(NOTICE, "is array");
+  }
+
+  if (JS_IsFunction(ctx, val)) {
+    elog(NOTICE, "is function");
+  }
+}
+
+static JSValue pljs_import(JSContext *ctx, JSValueConst this_val, int argc,
+                           JSValueConst *argv) {
+  if (argc != 1) {
+    return js_throw("import() expects exactly one argument", ctx);
+  }
+
+  if (!JS_IsString(argv[0])) {
+    return js_throw("import() expects a string", ctx);
+  }
+
+  const char *path = JS_ToCString(ctx, argv[0]);
+  elog(NOTICE, "Calling module load");
+  JSValue ret = pljs_module_load(ctx, path);
+  elog(NOTICE, "have ret");
+  log_type(ctx, ret);
+
+  ret = JS_EvalFunction(ctx, ret);
+  elog(NOTICE, "evald function");
+  log_type(ctx, ret);
+  // ret = js_std_await(ctx, ret);
+  // log_type(ctx, ret);
+  elog(NOTICE, "returning");
+
+  return ret;
+}
+
 /**
  * @brief Returns the `PLJS_VERSION` to Postgres.
  *
@@ -1689,4 +1756,12 @@ Datum pljs_info(PG_FUNCTION_ARGS) {
       malloc_count, malloc_size, malloc_limit, stack_size, stack_limit);
 
   return (Datum)CStringGetTextDatum(ret);
+}
+
+Datum pljs_reset(PG_FUNCTION_ARGS) {
+  JS_FreeRuntime(rt);
+  rt = JS_NewRuntime();
+  pljs_cache_reset();
+
+  PG_RETURN_VOID();
 }

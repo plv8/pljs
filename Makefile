@@ -1,6 +1,6 @@
 .PHONY: lintcheck format cleansql docs clean test all
 
-PLJS_VERSION = 1.0.4
+PLJS_VERSION = 1.1.0-dev
 
 PG_CONFIG ?= pg_config
 PGXS := $(shell $(PG_CONFIG) --pgxs)
@@ -9,8 +9,8 @@ INCLUDEDIR_SERVER := ${shell $(PG_CONFIG) --includedir-server}
 
 
 CP = cp
-SRCS = src/pljs.c src/cache.c src/functions.c src/types.c src/params.c
-OBJS = src/pljs.o src/cache.o src/functions.o src/types.o src/params.o
+SRCS = src/pljs.c src/cache.c src/functions.c src/types.c src/params.c src/modules.c
+OBJS = src/pljs.o src/cache.o src/functions.o src/types.o src/params.o src/modules.o
 MODULE_big = pljs
 EXTENSION = pljs
 DATA = pljs.control pljs--$(PLJS_VERSION).sql

@@ -1,0 +1,314 @@
+<?xml version='1.0' encoding='UTF-8' standalone='no'?>
+<doxygen xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="compound.xsd" version="1.14.0" xml:lang="en-US">
+  <compounddef id="repro_8c" kind="file" language="C++">
+    <compoundname>repro.c</compoundname>
+    <includes local="yes">deps/quickjs/quickjs.h</includes>
+    <includes local="no">execinfo.h</includes>
+    <includes local="no">stdio.h</includes>
+    <includes local="no">stdlib.h</includes>
+    <includes local="no">string.h</includes>
+    <incdepgraph>
+      <node id="1">
+        <label>repro.c</label>
+        <link refid="repro_8c"/>
+        <childnode refid="2" relation="include">
+        </childnode>
+        <childnode refid="3" relation="include">
+        </childnode>
+        <childnode refid="4" relation="include">
+        </childnode>
+        <childnode refid="5" relation="include">
+        </childnode>
+        <childnode refid="6" relation="include">
+        </childnode>
+      </node>
+      <node id="2">
+        <label>deps/quickjs/quickjs.h</label>
+      </node>
+      <node id="3">
+        <label>execinfo.h</label>
+      </node>
+      <node id="4">
+        <label>stdio.h</label>
+      </node>
+      <node id="5">
+        <label>stdlib.h</label>
+      </node>
+      <node id="6">
+        <label>string.h</label>
+      </node>
+    </incdepgraph>
+    <sectiondef kind="func">
+      <memberdef kind="function" id="repro_8c_1acfc1e178a0b1babd9a466f3b6d8859a3" prot="public" static="no" const="no" explicit="no" inline="no" virt="non-virtual">
+        <type>JSValue</type>
+        <definition>JSValue construct_array</definition>
+        <argsstring>(JSContext *ctx, JSValueConst this_obj, int argc, JSValueConst *argv)</argsstring>
+        <name>construct_array</name>
+        <param>
+          <type>JSContext *</type>
+          <declname>ctx</declname>
+        </param>
+        <param>
+          <type>JSValueConst</type>
+          <declname>this_obj</declname>
+        </param>
+        <param>
+          <type>int</type>
+          <declname>argc</declname>
+        </param>
+        <param>
+          <type>JSValueConst *</type>
+          <declname>argv</declname>
+        </param>
+        <briefdescription>
+        </briefdescription>
+        <detaileddescription>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="repro.c" line="7" column="9" bodyfile="repro.c" bodystart="7" bodyend="27"/>
+      </memberdef>
+      <memberdef kind="function" id="repro_8c_1a63f464863e84c633b9d43803b159338b" prot="public" static="no" const="no" explicit="no" inline="no" virt="non-virtual">
+        <type>uint32_t</type>
+        <definition>uint32_t js_array_length</definition>
+        <argsstring>(JSContext *ctx, JSValueConst obj)</argsstring>
+        <name>js_array_length</name>
+        <param>
+          <type>JSContext *</type>
+          <declname>ctx</declname>
+        </param>
+        <param>
+          <type>JSValueConst</type>
+          <declname>obj</declname>
+        </param>
+        <briefdescription>
+        </briefdescription>
+        <detaileddescription>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="repro.c" line="29" column="10" bodyfile="repro.c" bodystart="29" bodyend="35"/>
+      </memberdef>
+      <memberdef kind="function" id="repro_8c_1ad7700ce42ab430fc19c417e7c2d1d103" prot="public" static="no" const="no" explicit="no" inline="no" virt="non-virtual">
+        <type>void</type>
+        <definition>void walk_value</definition>
+        <argsstring>(JSContext *ctx, JSValue value, int indent)</argsstring>
+        <name>walk_value</name>
+        <param>
+          <type>JSContext *</type>
+          <declname>ctx</declname>
+        </param>
+        <param>
+          <type>JSValue</type>
+          <declname>value</declname>
+        </param>
+        <param>
+          <type>int</type>
+          <declname>indent</declname>
+        </param>
+        <briefdescription>
+        </briefdescription>
+        <detaileddescription>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="repro.c" line="37" column="6" bodyfile="repro.c" bodystart="37" bodyend="118"/>
+      </memberdef>
+      <memberdef kind="function" id="repro_8c_1ae66f6b31b5ad750f1fe042a706a4e3d4" prot="public" static="no" const="no" explicit="no" inline="no" virt="non-virtual">
+        <type>int</type>
+        <definition>int main</definition>
+        <argsstring>()</argsstring>
+        <name>main</name>
+        <briefdescription>
+        </briefdescription>
+        <detaileddescription>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="repro.c" line="119" column="5" bodyfile="repro.c" bodystart="119" bodyend="175"/>
+      </memberdef>
+    </sectiondef>
+    <briefdescription>
+    </briefdescription>
+    <detaileddescription>
+    </detaileddescription>
+    <programlisting>
+<codeline lineno="1"><highlight class="preprocessor">#include<sp/>&quot;deps/quickjs/quickjs.h&quot;</highlight><highlight class="normal"></highlight></codeline>
+<codeline lineno="2"><highlight class="normal"></highlight><highlight class="preprocessor">#include<sp/>&lt;execinfo.h&gt;</highlight><highlight class="normal"><sp/></highlight><highlight class="comment">/*<sp/>backtrace,<sp/>backtrace_symbols<sp/>*/</highlight><highlight class="normal"></highlight></codeline>
+<codeline lineno="3"><highlight class="normal"></highlight><highlight class="preprocessor">#include<sp/>&lt;stdio.h&gt;</highlight><highlight class="normal"></highlight></codeline>
+<codeline lineno="4"><highlight class="normal"></highlight><highlight class="preprocessor">#include<sp/>&lt;stdlib.h&gt;</highlight><highlight class="normal"></highlight></codeline>
+<codeline lineno="5"><highlight class="normal"></highlight><highlight class="preprocessor">#include<sp/>&lt;string.h&gt;</highlight><highlight class="normal"></highlight></codeline>
+<codeline lineno="6"><highlight class="normal"></highlight></codeline>
+<codeline lineno="7"><highlight class="normal">JSValue<sp/><ref refid="repro_8c_1acfc1e178a0b1babd9a466f3b6d8859a3" kindref="member">construct_array</ref>(JSContext<sp/>*ctx,<sp/>JSValueConst<sp/>this_obj,<sp/></highlight><highlight class="keywordtype">int</highlight><highlight class="normal"><sp/>argc,</highlight></codeline>
+<codeline lineno="8"><highlight class="normal"><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/>JSValueConst<sp/>*argv)<sp/>{</highlight></codeline>
+<codeline lineno="9"><highlight class="normal"><sp/><sp/>JSValue<sp/>x<sp/>=<sp/>JS_NewInt64(ctx,<sp/>2);</highlight></codeline>
+<codeline lineno="10"><highlight class="normal"><sp/><sp/>JSValue<sp/>y<sp/>=<sp/>JS_NULL;</highlight></codeline>
+<codeline lineno="11"><highlight class="normal"><sp/><sp/>JSValue<sp/>z<sp/>=<sp/>JS_NULL;</highlight></codeline>
+<codeline lineno="12"><highlight class="normal"></highlight></codeline>
+<codeline lineno="13"><highlight class="normal"><sp/><sp/>JSValue<sp/>inner_object<sp/>=<sp/>JS_NewObject(ctx);</highlight></codeline>
+<codeline lineno="14"><highlight class="normal"></highlight></codeline>
+<codeline lineno="15"><highlight class="normal"><sp/><sp/>JS_SetPropertyStr(ctx,<sp/>inner_object,<sp/></highlight><highlight class="stringliteral">&quot;x&quot;</highlight><highlight class="normal">,<sp/>x);</highlight></codeline>
+<codeline lineno="16"><highlight class="normal"><sp/><sp/>JS_SetPropertyStr(ctx,<sp/>inner_object,<sp/></highlight><highlight class="stringliteral">&quot;y&quot;</highlight><highlight class="normal">,<sp/>y);</highlight></codeline>
+<codeline lineno="17"><highlight class="normal"><sp/><sp/>JS_SetPropertyStr(ctx,<sp/>inner_object,<sp/></highlight><highlight class="stringliteral">&quot;z&quot;</highlight><highlight class="normal">,<sp/>z);</highlight></codeline>
+<codeline lineno="18"><highlight class="normal"></highlight></codeline>
+<codeline lineno="19"><highlight class="normal"><sp/><sp/>JSValue<sp/>inner_array<sp/>=<sp/>JS_NewArray(ctx);</highlight></codeline>
+<codeline lineno="20"><highlight class="normal"></highlight></codeline>
+<codeline lineno="21"><highlight class="normal"><sp/><sp/>JS_SetPropertyInt64(ctx,<sp/>inner_array,<sp/>0,<sp/>inner_object);</highlight></codeline>
+<codeline lineno="22"><highlight class="normal"></highlight></codeline>
+<codeline lineno="23"><highlight class="normal"><sp/><sp/>JSValue<sp/>outer_array<sp/>=<sp/>JS_NewArray(ctx);</highlight></codeline>
+<codeline lineno="24"><highlight class="normal"><sp/><sp/>JS_SetPropertyInt64(ctx,<sp/>outer_array,<sp/>0,<sp/>inner_array);</highlight></codeline>
+<codeline lineno="25"><highlight class="normal"></highlight></codeline>
+<codeline lineno="26"><highlight class="normal"><sp/><sp/></highlight><highlight class="keywordflow">return</highlight><highlight class="normal"><sp/>inner_array;</highlight></codeline>
+<codeline lineno="27"><highlight class="normal">}</highlight></codeline>
+<codeline lineno="28"><highlight class="normal"></highlight></codeline>
+<codeline lineno="29"><highlight class="normal">uint32_t<sp/><ref refid="repro_8c_1a63f464863e84c633b9d43803b159338b" kindref="member">js_array_length</ref>(JSContext<sp/>*ctx,<sp/>JSValueConst<sp/>obj)<sp/>{</highlight></codeline>
+<codeline lineno="30"><highlight class="normal"><sp/><sp/>JSValue<sp/>length<sp/>=<sp/>JS_GetPropertyStr(ctx,<sp/>obj,<sp/></highlight><highlight class="stringliteral">&quot;length&quot;</highlight><highlight class="normal">);</highlight></codeline>
+<codeline lineno="31"><highlight class="normal"><sp/><sp/>int32_t<sp/>array_length_int;</highlight></codeline>
+<codeline lineno="32"><highlight class="normal"><sp/><sp/>JS_ToInt32(ctx,<sp/>&amp;array_length_int,<sp/>length);</highlight></codeline>
+<codeline lineno="33"><highlight class="normal"></highlight></codeline>
+<codeline lineno="34"><highlight class="normal"><sp/><sp/></highlight><highlight class="keywordflow">return</highlight><highlight class="normal"><sp/>array_length_int;</highlight></codeline>
+<codeline lineno="35"><highlight class="normal">}</highlight></codeline>
+<codeline lineno="36"><highlight class="normal"></highlight></codeline>
+<codeline lineno="37"><highlight class="normal"></highlight><highlight class="keywordtype">void</highlight><highlight class="normal"><sp/><ref refid="repro_8c_1ad7700ce42ab430fc19c417e7c2d1d103" kindref="member">walk_value</ref>(JSContext<sp/>*ctx,<sp/>JSValue<sp/>value,<sp/></highlight><highlight class="keywordtype">int</highlight><highlight class="normal"><sp/>indent)<sp/>{</highlight></codeline>
+<codeline lineno="38"><highlight class="normal"><sp/><sp/></highlight><highlight class="keywordflow">if</highlight><highlight class="normal"><sp/>(JS_IsArray(ctx,<sp/>value))<sp/>{</highlight></codeline>
+<codeline lineno="39"><highlight class="normal"><sp/><sp/><sp/><sp/></highlight><highlight class="keywordflow">for</highlight><highlight class="normal"><sp/>(</highlight><highlight class="keywordtype">int</highlight><highlight class="normal"><sp/>i<sp/>=<sp/>0;<sp/>i<sp/>&lt;<sp/>indent;<sp/>i++)<sp/>{</highlight></codeline>
+<codeline lineno="40"><highlight class="normal"><sp/><sp/><sp/><sp/><sp/><sp/>printf(</highlight><highlight class="stringliteral">&quot;<sp/>&quot;</highlight><highlight class="normal">);</highlight></codeline>
+<codeline lineno="41"><highlight class="normal"><sp/><sp/><sp/><sp/>}</highlight></codeline>
+<codeline lineno="42"><highlight class="normal"></highlight></codeline>
+<codeline lineno="43"><highlight class="normal"><sp/><sp/><sp/><sp/>uint32_t<sp/>array_length<sp/>=<sp/><ref refid="repro_8c_1a63f464863e84c633b9d43803b159338b" kindref="member">js_array_length</ref>(ctx,<sp/>value);</highlight></codeline>
+<codeline lineno="44"><highlight class="normal"><sp/><sp/><sp/><sp/>printf(</highlight><highlight class="stringliteral">&quot;[array]<sp/>(%d)\n&quot;</highlight><highlight class="normal">,<sp/>array_length);</highlight></codeline>
+<codeline lineno="45"><highlight class="normal"><sp/><sp/><sp/><sp/></highlight><highlight class="keywordflow">for</highlight><highlight class="normal"><sp/>(uint32_t<sp/>i<sp/>=<sp/>0;<sp/>i<sp/>&lt;<sp/>array_length;<sp/>i++)<sp/>{</highlight></codeline>
+<codeline lineno="46"><highlight class="normal"><sp/><sp/><sp/><sp/><sp/><sp/>JSValue<sp/>inner<sp/>=<sp/>JS_GetPropertyUint32(ctx,<sp/>value,<sp/>i);</highlight></codeline>
+<codeline lineno="47"><highlight class="normal"><sp/><sp/><sp/><sp/><sp/><sp/><ref refid="repro_8c_1ad7700ce42ab430fc19c417e7c2d1d103" kindref="member">walk_value</ref>(ctx,<sp/>inner,<sp/>indent<sp/>+<sp/>2);</highlight></codeline>
+<codeline lineno="48"><highlight class="normal"><sp/><sp/><sp/><sp/>}</highlight></codeline>
+<codeline lineno="49"><highlight class="normal"><sp/><sp/>}</highlight></codeline>
+<codeline lineno="50"><highlight class="normal"></highlight></codeline>
+<codeline lineno="51"><highlight class="normal"><sp/><sp/></highlight><highlight class="keywordflow">else</highlight><highlight class="normal"><sp/></highlight><highlight class="keywordflow">if</highlight><highlight class="normal"><sp/>(JS_IsObject(value))<sp/>{</highlight></codeline>
+<codeline lineno="52"><highlight class="normal"><sp/><sp/><sp/><sp/>uint32_t<sp/>object_keys_length<sp/>=<sp/>0;</highlight></codeline>
+<codeline lineno="53"><highlight class="normal"><sp/><sp/><sp/><sp/>JSPropertyEnum<sp/>*tab;</highlight></codeline>
+<codeline lineno="54"><highlight class="normal"></highlight></codeline>
+<codeline lineno="55"><highlight class="normal"><sp/><sp/><sp/><sp/></highlight><highlight class="keywordflow">if</highlight><highlight class="normal"><sp/>(JS_GetOwnPropertyNames(ctx,<sp/>&amp;tab,<sp/>&amp;object_keys_length,<sp/>value,</highlight></codeline>
+<codeline lineno="56"><highlight class="normal"><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/>JS_GPN_STRING_MASK)<sp/>&lt;<sp/>0)<sp/>{</highlight></codeline>
+<codeline lineno="57"><highlight class="normal"><sp/><sp/><sp/><sp/><sp/><sp/>printf(</highlight><highlight class="stringliteral">&quot;INVALID<sp/>OBJECT\n&quot;</highlight><highlight class="normal">);</highlight></codeline>
+<codeline lineno="58"><highlight class="normal"><sp/><sp/><sp/><sp/><sp/><sp/></highlight><highlight class="keywordflow">return</highlight><highlight class="normal">;</highlight></codeline>
+<codeline lineno="59"><highlight class="normal"><sp/><sp/><sp/><sp/>}</highlight></codeline>
+<codeline lineno="60"><highlight class="normal"></highlight></codeline>
+<codeline lineno="61"><highlight class="normal"><sp/><sp/><sp/><sp/></highlight><highlight class="keywordflow">for</highlight><highlight class="normal"><sp/>(</highlight><highlight class="keywordtype">int</highlight><highlight class="normal"><sp/>i<sp/>=<sp/>0;<sp/>i<sp/>&lt;<sp/>indent;<sp/>i++)<sp/>{</highlight></codeline>
+<codeline lineno="62"><highlight class="normal"><sp/><sp/><sp/><sp/><sp/><sp/>printf(</highlight><highlight class="stringliteral">&quot;<sp/>&quot;</highlight><highlight class="normal">);</highlight></codeline>
+<codeline lineno="63"><highlight class="normal"><sp/><sp/><sp/><sp/>}</highlight></codeline>
+<codeline lineno="64"><highlight class="normal"></highlight></codeline>
+<codeline lineno="65"><highlight class="normal"><sp/><sp/><sp/><sp/>printf(</highlight><highlight class="stringliteral">&quot;[object]\n&quot;</highlight><highlight class="normal">);</highlight></codeline>
+<codeline lineno="66"><highlight class="normal"></highlight></codeline>
+<codeline lineno="67"><highlight class="normal"><sp/><sp/><sp/><sp/></highlight><highlight class="keywordflow">for</highlight><highlight class="normal"><sp/>(uint32_t<sp/>i<sp/>=<sp/>0;<sp/>i<sp/>&lt;<sp/>object_keys_length;<sp/>i++)<sp/>{</highlight></codeline>
+<codeline lineno="68"><highlight class="normal"><sp/><sp/><sp/><sp/><sp/><sp/></highlight><highlight class="keywordflow">for</highlight><highlight class="normal"><sp/>(</highlight><highlight class="keywordtype">int</highlight><highlight class="normal"><sp/>i<sp/>=<sp/>0;<sp/>i<sp/>&lt;<sp/>indent<sp/>+<sp/>2;<sp/>i++)<sp/>{</highlight></codeline>
+<codeline lineno="69"><highlight class="normal"><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/>printf(</highlight><highlight class="stringliteral">&quot;<sp/>&quot;</highlight><highlight class="normal">);</highlight></codeline>
+<codeline lineno="70"><highlight class="normal"><sp/><sp/><sp/><sp/><sp/><sp/>}</highlight></codeline>
+<codeline lineno="71"><highlight class="normal"></highlight></codeline>
+<codeline lineno="72"><highlight class="normal"><sp/><sp/><sp/><sp/><sp/><sp/></highlight><highlight class="keyword">const</highlight><highlight class="normal"><sp/></highlight><highlight class="keywordtype">char</highlight><highlight class="normal"><sp/>*atom<sp/>=<sp/>JS_AtomToCString(ctx,<sp/>tab[i].atom);</highlight></codeline>
+<codeline lineno="73"><highlight class="normal"></highlight></codeline>
+<codeline lineno="74"><highlight class="normal"><sp/><sp/><sp/><sp/><sp/><sp/>printf(</highlight><highlight class="stringliteral">&quot;[key]<sp/>%s\n&quot;</highlight><highlight class="normal">,<sp/>atom);</highlight></codeline>
+<codeline lineno="75"><highlight class="normal"><sp/><sp/><sp/><sp/><sp/><sp/>JSValue<sp/>v<sp/>=<sp/>JS_GetPropertyStr(ctx,<sp/>value,<sp/>atom);</highlight></codeline>
+<codeline lineno="76"><highlight class="normal"><sp/><sp/><sp/><sp/><sp/><sp/><ref refid="repro_8c_1ad7700ce42ab430fc19c417e7c2d1d103" kindref="member">walk_value</ref>(ctx,<sp/>v,<sp/>indent<sp/>+<sp/>4);</highlight></codeline>
+<codeline lineno="77"><highlight class="normal"><sp/><sp/><sp/><sp/>}</highlight></codeline>
+<codeline lineno="78"><highlight class="normal"><sp/><sp/>}</highlight></codeline>
+<codeline lineno="79"><highlight class="normal"></highlight></codeline>
+<codeline lineno="80"><highlight class="normal"><sp/><sp/></highlight><highlight class="keywordflow">else</highlight><highlight class="normal"><sp/></highlight><highlight class="keywordflow">if</highlight><highlight class="normal"><sp/>(JS_IsNumber(value))<sp/>{</highlight></codeline>
+<codeline lineno="81"><highlight class="normal"><sp/><sp/><sp/><sp/></highlight><highlight class="keywordflow">for</highlight><highlight class="normal"><sp/>(</highlight><highlight class="keywordtype">int</highlight><highlight class="normal"><sp/>i<sp/>=<sp/>0;<sp/>i<sp/>&lt;<sp/>indent;<sp/>i++)<sp/>{</highlight></codeline>
+<codeline lineno="82"><highlight class="normal"><sp/><sp/><sp/><sp/><sp/><sp/>printf(</highlight><highlight class="stringliteral">&quot;<sp/>&quot;</highlight><highlight class="normal">);</highlight></codeline>
+<codeline lineno="83"><highlight class="normal"><sp/><sp/><sp/><sp/>}</highlight></codeline>
+<codeline lineno="84"><highlight class="normal"></highlight></codeline>
+<codeline lineno="85"><highlight class="normal"><sp/><sp/><sp/><sp/></highlight><highlight class="keywordtype">double</highlight><highlight class="normal"><sp/>v;</highlight></codeline>
+<codeline lineno="86"><highlight class="normal"><sp/><sp/><sp/><sp/>JS_ToFloat64(ctx,<sp/>&amp;v,<sp/>value);</highlight></codeline>
+<codeline lineno="87"><highlight class="normal"><sp/><sp/><sp/><sp/>printf(</highlight><highlight class="stringliteral">&quot;[number]<sp/>%f\n&quot;</highlight><highlight class="normal">,<sp/>v);</highlight></codeline>
+<codeline lineno="88"><highlight class="normal"><sp/><sp/>}</highlight></codeline>
+<codeline lineno="89"><highlight class="normal"></highlight></codeline>
+<codeline lineno="90"><highlight class="normal"><sp/><sp/></highlight><highlight class="keywordflow">else</highlight><highlight class="normal"><sp/></highlight><highlight class="keywordflow">if</highlight><highlight class="normal"><sp/>(JS_IsString(value))<sp/>{</highlight></codeline>
+<codeline lineno="91"><highlight class="normal"><sp/><sp/><sp/><sp/></highlight><highlight class="keywordflow">for</highlight><highlight class="normal"><sp/>(</highlight><highlight class="keywordtype">int</highlight><highlight class="normal"><sp/>i<sp/>=<sp/>0;<sp/>i<sp/>&lt;<sp/>indent;<sp/>i++)<sp/>{</highlight></codeline>
+<codeline lineno="92"><highlight class="normal"><sp/><sp/><sp/><sp/><sp/><sp/>printf(</highlight><highlight class="stringliteral">&quot;<sp/>&quot;</highlight><highlight class="normal">);</highlight></codeline>
+<codeline lineno="93"><highlight class="normal"><sp/><sp/><sp/><sp/>}</highlight></codeline>
+<codeline lineno="94"><highlight class="normal"></highlight></codeline>
+<codeline lineno="95"><highlight class="normal"><sp/><sp/><sp/><sp/></highlight><highlight class="keyword">const</highlight><highlight class="normal"><sp/></highlight><highlight class="keywordtype">char</highlight><highlight class="normal"><sp/>*v<sp/>=<sp/>JS_ToCString(ctx,<sp/>value);</highlight></codeline>
+<codeline lineno="96"><highlight class="normal"><sp/><sp/><sp/><sp/>printf(</highlight><highlight class="stringliteral">&quot;[string]<sp/>%s\n&quot;</highlight><highlight class="normal">,<sp/>v);</highlight></codeline>
+<codeline lineno="97"><highlight class="normal"><sp/><sp/>}</highlight></codeline>
+<codeline lineno="98"><highlight class="normal"></highlight></codeline>
+<codeline lineno="99"><highlight class="normal"><sp/><sp/></highlight><highlight class="keywordflow">else</highlight><highlight class="normal"><sp/></highlight><highlight class="keywordflow">if</highlight><highlight class="normal"><sp/>(JS_IsNull(value))<sp/>{</highlight></codeline>
+<codeline lineno="100"><highlight class="normal"><sp/><sp/><sp/><sp/></highlight><highlight class="keywordflow">for</highlight><highlight class="normal"><sp/>(</highlight><highlight class="keywordtype">int</highlight><highlight class="normal"><sp/>i<sp/>=<sp/>0;<sp/>i<sp/>&lt;<sp/>indent;<sp/>i++)<sp/>{</highlight></codeline>
+<codeline lineno="101"><highlight class="normal"><sp/><sp/><sp/><sp/><sp/><sp/>printf(</highlight><highlight class="stringliteral">&quot;<sp/>&quot;</highlight><highlight class="normal">);</highlight></codeline>
+<codeline lineno="102"><highlight class="normal"><sp/><sp/><sp/><sp/>}</highlight></codeline>
+<codeline lineno="103"><highlight class="normal"></highlight></codeline>
+<codeline lineno="104"><highlight class="normal"><sp/><sp/><sp/><sp/>printf(</highlight><highlight class="stringliteral">&quot;[null]\n&quot;</highlight><highlight class="normal">);</highlight></codeline>
+<codeline lineno="105"><highlight class="normal"><sp/><sp/>}</highlight></codeline>
+<codeline lineno="106"><highlight class="normal"></highlight></codeline>
+<codeline lineno="107"><highlight class="normal"><sp/><sp/></highlight><highlight class="keywordflow">else</highlight><highlight class="normal"><sp/></highlight><highlight class="keywordflow">if</highlight><highlight class="normal"><sp/>(JS_IsUndefined(value))<sp/>{</highlight></codeline>
+<codeline lineno="108"><highlight class="normal"><sp/><sp/><sp/><sp/></highlight><highlight class="keywordflow">for</highlight><highlight class="normal"><sp/>(</highlight><highlight class="keywordtype">int</highlight><highlight class="normal"><sp/>i<sp/>=<sp/>0;<sp/>i<sp/>&lt;<sp/>indent;<sp/>i++)<sp/>{</highlight></codeline>
+<codeline lineno="109"><highlight class="normal"><sp/><sp/><sp/><sp/><sp/><sp/>printf(</highlight><highlight class="stringliteral">&quot;<sp/>&quot;</highlight><highlight class="normal">);</highlight></codeline>
+<codeline lineno="110"><highlight class="normal"><sp/><sp/><sp/><sp/>}</highlight></codeline>
+<codeline lineno="111"><highlight class="normal"></highlight></codeline>
+<codeline lineno="112"><highlight class="normal"><sp/><sp/><sp/><sp/>printf(</highlight><highlight class="stringliteral">&quot;[undefined]\n&quot;</highlight><highlight class="normal">);</highlight></codeline>
+<codeline lineno="113"><highlight class="normal"><sp/><sp/>}</highlight></codeline>
+<codeline lineno="114"><highlight class="normal"></highlight></codeline>
+<codeline lineno="115"><highlight class="normal"><sp/><sp/></highlight><highlight class="keywordflow">else</highlight><highlight class="normal"><sp/>{</highlight></codeline>
+<codeline lineno="116"><highlight class="normal"><sp/><sp/><sp/><sp/>printf(</highlight><highlight class="stringliteral">&quot;unknown<sp/>type\n&quot;</highlight><highlight class="normal">);</highlight></codeline>
+<codeline lineno="117"><highlight class="normal"><sp/><sp/>}</highlight></codeline>
+<codeline lineno="118"><highlight class="normal">}</highlight></codeline>
+<codeline lineno="119"><highlight class="normal"></highlight><highlight class="keywordtype">int</highlight><highlight class="normal"><sp/><ref refid="repro_8c_1ae66f6b31b5ad750f1fe042a706a4e3d4" kindref="member">main</ref>()<sp/>{</highlight></codeline>
+<codeline lineno="120"><highlight class="normal"><sp/><sp/>JSRuntime<sp/>*<ref refid="pljs_8c_1a3ba489a976915ca6161baede3c439066" kindref="member">rt</ref><sp/>=<sp/>JS_NewRuntime();</highlight></codeline>
+<codeline lineno="121"><highlight class="normal"><sp/><sp/>JSContext<sp/>*ctx<sp/>=<sp/>JS_NewContext(<ref refid="pljs_8c_1a3ba489a976915ca6161baede3c439066" kindref="member">rt</ref>);</highlight></codeline>
+<codeline lineno="122"><highlight class="normal"></highlight></codeline>
+<codeline lineno="123"><highlight class="normal"><sp/><sp/>JSValue<sp/>global_obj<sp/>=<sp/>JS_GetGlobalObject(ctx);</highlight></codeline>
+<codeline lineno="124"><highlight class="normal"></highlight></codeline>
+<codeline lineno="125"><highlight class="normal"><sp/><sp/>JS_SetPropertyStr(</highlight></codeline>
+<codeline lineno="126"><highlight class="normal"><sp/><sp/><sp/><sp/><sp/><sp/>ctx,<sp/>global_obj,<sp/></highlight><highlight class="stringliteral">&quot;construct_array&quot;</highlight><highlight class="normal">,</highlight></codeline>
+<codeline lineno="127"><highlight class="normal"><sp/><sp/><sp/><sp/><sp/><sp/>JS_NewCFunction(ctx,<sp/><ref refid="repro_8c_1acfc1e178a0b1babd9a466f3b6d8859a3" kindref="member">construct_array</ref>,<sp/></highlight><highlight class="stringliteral">&quot;construct_array&quot;</highlight><highlight class="normal">,<sp/>0));</highlight></codeline>
+<codeline lineno="128"><highlight class="normal"></highlight></codeline>
+<codeline lineno="129"><highlight class="normal"><sp/><sp/></highlight><highlight class="keyword">const</highlight><highlight class="normal"><sp/></highlight><highlight class="keywordtype">char</highlight><highlight class="normal"><sp/>*javascript<sp/>=</highlight></codeline>
+<codeline lineno="130"><highlight class="normal"><sp/><sp/><sp/><sp/><sp/><sp/></highlight><highlight class="stringliteral">&quot;(function<sp/>()<sp/>{<sp/>b<sp/>=<sp/>false;<sp/>var<sp/>a<sp/>=<sp/>construct_array(\&quot;SELECT<sp/>&quot;</highlight><highlight class="normal"></highlight></codeline>
+<codeline lineno="131"><highlight class="normal"><sp/><sp/><sp/><sp/><sp/><sp/></highlight><highlight class="stringliteral">&quot;$1::acomp[]\&quot;,<sp/>[<sp/>[<sp/>{<sp/>\&quot;x\&quot;:<sp/>&quot;</highlight><highlight class="normal"></highlight></codeline>
+<codeline lineno="132"><highlight class="normal"><sp/><sp/><sp/><sp/><sp/><sp/></highlight><highlight class="stringliteral">&quot;2,<sp/>&quot;</highlight><highlight class="normal"></highlight></codeline>
+<codeline lineno="133"><highlight class="normal"><sp/><sp/><sp/><sp/><sp/><sp/></highlight><highlight class="stringliteral">&quot;\&quot;z\&quot;:<sp/>null,<sp/>\&quot;y\&quot;:<sp/>null<sp/>}<sp/>]<sp/>]);<sp/>array<sp/>=<sp/>undefined;<sp/>b<sp/>=<sp/>false;<sp/>})();&quot;</highlight><highlight class="normal">;</highlight></codeline>
+<codeline lineno="134"><highlight class="normal"></highlight></codeline>
+<codeline lineno="135"><highlight class="normal"><sp/><sp/>JSValue<sp/>array<sp/>=<sp/>JS_NewArray(ctx);</highlight></codeline>
+<codeline lineno="136"><highlight class="normal"></highlight></codeline>
+<codeline lineno="137"><highlight class="normal"><sp/><sp/>JS_SetPropertyStr(ctx,<sp/>global_obj,<sp/></highlight><highlight class="stringliteral">&quot;array&quot;</highlight><highlight class="normal">,<sp/>array);</highlight></codeline>
+<codeline lineno="138"><highlight class="normal"></highlight></codeline>
+<codeline lineno="139"><highlight class="normal"><sp/><sp/>JSValue<sp/>b<sp/>=<sp/>JS_NewBool(ctx,<sp/>1);</highlight></codeline>
+<codeline lineno="140"><highlight class="normal"></highlight></codeline>
+<codeline lineno="141"><highlight class="normal"><sp/><sp/>JS_SetPropertyStr(ctx,<sp/>global_obj,<sp/></highlight><highlight class="stringliteral">&quot;b&quot;</highlight><highlight class="normal">,<sp/>b);</highlight></codeline>
+<codeline lineno="142"><highlight class="normal"></highlight></codeline>
+<codeline lineno="143"><highlight class="normal"><sp/><sp/>JSValue<sp/>res<sp/>=<sp/>JS_Eval(ctx,<sp/>javascript,<sp/>strlen(javascript),<sp/></highlight><highlight class="stringliteral">&quot;&lt;function&gt;&quot;</highlight><highlight class="normal">,<sp/>0);</highlight></codeline>
+<codeline lineno="144"><highlight class="normal"></highlight></codeline>
+<codeline lineno="145"><highlight class="normal"><sp/><sp/></highlight><highlight class="keywordflow">if</highlight><highlight class="normal"><sp/>(JS_IsError(ctx,<sp/>res))<sp/>{</highlight></codeline>
+<codeline lineno="146"><highlight class="normal"><sp/><sp/><sp/><sp/>printf(</highlight><highlight class="stringliteral">&quot;error\n&quot;</highlight><highlight class="normal">);</highlight></codeline>
+<codeline lineno="147"><highlight class="normal"><sp/><sp/>}</highlight></codeline>
+<codeline lineno="148"><highlight class="normal"><sp/><sp/></highlight><highlight class="keywordflow">if</highlight><highlight class="normal"><sp/>(JS_IsException(res))<sp/>{</highlight></codeline>
+<codeline lineno="149"><highlight class="normal"><sp/><sp/><sp/><sp/>printf(</highlight><highlight class="stringliteral">&quot;exception\n&quot;</highlight><highlight class="normal">);</highlight></codeline>
+<codeline lineno="150"><highlight class="normal"><sp/><sp/><sp/><sp/>JSValue<sp/>exception_val<sp/>=<sp/>JS_GetException(ctx);</highlight></codeline>
+<codeline lineno="151"><highlight class="normal"><sp/><sp/><sp/><sp/></highlight><highlight class="keyword">const</highlight><highlight class="normal"><sp/></highlight><highlight class="keywordtype">char</highlight><highlight class="normal"><sp/>*str<sp/>=<sp/>JS_ToCString(ctx,<sp/>exception_val);</highlight></codeline>
+<codeline lineno="152"><highlight class="normal"><sp/><sp/><sp/><sp/>printf(</highlight><highlight class="stringliteral">&quot;%s\n&quot;</highlight><highlight class="normal">,<sp/>str);</highlight></codeline>
+<codeline lineno="153"><highlight class="normal"><sp/><sp/>}</highlight></codeline>
+<codeline lineno="154"><highlight class="normal"></highlight></codeline>
+<codeline lineno="155"><highlight class="normal"><sp/><sp/></highlight><highlight class="keywordflow">if</highlight><highlight class="normal"><sp/>(JS_IsUndefined(array))<sp/>{</highlight></codeline>
+<codeline lineno="156"><highlight class="normal"><sp/><sp/><sp/><sp/>printf(</highlight><highlight class="stringliteral">&quot;array<sp/>undefined\n&quot;</highlight><highlight class="normal">);</highlight></codeline>
+<codeline lineno="157"><highlight class="normal"><sp/><sp/>}</highlight></codeline>
+<codeline lineno="158"><highlight class="normal"></highlight></codeline>
+<codeline lineno="159"><highlight class="normal"><sp/><sp/></highlight><highlight class="keywordflow">if</highlight><highlight class="normal"><sp/>(JS_IsNull(array))<sp/>{</highlight></codeline>
+<codeline lineno="160"><highlight class="normal"><sp/><sp/><sp/><sp/>printf(</highlight><highlight class="stringliteral">&quot;array<sp/>null\n&quot;</highlight><highlight class="normal">);</highlight></codeline>
+<codeline lineno="161"><highlight class="normal"><sp/><sp/>}</highlight></codeline>
+<codeline lineno="162"><highlight class="normal"></highlight></codeline>
+<codeline lineno="163"><highlight class="normal"><sp/><sp/></highlight><highlight class="keywordflow">if</highlight><highlight class="normal"><sp/>(JS_IsUndefined(b))<sp/>{</highlight></codeline>
+<codeline lineno="164"><highlight class="normal"><sp/><sp/><sp/><sp/>printf(</highlight><highlight class="stringliteral">&quot;b<sp/>undefined\n&quot;</highlight><highlight class="normal">);</highlight></codeline>
+<codeline lineno="165"><highlight class="normal"><sp/><sp/>}</highlight></codeline>
+<codeline lineno="166"><highlight class="normal"></highlight></codeline>
+<codeline lineno="167"><highlight class="normal"><sp/><sp/></highlight><highlight class="keywordflow">if</highlight><highlight class="normal"><sp/>(JS_IsNull(b))<sp/>{</highlight></codeline>
+<codeline lineno="168"><highlight class="normal"><sp/><sp/><sp/><sp/>printf(</highlight><highlight class="stringliteral">&quot;b<sp/>null\n&quot;</highlight><highlight class="normal">);</highlight></codeline>
+<codeline lineno="169"><highlight class="normal"><sp/><sp/>}</highlight></codeline>
+<codeline lineno="170"><highlight class="normal"></highlight></codeline>
+<codeline lineno="171"><highlight class="normal"><sp/><sp/>printf(</highlight><highlight class="stringliteral">&quot;b<sp/>%s\n&quot;</highlight><highlight class="normal">,<sp/>JS_ToBool(ctx,<sp/>b)<sp/>?<sp/></highlight><highlight class="stringliteral">&quot;true&quot;</highlight><highlight class="normal"><sp/>:<sp/></highlight><highlight class="stringliteral">&quot;false&quot;</highlight><highlight class="normal">);</highlight></codeline>
+<codeline lineno="172"><highlight class="normal"></highlight></codeline>
+<codeline lineno="173"><highlight class="normal"><sp/><sp/><ref refid="repro_8c_1ad7700ce42ab430fc19c417e7c2d1d103" kindref="member">walk_value</ref>(ctx,<sp/><ref refid="repro_8c_1acfc1e178a0b1babd9a466f3b6d8859a3" kindref="member">construct_array</ref>(ctx,<sp/>JS_NULL,<sp/>0,<sp/>NULL),<sp/>0);</highlight></codeline>
+<codeline lineno="174"><highlight class="normal"><sp/><sp/></highlight><highlight class="keywordflow">return</highlight><highlight class="normal"><sp/>0;</highlight></codeline>
+<codeline lineno="175"><highlight class="normal">}</highlight></codeline>
+    </programlisting>
+    <location file="repro.c"/>
+  </compounddef>
+</doxygen>

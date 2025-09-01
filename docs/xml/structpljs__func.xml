@@ -1,0 +1,226 @@
+<?xml version='1.0' encoding='UTF-8' standalone='no'?>
+<doxygen xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="compound.xsd" version="1.14.0" xml:lang="en-US">
+  <compounddef id="structpljs__func" kind="struct" language="C++" prot="public">
+    <compoundname>pljs_func</compoundname>
+    <includes refid="pljs_8h" local="no">pljs.h</includes>
+    <sectiondef kind="public-attrib">
+      <memberdef kind="variable" id="structpljs__func_1a81e88f4aa06c82abe173fe7bcf2db06b" prot="public" static="no" mutable="no">
+        <type>Oid</type>
+        <definition>Oid pljs_func::fn_oid</definition>
+        <argsstring></argsstring>
+        <name>fn_oid</name>
+        <qualifiedname>pljs_func::fn_oid</qualifiedname>
+        <briefdescription>
+        </briefdescription>
+        <detaileddescription>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="src/pljs.h" line="93" column="7" bodyfile="src/pljs.h" bodystart="93" bodyend="-1"/>
+      </memberdef>
+      <memberdef kind="variable" id="structpljs__func_1ab734fee5d2f16afaf7e2914a467228ca" prot="public" static="no" mutable="no">
+        <type>char</type>
+        <definition>char pljs_func::proname[NAMEDATALEN]</definition>
+        <argsstring>[NAMEDATALEN]</argsstring>
+        <name>proname</name>
+        <qualifiedname>pljs_func::proname</qualifiedname>
+        <briefdescription>
+        </briefdescription>
+        <detaileddescription>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="src/pljs.h" line="95" column="8" bodyfile="src/pljs.h" bodystart="95" bodyend="-1"/>
+      </memberdef>
+      <memberdef kind="variable" id="structpljs__func_1a9d085ca52338a2e4b4cbc4a3ecba7021" prot="public" static="no" mutable="no">
+        <type>char *</type>
+        <definition>char* pljs_func::prosrc</definition>
+        <argsstring></argsstring>
+        <name>prosrc</name>
+        <qualifiedname>pljs_func::prosrc</qualifiedname>
+        <briefdescription>
+        </briefdescription>
+        <detaileddescription>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="src/pljs.h" line="96" column="8" bodyfile="src/pljs.h" bodystart="96" bodyend="-1"/>
+      </memberdef>
+      <memberdef kind="variable" id="structpljs__func_1ab41ffbc9bd8f2449e3f17cd8f79d7543" prot="public" static="no" mutable="no">
+        <type>TransactionId</type>
+        <definition>TransactionId pljs_func::fn_xmin</definition>
+        <argsstring></argsstring>
+        <name>fn_xmin</name>
+        <qualifiedname>pljs_func::fn_xmin</qualifiedname>
+        <briefdescription>
+        </briefdescription>
+        <detaileddescription>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="src/pljs.h" line="98" column="17" bodyfile="src/pljs.h" bodystart="98" bodyend="-1"/>
+      </memberdef>
+      <memberdef kind="variable" id="structpljs__func_1a4c8f8fae7bb3c4eb47c1883f8a1b7542" prot="public" static="no" mutable="no">
+        <type>ItemPointerData</type>
+        <definition>ItemPointerData pljs_func::fn_tid</definition>
+        <argsstring></argsstring>
+        <name>fn_tid</name>
+        <qualifiedname>pljs_func::fn_tid</qualifiedname>
+        <briefdescription>
+        </briefdescription>
+        <detaileddescription>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="src/pljs.h" line="99" column="19" bodyfile="src/pljs.h" bodystart="99" bodyend="-1"/>
+      </memberdef>
+      <memberdef kind="variable" id="structpljs__func_1a0ee38b98d26d6f70e8c6c417d997d6f8" prot="public" static="no" mutable="no">
+        <type>Oid</type>
+        <definition>Oid pljs_func::user_id</definition>
+        <argsstring></argsstring>
+        <name>user_id</name>
+        <qualifiedname>pljs_func::user_id</qualifiedname>
+        <briefdescription>
+        </briefdescription>
+        <detaileddescription>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="src/pljs.h" line="100" column="7" bodyfile="src/pljs.h" bodystart="100" bodyend="-1"/>
+      </memberdef>
+      <memberdef kind="variable" id="structpljs__func_1ad28456021cc500cf5d602c69a76b286b" prot="public" static="no" mutable="no">
+        <type>bool</type>
+        <definition>bool pljs_func::trigger</definition>
+        <argsstring></argsstring>
+        <name>trigger</name>
+        <qualifiedname>pljs_func::trigger</qualifiedname>
+        <briefdescription>
+        </briefdescription>
+        <detaileddescription>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="src/pljs.h" line="102" column="8" bodyfile="src/pljs.h" bodystart="102" bodyend="-1"/>
+      </memberdef>
+      <memberdef kind="variable" id="structpljs__func_1a9a7d3ac7a2bfdeabdec418bd67325327" prot="public" static="no" mutable="no">
+        <type>bool</type>
+        <definition>bool pljs_func::is_srf</definition>
+        <argsstring></argsstring>
+        <name>is_srf</name>
+        <qualifiedname>pljs_func::is_srf</qualifiedname>
+        <briefdescription>
+        </briefdescription>
+        <detaileddescription>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="src/pljs.h" line="103" column="8" bodyfile="src/pljs.h" bodystart="103" bodyend="-1"/>
+      </memberdef>
+      <memberdef kind="variable" id="structpljs__func_1aa73482da78e19df4a171b100b0cba9fe" prot="public" static="no" mutable="no">
+        <type>int</type>
+        <definition>int pljs_func::inargs</definition>
+        <argsstring></argsstring>
+        <name>inargs</name>
+        <qualifiedname>pljs_func::inargs</qualifiedname>
+        <briefdescription>
+        </briefdescription>
+        <detaileddescription>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="src/pljs.h" line="104" column="7" bodyfile="src/pljs.h" bodystart="104" bodyend="-1"/>
+      </memberdef>
+      <memberdef kind="variable" id="structpljs__func_1a68fb14920fdf280082f9c92c5c4ca725" prot="public" static="no" mutable="no">
+        <type>int</type>
+        <definition>int pljs_func::nargs</definition>
+        <argsstring></argsstring>
+        <name>nargs</name>
+        <qualifiedname>pljs_func::nargs</qualifiedname>
+        <briefdescription>
+        </briefdescription>
+        <detaileddescription>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="src/pljs.h" line="105" column="7" bodyfile="src/pljs.h" bodystart="105" bodyend="-1"/>
+      </memberdef>
+      <memberdef kind="variable" id="structpljs__func_1a56ce41038c4c31cc5933049fdf0674ae" prot="public" static="no" mutable="no">
+        <type>TypeFuncClass</type>
+        <definition>TypeFuncClass pljs_func::typeclass</definition>
+        <argsstring></argsstring>
+        <name>typeclass</name>
+        <qualifiedname>pljs_func::typeclass</qualifiedname>
+        <briefdescription>
+        </briefdescription>
+        <detaileddescription>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="src/pljs.h" line="106" column="17" bodyfile="src/pljs.h" bodystart="106" bodyend="-1"/>
+      </memberdef>
+      <memberdef kind="variable" id="structpljs__func_1a381d2e791d9d5ebe6d8281380adfe178" prot="public" static="no" mutable="no">
+        <type>Oid</type>
+        <definition>Oid pljs_func::rettype</definition>
+        <argsstring></argsstring>
+        <name>rettype</name>
+        <qualifiedname>pljs_func::rettype</qualifiedname>
+        <briefdescription>
+        </briefdescription>
+        <detaileddescription>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="src/pljs.h" line="107" column="7" bodyfile="src/pljs.h" bodystart="107" bodyend="-1"/>
+      </memberdef>
+      <memberdef kind="variable" id="structpljs__func_1a302237244a7023e65e9791527b613e39" prot="public" static="no" mutable="no">
+        <type>Oid</type>
+        <definition>Oid pljs_func::argtypes[FUNC_MAX_ARGS]</definition>
+        <argsstring>[FUNC_MAX_ARGS]</argsstring>
+        <name>argtypes</name>
+        <qualifiedname>pljs_func::argtypes</qualifiedname>
+        <briefdescription>
+        </briefdescription>
+        <detaileddescription>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="src/pljs.h" line="108" column="7" bodyfile="src/pljs.h" bodystart="108" bodyend="-1"/>
+      </memberdef>
+      <memberdef kind="variable" id="structpljs__func_1af540b171e7f3f776274504f6de370d34" prot="public" static="no" mutable="no">
+        <type>char</type>
+        <definition>char pljs_func::argmodes[FUNC_MAX_ARGS]</definition>
+        <argsstring>[FUNC_MAX_ARGS]</argsstring>
+        <name>argmodes</name>
+        <qualifiedname>pljs_func::argmodes</qualifiedname>
+        <briefdescription>
+        </briefdescription>
+        <detaileddescription>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="src/pljs.h" line="109" column="8" bodyfile="src/pljs.h" bodystart="109" bodyend="-1"/>
+      </memberdef>
+    </sectiondef>
+    <briefdescription>
+    </briefdescription>
+    <detaileddescription>
+    </detaileddescription>
+    <location file="src/pljs.h" line="92" column="1" bodyfile="src/pljs.h" bodystart="92" bodyend="110"/>
+    <listofallmembers>
+      <member refid="structpljs__func_1af540b171e7f3f776274504f6de370d34" prot="public" virt="non-virtual"><scope>pljs_func</scope><name>argmodes</name></member>
+      <member refid="structpljs__func_1a302237244a7023e65e9791527b613e39" prot="public" virt="non-virtual"><scope>pljs_func</scope><name>argtypes</name></member>
+      <member refid="structpljs__func_1a81e88f4aa06c82abe173fe7bcf2db06b" prot="public" virt="non-virtual"><scope>pljs_func</scope><name>fn_oid</name></member>
+      <member refid="structpljs__func_1a4c8f8fae7bb3c4eb47c1883f8a1b7542" prot="public" virt="non-virtual"><scope>pljs_func</scope><name>fn_tid</name></member>
+      <member refid="structpljs__func_1ab41ffbc9bd8f2449e3f17cd8f79d7543" prot="public" virt="non-virtual"><scope>pljs_func</scope><name>fn_xmin</name></member>
+      <member refid="structpljs__func_1aa73482da78e19df4a171b100b0cba9fe" prot="public" virt="non-virtual"><scope>pljs_func</scope><name>inargs</name></member>
+      <member refid="structpljs__func_1a9a7d3ac7a2bfdeabdec418bd67325327" prot="public" virt="non-virtual"><scope>pljs_func</scope><name>is_srf</name></member>
+      <member refid="structpljs__func_1a68fb14920fdf280082f9c92c5c4ca725" prot="public" virt="non-virtual"><scope>pljs_func</scope><name>nargs</name></member>
+      <member refid="structpljs__func_1ab734fee5d2f16afaf7e2914a467228ca" prot="public" virt="non-virtual"><scope>pljs_func</scope><name>proname</name></member>
+      <member refid="structpljs__func_1a9d085ca52338a2e4b4cbc4a3ecba7021" prot="public" virt="non-virtual"><scope>pljs_func</scope><name>prosrc</name></member>
+      <member refid="structpljs__func_1a381d2e791d9d5ebe6d8281380adfe178" prot="public" virt="non-virtual"><scope>pljs_func</scope><name>rettype</name></member>
+      <member refid="structpljs__func_1ad28456021cc500cf5d602c69a76b286b" prot="public" virt="non-virtual"><scope>pljs_func</scope><name>trigger</name></member>
+      <member refid="structpljs__func_1a56ce41038c4c31cc5933049fdf0674ae" prot="public" virt="non-virtual"><scope>pljs_func</scope><name>typeclass</name></member>
+      <member refid="structpljs__func_1a0ee38b98d26d6f70e8c6c417d997d6f8" prot="public" virt="non-virtual"><scope>pljs_func</scope><name>user_id</name></member>
+    </listofallmembers>
+  </compounddef>
+</doxygen>

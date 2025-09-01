@@ -1,0 +1,196 @@
+<?xml version='1.0' encoding='UTF-8' standalone='no'?>
+<doxygen xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="compound.xsd" version="1.14.0" xml:lang="en-US">
+  <compounddef id="structpljs__function__cache__value" kind="struct" language="C++" prot="public">
+    <compoundname>pljs_function_cache_value</compoundname>
+    <includes refid="pljs_8h" local="no">pljs.h</includes>
+    <sectiondef kind="public-attrib">
+      <memberdef kind="variable" id="structpljs__function__cache__value_1a3f88fbe7e56f3b846a8388c7beb3b9db" prot="public" static="no" mutable="no">
+        <type>Oid</type>
+        <definition>Oid pljs_function_cache_value::fn_oid</definition>
+        <argsstring></argsstring>
+        <name>fn_oid</name>
+        <qualifiedname>pljs_function_cache_value::fn_oid</qualifiedname>
+        <briefdescription>
+        </briefdescription>
+        <detaileddescription>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="src/pljs.h" line="47" column="7" bodyfile="src/pljs.h" bodystart="47" bodyend="-1"/>
+      </memberdef>
+      <memberdef kind="variable" id="structpljs__function__cache__value_1af50c34a90b6eb2d6a7978886b4160aaf" prot="public" static="no" mutable="no">
+        <type>JSValue</type>
+        <definition>JSValue pljs_function_cache_value::fn</definition>
+        <argsstring></argsstring>
+        <name>fn</name>
+        <qualifiedname>pljs_function_cache_value::fn</qualifiedname>
+        <briefdescription>
+        </briefdescription>
+        <detaileddescription>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="src/pljs.h" line="48" column="11" bodyfile="src/pljs.h" bodystart="48" bodyend="-1"/>
+      </memberdef>
+      <memberdef kind="variable" id="structpljs__function__cache__value_1a695c60f0efde40c7157f027d959fa49b" prot="public" static="no" mutable="no">
+        <type>JSContext *</type>
+        <definition>JSContext* pljs_function_cache_value::ctx</definition>
+        <argsstring></argsstring>
+        <name>ctx</name>
+        <qualifiedname>pljs_function_cache_value::ctx</qualifiedname>
+        <briefdescription>
+        </briefdescription>
+        <detaileddescription>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="src/pljs.h" line="49" column="13" bodyfile="src/pljs.h" bodystart="49" bodyend="-1"/>
+      </memberdef>
+      <memberdef kind="variable" id="structpljs__function__cache__value_1a2f8bdd6bd67b923737925d40cd565cdb" prot="public" static="no" mutable="no">
+        <type>bool</type>
+        <definition>bool pljs_function_cache_value::trigger</definition>
+        <argsstring></argsstring>
+        <name>trigger</name>
+        <qualifiedname>pljs_function_cache_value::trigger</qualifiedname>
+        <briefdescription>
+        </briefdescription>
+        <detaileddescription>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="src/pljs.h" line="50" column="8" bodyfile="src/pljs.h" bodystart="50" bodyend="-1"/>
+      </memberdef>
+      <memberdef kind="variable" id="structpljs__function__cache__value_1a3feb27efe06663c9b21f3914dfc78f78" prot="public" static="no" mutable="no">
+        <type>Oid</type>
+        <definition>Oid pljs_function_cache_value::user_id</definition>
+        <argsstring></argsstring>
+        <name>user_id</name>
+        <qualifiedname>pljs_function_cache_value::user_id</qualifiedname>
+        <briefdescription>
+        </briefdescription>
+        <detaileddescription>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="src/pljs.h" line="51" column="7" bodyfile="src/pljs.h" bodystart="51" bodyend="-1"/>
+      </memberdef>
+      <memberdef kind="variable" id="structpljs__function__cache__value_1acbb150625eaf6624edb8d6e05c224dbc" prot="public" static="no" mutable="no">
+        <type>int</type>
+        <definition>int pljs_function_cache_value::nargs</definition>
+        <argsstring></argsstring>
+        <name>nargs</name>
+        <qualifiedname>pljs_function_cache_value::nargs</qualifiedname>
+        <briefdescription>
+        </briefdescription>
+        <detaileddescription>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="src/pljs.h" line="52" column="7" bodyfile="src/pljs.h" bodystart="52" bodyend="-1"/>
+      </memberdef>
+      <memberdef kind="variable" id="structpljs__function__cache__value_1abc5ec0e480f66ec7b80aff7b7240c725" prot="public" static="no" mutable="no">
+        <type>bool</type>
+        <definition>bool pljs_function_cache_value::is_srf</definition>
+        <argsstring></argsstring>
+        <name>is_srf</name>
+        <qualifiedname>pljs_function_cache_value::is_srf</qualifiedname>
+        <briefdescription>
+        </briefdescription>
+        <detaileddescription>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="src/pljs.h" line="53" column="8" bodyfile="src/pljs.h" bodystart="53" bodyend="-1"/>
+      </memberdef>
+      <memberdef kind="variable" id="structpljs__function__cache__value_1a3ebf8d39ab6a2625a54e936c1241c8df" prot="public" static="no" mutable="no">
+        <type>char</type>
+        <definition>char pljs_function_cache_value::proname[NAMEDATALEN]</definition>
+        <argsstring>[NAMEDATALEN]</argsstring>
+        <name>proname</name>
+        <qualifiedname>pljs_function_cache_value::proname</qualifiedname>
+        <briefdescription>
+        </briefdescription>
+        <detaileddescription>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="src/pljs.h" line="54" column="8" bodyfile="src/pljs.h" bodystart="54" bodyend="-1"/>
+      </memberdef>
+      <memberdef kind="variable" id="structpljs__function__cache__value_1a1c943e0c1d944325cb3113e6b1708bc8" prot="public" static="no" mutable="no">
+        <type>Oid</type>
+        <definition>Oid pljs_function_cache_value::argtypes[FUNC_MAX_ARGS]</definition>
+        <argsstring>[FUNC_MAX_ARGS]</argsstring>
+        <name>argtypes</name>
+        <qualifiedname>pljs_function_cache_value::argtypes</qualifiedname>
+        <briefdescription>
+        </briefdescription>
+        <detaileddescription>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="src/pljs.h" line="55" column="7" bodyfile="src/pljs.h" bodystart="55" bodyend="-1"/>
+      </memberdef>
+      <memberdef kind="variable" id="structpljs__function__cache__value_1aafc64f4013d172c02d4d6770df9b4135" prot="public" static="no" mutable="no">
+        <type>char</type>
+        <definition>char pljs_function_cache_value::argmodes[FUNC_MAX_ARGS]</definition>
+        <argsstring>[FUNC_MAX_ARGS]</argsstring>
+        <name>argmodes</name>
+        <qualifiedname>pljs_function_cache_value::argmodes</qualifiedname>
+        <briefdescription>
+        </briefdescription>
+        <detaileddescription>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="src/pljs.h" line="56" column="8" bodyfile="src/pljs.h" bodystart="56" bodyend="-1"/>
+      </memberdef>
+      <memberdef kind="variable" id="structpljs__function__cache__value_1a37e584460aa35b197e1d27f86132a61c" prot="public" static="no" mutable="no">
+        <type>char *</type>
+        <definition>char* pljs_function_cache_value::prosrc</definition>
+        <argsstring></argsstring>
+        <name>prosrc</name>
+        <qualifiedname>pljs_function_cache_value::prosrc</qualifiedname>
+        <briefdescription>
+        </briefdescription>
+        <detaileddescription>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="src/pljs.h" line="57" column="8" bodyfile="src/pljs.h" bodystart="57" bodyend="-1"/>
+      </memberdef>
+      <memberdef kind="variable" id="structpljs__function__cache__value_1a0ad6031a1a5be8b4c6159dda554105d7" prot="public" static="no" mutable="no">
+        <type>TypeFuncClass</type>
+        <definition>TypeFuncClass pljs_function_cache_value::typeclass</definition>
+        <argsstring></argsstring>
+        <name>typeclass</name>
+        <qualifiedname>pljs_function_cache_value::typeclass</qualifiedname>
+        <briefdescription>
+        </briefdescription>
+        <detaileddescription>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="src/pljs.h" line="58" column="17" bodyfile="src/pljs.h" bodystart="58" bodyend="-1"/>
+      </memberdef>
+    </sectiondef>
+    <briefdescription>
+    </briefdescription>
+    <detaileddescription>
+    </detaileddescription>
+    <location file="src/pljs.h" line="46" column="1" bodyfile="src/pljs.h" bodystart="46" bodyend="59"/>
+    <listofallmembers>
+      <member refid="structpljs__function__cache__value_1aafc64f4013d172c02d4d6770df9b4135" prot="public" virt="non-virtual"><scope>pljs_function_cache_value</scope><name>argmodes</name></member>
+      <member refid="structpljs__function__cache__value_1a1c943e0c1d944325cb3113e6b1708bc8" prot="public" virt="non-virtual"><scope>pljs_function_cache_value</scope><name>argtypes</name></member>
+      <member refid="structpljs__function__cache__value_1a695c60f0efde40c7157f027d959fa49b" prot="public" virt="non-virtual"><scope>pljs_function_cache_value</scope><name>ctx</name></member>
+      <member refid="structpljs__function__cache__value_1af50c34a90b6eb2d6a7978886b4160aaf" prot="public" virt="non-virtual"><scope>pljs_function_cache_value</scope><name>fn</name></member>
+      <member refid="structpljs__function__cache__value_1a3f88fbe7e56f3b846a8388c7beb3b9db" prot="public" virt="non-virtual"><scope>pljs_function_cache_value</scope><name>fn_oid</name></member>
+      <member refid="structpljs__function__cache__value_1abc5ec0e480f66ec7b80aff7b7240c725" prot="public" virt="non-virtual"><scope>pljs_function_cache_value</scope><name>is_srf</name></member>
+      <member refid="structpljs__function__cache__value_1acbb150625eaf6624edb8d6e05c224dbc" prot="public" virt="non-virtual"><scope>pljs_function_cache_value</scope><name>nargs</name></member>
+      <member refid="structpljs__function__cache__value_1a3ebf8d39ab6a2625a54e936c1241c8df" prot="public" virt="non-virtual"><scope>pljs_function_cache_value</scope><name>proname</name></member>
+      <member refid="structpljs__function__cache__value_1a37e584460aa35b197e1d27f86132a61c" prot="public" virt="non-virtual"><scope>pljs_function_cache_value</scope><name>prosrc</name></member>
+      <member refid="structpljs__function__cache__value_1a2f8bdd6bd67b923737925d40cd565cdb" prot="public" virt="non-virtual"><scope>pljs_function_cache_value</scope><name>trigger</name></member>
+      <member refid="structpljs__function__cache__value_1a0ad6031a1a5be8b4c6159dda554105d7" prot="public" virt="non-virtual"><scope>pljs_function_cache_value</scope><name>typeclass</name></member>
+      <member refid="structpljs__function__cache__value_1a3feb27efe06663c9b21f3914dfc78f78" prot="public" virt="non-virtual"><scope>pljs_function_cache_value</scope><name>user_id</name></member>
+    </listofallmembers>
+  </compounddef>
+</doxygen>

@@ -20,6 +20,8 @@
 
 #include "pljs.h"
 
+#include <string.h>
+
 PG_MODULE_MAGIC;
 
 PG_FUNCTION_INFO_V1(pljs_call_handler);
@@ -84,6 +86,8 @@ void _PG_init(void) {
   if (configuration.memory_limit) {
     JS_SetMemoryLimit(rt, configuration.memory_limit * 1024 * 1024);
   }
+
+  JS_SetModuleLoaderFunc(rt, NULL, pljs_defaultjs_module_loader, NULL);
 }
 
 /**
@@ -840,8 +844,8 @@ static void call_anonymous_function(const char *source, JSContext *ctx) {
   initStringInfo(&src);
 
   // generate the function as javascript with all of its arguments
-  appendStringInfo(&src, "(function () {%s})();", source);
-
+  // appendStringInfo(&src, "(function () {%s})();", source);
+  appendStringInfo(&src, "%s", source);
   JS_SetInterruptHandler(JS_GetRuntime(ctx), interrupt_handler, NULL);
   os_pending_signals &= ~((uint64_t)1 << SIGINT);
 

@@ -1,0 +1,104 @@
+<?xml version='1.0' encoding='UTF-8' standalone='no'?>
+<doxygen xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="compound.xsd" version="1.14.0" xml:lang="en-US">
+  <compounddef id="structpljs__context" kind="struct" language="C++" prot="public">
+    <compoundname>pljs_context</compoundname>
+    <includes refid="pljs_8h" local="no">pljs.h</includes>
+    <sectiondef kind="public-attrib">
+      <memberdef kind="variable" id="structpljs__context_1a1c5df72f824d4a2d1e187262042162d6" prot="public" static="no" mutable="no">
+        <type>JSContext *</type>
+        <definition>JSContext* pljs_context::ctx</definition>
+        <argsstring></argsstring>
+        <name>ctx</name>
+        <qualifiedname>pljs_context::ctx</qualifiedname>
+        <briefdescription>
+        </briefdescription>
+        <detaileddescription>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="src/pljs.h" line="113" column="13" bodyfile="src/pljs.h" bodystart="113" bodyend="-1"/>
+      </memberdef>
+      <memberdef kind="variable" id="structpljs__context_1a25d362dd5afd7172cdecba7d653708c5" prot="public" static="no" mutable="no">
+        <type>JSValue</type>
+        <definition>JSValue pljs_context::js_function</definition>
+        <argsstring></argsstring>
+        <name>js_function</name>
+        <qualifiedname>pljs_context::js_function</qualifiedname>
+        <briefdescription>
+        </briefdescription>
+        <detaileddescription>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="src/pljs.h" line="114" column="11" bodyfile="src/pljs.h" bodystart="114" bodyend="-1"/>
+      </memberdef>
+      <memberdef kind="variable" id="structpljs__context_1ae5c43d362689ceee7787830acb6d25ed" prot="public" static="no" mutable="no">
+        <type>char *</type>
+        <definition>char* pljs_context::arguments[FUNC_MAX_ARGS]</definition>
+        <argsstring>[FUNC_MAX_ARGS]</argsstring>
+        <name>arguments</name>
+        <qualifiedname>pljs_context::arguments</qualifiedname>
+        <briefdescription>
+        </briefdescription>
+        <detaileddescription>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="src/pljs.h" line="116" column="8" bodyfile="src/pljs.h" bodystart="116" bodyend="-1"/>
+      </memberdef>
+      <memberdef kind="variable" id="structpljs__context_1ac8898e6511e62306b0325d2d8205114b" prot="public" static="no" mutable="no">
+        <type>MemoryContext</type>
+        <definition>MemoryContext pljs_context::memory_context</definition>
+        <argsstring></argsstring>
+        <name>memory_context</name>
+        <qualifiedname>pljs_context::memory_context</qualifiedname>
+        <briefdescription>
+        </briefdescription>
+        <detaileddescription>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="src/pljs.h" line="117" column="17" bodyfile="src/pljs.h" bodystart="117" bodyend="-1"/>
+      </memberdef>
+      <memberdef kind="variable" id="structpljs__context_1ab0a92fe04577d390c3116740508de461" prot="public" static="no" mutable="no">
+        <type><ref refid="structpljs__func" kindref="compound">pljs_func</ref> *</type>
+        <definition>pljs_func* pljs_context::function</definition>
+        <argsstring></argsstring>
+        <name>function</name>
+        <qualifiedname>pljs_context::function</qualifiedname>
+        <briefdescription>
+        </briefdescription>
+        <detaileddescription>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="src/pljs.h" line="118" column="13" bodyfile="src/pljs.h" bodystart="118" bodyend="-1"/>
+      </memberdef>
+    </sectiondef>
+    <briefdescription>
+    </briefdescription>
+    <detaileddescription>
+    </detaileddescription>
+    <collaborationgraph>
+      <node id="1">
+        <label>pljs_context</label>
+        <link refid="structpljs__context"/>
+        <childnode refid="2" relation="usage">
+          <edgelabel>function</edgelabel>
+        </childnode>
+      </node>
+      <node id="2">
+        <label>pljs_func</label>
+        <link refid="structpljs__func"/>
+      </node>
+    </collaborationgraph>
+    <location file="src/pljs.h" line="112" column="1" bodyfile="src/pljs.h" bodystart="112" bodyend="119"/>
+    <listofallmembers>
+      <member refid="structpljs__context_1ae5c43d362689ceee7787830acb6d25ed" prot="public" virt="non-virtual"><scope>pljs_context</scope><name>arguments</name></member>
+      <member refid="structpljs__context_1a1c5df72f824d4a2d1e187262042162d6" prot="public" virt="non-virtual"><scope>pljs_context</scope><name>ctx</name></member>
+      <member refid="structpljs__context_1ab0a92fe04577d390c3116740508de461" prot="public" virt="non-virtual"><scope>pljs_context</scope><name>function</name></member>
+      <member refid="structpljs__context_1a25d362dd5afd7172cdecba7d653708c5" prot="public" virt="non-virtual"><scope>pljs_context</scope><name>js_function</name></member>
+      <member refid="structpljs__context_1ac8898e6511e62306b0325d2d8205114b" prot="public" virt="non-virtual"><scope>pljs_context</scope><name>memory_context</name></member>
+    </listofallmembers>
+  </compounddef>
+</doxygen>

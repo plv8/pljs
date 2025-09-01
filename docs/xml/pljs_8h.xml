@@ -1,0 +1,1911 @@
+<?xml version='1.0' encoding='UTF-8' standalone='no'?>
+<doxygen xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="compound.xsd" version="1.14.0" xml:lang="en-US">
+  <compounddef id="pljs_8h" kind="file" language="C++">
+    <compoundname>pljs.h</compoundname>
+    <includes local="yes">postgres.h</includes>
+    <includes local="yes">access/heapam.h</includes>
+    <includes local="yes">access/htup.h</includes>
+    <includes local="yes">access/tupdesc.h</includes>
+    <includes local="yes">executor/spi.h</includes>
+    <includes local="yes">fmgr.h</includes>
+    <includes local="yes">funcapi.h</includes>
+    <includes local="yes">nodes/params.h</includes>
+    <includes local="yes">parser/parse_node.h</includes>
+    <includes local="yes">utils/palloc.h</includes>
+    <includes local="yes">windowapi.h</includes>
+    <includes local="yes">deps/quickjs/quickjs-libc.h</includes>
+    <includes local="yes">deps/quickjs/quickjs.h</includes>
+    <includedby refid="cache_8c" local="yes">src/cache.c</includedby>
+    <includedby refid="functions_8c" local="yes">src/functions.c</includedby>
+    <includedby refid="params_8c" local="yes">src/params.c</includedby>
+    <includedby refid="pljs_8c" local="yes">src/pljs.c</includedby>
+    <includedby refid="types_8c" local="yes">src/types.c</includedby>
+    <incdepgraph>
+      <node id="1">
+        <label>src/pljs.h</label>
+        <link refid="pljs_8h"/>
+        <childnode refid="2" relation="include">
+        </childnode>
+        <childnode refid="3" relation="include">
+        </childnode>
+        <childnode refid="4" relation="include">
+        </childnode>
+        <childnode refid="5" relation="include">
+        </childnode>
+        <childnode refid="6" relation="include">
+        </childnode>
+        <childnode refid="7" relation="include">
+        </childnode>
+        <childnode refid="8" relation="include">
+        </childnode>
+        <childnode refid="9" relation="include">
+        </childnode>
+        <childnode refid="10" relation="include">
+        </childnode>
+        <childnode refid="11" relation="include">
+        </childnode>
+        <childnode refid="12" relation="include">
+        </childnode>
+        <childnode refid="13" relation="include">
+        </childnode>
+        <childnode refid="14" relation="include">
+        </childnode>
+      </node>
+      <node id="3">
+        <label>access/heapam.h</label>
+      </node>
+      <node id="4">
+        <label>access/htup.h</label>
+      </node>
+      <node id="5">
+        <label>access/tupdesc.h</label>
+      </node>
+      <node id="13">
+        <label>deps/quickjs/quickjs-libc.h</label>
+      </node>
+      <node id="14">
+        <label>deps/quickjs/quickjs.h</label>
+      </node>
+      <node id="6">
+        <label>executor/spi.h</label>
+      </node>
+      <node id="7">
+        <label>fmgr.h</label>
+      </node>
+      <node id="8">
+        <label>funcapi.h</label>
+      </node>
+      <node id="9">
+        <label>nodes/params.h</label>
+      </node>
+      <node id="10">
+        <label>parser/parse_node.h</label>
+      </node>
+      <node id="2">
+        <label>postgres.h</label>
+      </node>
+      <node id="11">
+        <label>utils/palloc.h</label>
+      </node>
+      <node id="12">
+        <label>windowapi.h</label>
+      </node>
+    </incdepgraph>
+    <invincdepgraph>
+      <node id="2">
+        <label>src/cache.c</label>
+        <link refid="cache_8c"/>
+      </node>
+      <node id="3">
+        <label>src/functions.c</label>
+        <link refid="functions_8c"/>
+      </node>
+      <node id="4">
+        <label>src/params.c</label>
+        <link refid="params_8c"/>
+      </node>
+      <node id="5">
+        <label>src/pljs.c</label>
+        <link refid="pljs_8c"/>
+      </node>
+      <node id="1">
+        <label>src/pljs.h</label>
+        <link refid="pljs_8h"/>
+        <childnode refid="2" relation="include">
+        </childnode>
+        <childnode refid="3" relation="include">
+        </childnode>
+        <childnode refid="4" relation="include">
+        </childnode>
+        <childnode refid="5" relation="include">
+        </childnode>
+        <childnode refid="6" relation="include">
+        </childnode>
+      </node>
+      <node id="6">
+        <label>src/types.c</label>
+        <link refid="types_8c"/>
+      </node>
+    </invincdepgraph>
+    <innerclass refid="structpljs__configuration" prot="public">pljs_configuration</innerclass>
+    <innerclass refid="structpljs__context__cache__value" prot="public">pljs_context_cache_value</innerclass>
+    <innerclass refid="structpljs__function__cache__value" prot="public">pljs_function_cache_value</innerclass>
+    <innerclass refid="structpljs__param__state" prot="public">pljs_param_state</innerclass>
+    <innerclass refid="structpljs__return__state" prot="public">pljs_return_state</innerclass>
+    <innerclass refid="structpljs__type" prot="public">pljs_type</innerclass>
+    <innerclass refid="structpljs__plan" prot="public">pljs_plan</innerclass>
+    <innerclass refid="structpljs__func" prot="public">pljs_func</innerclass>
+    <innerclass refid="structpljs__context" prot="public">pljs_context</innerclass>
+    <innerclass refid="structpljs__storage" prot="public">pljs_storage</innerclass>
+    <innerclass refid="structpljs__window__storage" prot="public">pljs_window_storage</innerclass>
+    <sectiondef kind="define">
+      <memberdef kind="define" id="pljs_8h_1ad0d2d80d8062b7efa868074d309dbc26" prot="public" static="no">
+        <name>STORAGE_HASH_LEN</name>
+        <initializer>32</initializer>
+        <briefdescription>
+        </briefdescription>
+        <detaileddescription>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="src/pljs.h" line="19" column="9" bodyfile="src/pljs.h" bodystart="19" bodyend="-1"/>
+      </memberdef>
+      <memberdef kind="define" id="pljs_8h_1a5e4a0c86134a1552d41790c793f5955c" prot="public" static="no">
+        <name>PLJS_VERSION</name>
+        <initializer>&quot;unknown&quot;</initializer>
+        <briefdescription>
+        </briefdescription>
+        <detaileddescription>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="src/pljs.h" line="21" column="9" bodyfile="src/pljs.h" bodystart="21" bodyend="-1"/>
+      </memberdef>
+    </sectiondef>
+    <sectiondef kind="typedef">
+      <memberdef kind="typedef" id="pljs_8h_1a07fef1cb5871c08462b0b427e462f5ca" prot="public" static="no">
+        <type>struct pljs_configuration</type>
+        <definition>typedef struct pljs_configuration pljs_configuration</definition>
+        <argsstring></argsstring>
+        <name>pljs_configuration</name>
+        <briefdescription>
+        </briefdescription>
+        <detaileddescription>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="src/pljs.h" line="29" column="20"/>
+      </memberdef>
+      <memberdef kind="typedef" id="pljs_8h_1ac322c257c08b5090e78f7a16ab997358" prot="public" static="no">
+        <type>struct pljs_context_cache_value</type>
+        <definition>typedef struct pljs_context_cache_value pljs_context_cache_value</definition>
+        <argsstring></argsstring>
+        <name>pljs_context_cache_value</name>
+        <briefdescription>
+        </briefdescription>
+        <detaileddescription>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="src/pljs.h" line="43" column="26"/>
+      </memberdef>
+      <memberdef kind="typedef" id="pljs_8h_1a1490a412c5b08778b63e18a158dc2aeb" prot="public" static="no">
+        <type>struct pljs_function_cache_value</type>
+        <definition>typedef struct pljs_function_cache_value pljs_function_cache_value</definition>
+        <argsstring></argsstring>
+        <name>pljs_function_cache_value</name>
+        <briefdescription>
+        </briefdescription>
+        <detaileddescription>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="src/pljs.h" line="59" column="27"/>
+      </memberdef>
+      <memberdef kind="typedef" id="pljs_8h_1a0d3470d2c645d93e8a1ed7bb4d17e72c" prot="public" static="no">
+        <type>struct pljs_param_state</type>
+        <definition>typedef struct pljs_param_state pljs_param_state</definition>
+        <argsstring></argsstring>
+        <name>pljs_param_state</name>
+        <briefdescription>
+        </briefdescription>
+        <detaileddescription>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="src/pljs.h" line="65" column="18"/>
+      </memberdef>
+      <memberdef kind="typedef" id="pljs_8h_1a5b1d21ccdbb8631d9a79f38ff33259d6" prot="public" static="no">
+        <type>struct pljs_return_state</type>
+        <definition>typedef struct pljs_return_state pljs_return_state</definition>
+        <argsstring></argsstring>
+        <name>pljs_return_state</name>
+        <briefdescription>
+        </briefdescription>
+        <detaileddescription>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="src/pljs.h" line="72" column="19"/>
+      </memberdef>
+      <memberdef kind="typedef" id="pljs_8h_1aca725d562934879748a5dacab41c6711" prot="public" static="no">
+        <type>struct pljs_type</type>
+        <definition>typedef struct pljs_type pljs_type</definition>
+        <argsstring></argsstring>
+        <name>pljs_type</name>
+        <briefdescription>
+        </briefdescription>
+        <detaileddescription>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="src/pljs.h" line="83" column="11"/>
+      </memberdef>
+      <memberdef kind="typedef" id="pljs_8h_1ad29353c353c6579367fb946737ce83ea" prot="public" static="no">
+        <type>struct pljs_plan</type>
+        <definition>typedef struct pljs_plan pljs_plan</definition>
+        <argsstring></argsstring>
+        <name>pljs_plan</name>
+        <briefdescription>
+        </briefdescription>
+        <detaileddescription>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="src/pljs.h" line="89" column="11"/>
+      </memberdef>
+      <memberdef kind="typedef" id="pljs_8h_1a520e6519e469e820cab0a1a4182026f2" prot="public" static="no">
+        <type>struct pljs_func</type>
+        <definition>typedef struct pljs_func pljs_func</definition>
+        <argsstring></argsstring>
+        <name>pljs_func</name>
+        <briefdescription>
+        </briefdescription>
+        <detaileddescription>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="src/pljs.h" line="110" column="11"/>
+      </memberdef>
+      <memberdef kind="typedef" id="pljs_8h_1a92c5d731f71b22b7ad7ed3d12d0dd9f9" prot="public" static="no">
+        <type>struct pljs_context</type>
+        <definition>typedef struct pljs_context pljs_context</definition>
+        <argsstring></argsstring>
+        <name>pljs_context</name>
+        <briefdescription>
+        </briefdescription>
+        <detaileddescription>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="src/pljs.h" line="119" column="14"/>
+      </memberdef>
+      <memberdef kind="typedef" id="pljs_8h_1a6651ec531405d595c92c78e34bd0ed97" prot="public" static="no">
+        <type>struct pljs_storage</type>
+        <definition>typedef struct pljs_storage pljs_storage</definition>
+        <argsstring></argsstring>
+        <name>pljs_storage</name>
+        <briefdescription>
+        </briefdescription>
+        <detaileddescription>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="src/pljs.h" line="127" column="14"/>
+      </memberdef>
+      <memberdef kind="typedef" id="pljs_8h_1ae399ccc95110ddc5061031229912705c" prot="public" static="no">
+        <type>struct pljs_window_storage</type>
+        <definition>typedef struct pljs_window_storage pljs_window_storage</definition>
+        <argsstring></argsstring>
+        <name>pljs_window_storage</name>
+        <briefdescription>
+        </briefdescription>
+        <detaileddescription>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="src/pljs.h" line="133" column="21"/>
+      </memberdef>
+    </sectiondef>
+    <sectiondef kind="var">
+      <memberdef kind="variable" id="pljs_8h_1a2f33e5a8bc923e37f3637368e0641568" prot="public" static="no" extern="yes" mutable="no">
+        <type><ref refid="structpljs__configuration" kindref="compound">pljs_configuration</ref></type>
+        <definition>pljs_configuration configuration</definition>
+        <argsstring></argsstring>
+        <name>configuration</name>
+        <briefdescription>
+<para>PLJS Configuration. </para>
+        </briefdescription>
+        <detaileddescription>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="src/pljs.h" line="32" column="27" bodyfile="src/pljs.c" bodystart="47" bodyend="47" declfile="src/pljs.h" declline="32" declcolumn="27"/>
+      </memberdef>
+      <memberdef kind="variable" id="pljs_8h_1a3ba489a976915ca6161baede3c439066" prot="public" static="no" extern="yes" mutable="no">
+        <type>JSRuntime *</type>
+        <definition>JSRuntime* rt</definition>
+        <argsstring></argsstring>
+        <name>rt</name>
+        <briefdescription>
+<para>QuickJS Runtime. </para>
+        </briefdescription>
+        <detaileddescription>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="src/pljs.h" line="35" column="18" bodyfile="src/pljs.c" bodystart="44" bodyend="-1" declfile="src/pljs.h" declline="35" declcolumn="18"/>
+      </memberdef>
+      <memberdef kind="variable" id="pljs_8h_1a547c7fe655de1d579ad374806634f87b" prot="public" static="no" extern="yes" mutable="no">
+        <type>JSClassID</type>
+        <definition>JSClassID js_prepared_statement_handle_id</definition>
+        <argsstring></argsstring>
+        <name>js_prepared_statement_handle_id</name>
+        <briefdescription>
+        </briefdescription>
+        <detaileddescription>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="src/pljs.h" line="135" column="18" bodyfile="src/pljs.c" bodystart="50" bodyend="-1" declfile="src/pljs.h" declline="135" declcolumn="18"/>
+      </memberdef>
+      <memberdef kind="variable" id="pljs_8h_1a4fd096886ec3f8e78a13024678b0461a" prot="public" static="no" extern="yes" mutable="no">
+        <type>JSClassID</type>
+        <definition>JSClassID js_cursor_handle_id</definition>
+        <argsstring></argsstring>
+        <name>js_cursor_handle_id</name>
+        <briefdescription>
+        </briefdescription>
+        <detaileddescription>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="src/pljs.h" line="136" column="18" bodyfile="src/pljs.c" bodystart="53" bodyend="-1" declfile="src/pljs.h" declline="136" declcolumn="18"/>
+      </memberdef>
+      <memberdef kind="variable" id="pljs_8h_1a6ebe1cb0d20a2821eaa5045e38834b92" prot="public" static="no" extern="yes" mutable="no">
+        <type>JSClassID</type>
+        <definition>JSClassID js_pljs_storage_id</definition>
+        <argsstring></argsstring>
+        <name>js_pljs_storage_id</name>
+        <briefdescription>
+        </briefdescription>
+        <detaileddescription>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="src/pljs.h" line="137" column="18" bodyfile="src/pljs.c" bodystart="56" bodyend="-1" declfile="src/pljs.h" declline="137" declcolumn="18"/>
+      </memberdef>
+      <memberdef kind="variable" id="pljs_8h_1ae684e942afc4d8a2df483bd473170966" prot="public" static="no" extern="yes" mutable="no">
+        <type>JSClassID</type>
+        <definition>JSClassID js_window_id</definition>
+        <argsstring></argsstring>
+        <name>js_window_id</name>
+        <briefdescription>
+        </briefdescription>
+        <detaileddescription>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="src/pljs.h" line="138" column="18" bodyfile="src/pljs.c" bodystart="59" bodyend="-1" declfile="src/pljs.h" declline="138" declcolumn="18"/>
+      </memberdef>
+    </sectiondef>
+    <sectiondef kind="func">
+      <memberdef kind="function" id="pljs_8h_1a7b3f1b74e9ed8d56963cf0d057cd3e0c" prot="public" static="no" const="no" explicit="no" inline="no" virt="non-virtual">
+        <type>Datum</type>
+        <definition>Datum pljs_call_handler</definition>
+        <argsstring>(PG_FUNCTION_ARGS)</argsstring>
+        <name>pljs_call_handler</name>
+        <param>
+          <type>PG_FUNCTION_ARGS</type>
+        </param>
+        <briefdescription>
+<para>Call Javascript from PostgreSQL. </para>
+        </briefdescription>
+        <detaileddescription>
+<para>Calls Javascript in some form from PostgreSQL, returning the result on success, or throwing an error on exception. Calls can be of types <computeroutput>function</computeroutput>, <computeroutput>procedure</computeroutput>, <computeroutput>do</computeroutput>, or <computeroutput>trigger</computeroutput>, and are dispatched from this entry point.</para>
+<para><parameterlist kind="param"><parameteritem>
+<parameternamelist>
+<parametername>PG_FUNCTION_ARGS</parametername>
+</parameternamelist>
+<parameterdescription>
+<para>Pointer to struct FunctionCallInfoBaseData </para>
+</parameterdescription>
+</parameteritem>
+</parameterlist>
+<simplesect kind="return"><para>#Datum of the result </para>
+</simplesect>
+</para>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="src/pljs.h" line="143" column="7" bodyfile="src/pljs.c" bodystart="550" bodyend="647" declfile="src/pljs.h" declline="143" declcolumn="7"/>
+      </memberdef>
+      <memberdef kind="function" id="pljs_8h_1aae27a65776a319aa74d574e180ff30d1" prot="public" static="no" const="no" explicit="no" inline="no" virt="non-virtual">
+        <type>Datum</type>
+        <definition>Datum pljs_call_validator</definition>
+        <argsstring>(PG_FUNCTION_ARGS)</argsstring>
+        <name>pljs_call_validator</name>
+        <param>
+          <type>PG_FUNCTION_ARGS</type>
+        </param>
+        <briefdescription>
+<para>Call a Javascript function. </para>
+        </briefdescription>
+        <detaileddescription>
+<para>Calls a Javascript function returning the result on success, or throwing an error on exception.</para>
+<para><simplesect kind="return"><para>#Datum of type <computeroutput>VOID</computeroutput> </para>
+</simplesect>
+</para>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="src/pljs.h" line="144" column="7" bodyfile="src/pljs.c" bodystart="712" bodyend="758" declfile="src/pljs.h" declline="144" declcolumn="7"/>
+      </memberdef>
+      <memberdef kind="function" id="pljs_8h_1ac4c0dd8dcb2cf09451fe57e08221363f" prot="public" static="no" const="no" explicit="no" inline="no" virt="non-virtual">
+        <type>Datum</type>
+        <definition>Datum pljs_inline_handler</definition>
+        <argsstring>(PG_FUNCTION_ARGS)</argsstring>
+        <name>pljs_inline_handler</name>
+        <param>
+          <type>PG_FUNCTION_ARGS</type>
+        </param>
+        <briefdescription>
+<para>Execute an inline javascript call. </para>
+        </briefdescription>
+        <detaileddescription>
+<para>Executes whatever is passed as a <computeroutput>DO</computeroutput> call in postgres, does not accept any arguments to the call, nor allow for any returned data.</para>
+<para><simplesect kind="return"><para>#Datum containing <computeroutput>VOID</computeroutput> </para>
+</simplesect>
+</para>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="src/pljs.h" line="145" column="7" bodyfile="src/pljs.c" bodystart="658" bodyend="702" declfile="src/pljs.h" declline="145" declcolumn="7"/>
+      </memberdef>
+      <memberdef kind="function" id="pljs_8h_1a29e1a0b0688ac19dbde93824e4ae1a59" prot="public" static="no" const="no" explicit="no" inline="no" virt="non-virtual">
+        <type>void</type>
+        <definition>void _PG_init</definition>
+        <argsstring>(void)</argsstring>
+        <name>_PG_init</name>
+        <param>
+          <type>void</type>
+        </param>
+        <briefdescription>
+<para>PostgreSQL extension initialization function. </para>
+        </briefdescription>
+        <detaileddescription>
+<para>Initialize the extension, setting up the cache, GUCs, and QuickJS runtime. </para>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="src/pljs.h" line="148" column="6" bodyfile="src/pljs.c" bodystart="69" bodyend="87" declfile="src/pljs.h" declline="148" declcolumn="6"/>
+      </memberdef>
+      <memberdef kind="function" id="pljs_8h_1a8b70c9d1056c61ae1a9ad1802f2d6418" prot="public" static="no" const="no" explicit="no" inline="no" virt="non-virtual">
+        <type>void</type>
+        <definition>void pljs_guc_init</definition>
+        <argsstring>(void)</argsstring>
+        <name>pljs_guc_init</name>
+        <param>
+          <type>void</type>
+        </param>
+        <briefdescription>
+<para>Set up the GUCs. </para>
+        </briefdescription>
+        <detaileddescription>
+<para>Sets up the GUCs that help define the behavior of the interpreter. </para>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="src/pljs.h" line="149" column="6" bodyfile="src/pljs.c" bodystart="94" bodyend="115" declfile="src/pljs.h" declline="149" declcolumn="6"/>
+      </memberdef>
+      <memberdef kind="function" id="pljs_8h_1a023b4d31657b7c6aa51e7f3594e4efae" prot="public" static="no" const="no" explicit="no" inline="no" virt="non-virtual">
+        <type>void</type>
+        <definition>void pljs_cache_init</definition>
+        <argsstring>(void)</argsstring>
+        <name>pljs_cache_init</name>
+        <param>
+          <type>void</type>
+        </param>
+        <briefdescription>
+<para>Initializes the cache #HTAB along with the #MemoryContext where cached memory is allocated. </para>
+        </briefdescription>
+        <detaileddescription>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="src/pljs.h" line="150" column="6" bodyfile="src/cache.c" bodystart="26" bodyend="49" declfile="src/pljs.h" declline="150" declcolumn="6"/>
+      </memberdef>
+      <memberdef kind="function" id="pljs_8h_1a791b7d28ece4dcd54dd041d9814270ca" prot="public" static="no" const="no" explicit="no" inline="no" virt="non-virtual">
+        <type>void</type>
+        <definition>void pljs_setup_namespace</definition>
+        <argsstring>(JSContext *ctx)</argsstring>
+        <name>pljs_setup_namespace</name>
+        <param>
+          <type>JSContext *</type>
+          <declname>ctx</declname>
+        </param>
+        <briefdescription>
+<para>Sets up the <computeroutput>pljs</computeroutput> object. </para>
+        </briefdescription>
+        <detaileddescription>
+<para>Creates a global object named <computeroutput>pljs</computeroutput> that contains all of the helper functions, such as query access and windowing, along with logging to Postgres and utility functions.</para>
+<para><parameterlist kind="param"><parameteritem>
+<parameternamelist>
+<parametername>ctx</parametername>
+</parameternamelist>
+<parameterdescription>
+<para>#JSContext Javascript context </para>
+</parameterdescription>
+</parameteritem>
+</parameterlist>
+</para>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="src/pljs.h" line="151" column="6" bodyfile="src/functions.c" bodystart="104" bodyend="163" declfile="src/pljs.h" declline="151" declcolumn="6"/>
+      </memberdef>
+      <memberdef kind="function" id="pljs_8h_1aafd3ae0c3a562fb1f575f9a18c779bbb" prot="public" static="no" const="no" explicit="no" inline="no" virt="non-virtual">
+        <type>JSValue</type>
+        <definition>JSValue js_throw</definition>
+        <argsstring>(const char *, JSContext *)</argsstring>
+        <name>js_throw</name>
+        <param>
+          <type>const char *</type>
+          <declname>message</declname>
+        </param>
+        <param>
+          <type>JSContext *</type>
+          <declname>ctx</declname>
+        </param>
+        <briefdescription>
+<para>Throws a Javascript exception. </para>
+        </briefdescription>
+        <detaileddescription>
+<para>Throws a Javascript exception and fills it with the message passed, along with as much context as it can derive from the current state of Postgres when the exception is called.</para>
+<para><parameterlist kind="param"><parameteritem>
+<parameternamelist>
+<parametername>message</parametername>
+</parameternamelist>
+<parameterdescription>
+<para><computeroutput>const</computeroutput> char * - message to throw with </para>
+</parameterdescription>
+</parameteritem>
+<parameteritem>
+<parameternamelist>
+<parametername>ctx</parametername>
+</parameternamelist>
+<parameterdescription>
+<para>#JSContext - Javascript context to execute in </para>
+</parameterdescription>
+</parameteritem>
+</parameterlist>
+<simplesect kind="return"><para>#JSValue of the exception </para>
+</simplesect>
+</para>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="src/pljs.h" line="154" column="9" bodyfile="src/pljs.c" bodystart="1241" bodyend="1247" declfile="src/pljs.h" declline="154" declcolumn="9"/>
+      </memberdef>
+      <memberdef kind="function" id="pljs_8h_1afe2893544542bcd57a59eb8de200db84" prot="public" static="no" const="no" explicit="no" inline="no" virt="non-virtual">
+        <type>JSValue</type>
+        <definition>JSValue pljs_compile_function</definition>
+        <argsstring>(pljs_context *context, bool is_trigger)</argsstring>
+        <name>pljs_compile_function</name>
+        <param>
+          <type><ref refid="structpljs__context" kindref="compound">pljs_context</ref> *</type>
+          <declname>context</declname>
+        </param>
+        <param>
+          <type>bool</type>
+          <declname>is_trigger</declname>
+        </param>
+        <briefdescription>
+<para>Compile a javascript function and return a pointer to it. </para>
+        </briefdescription>
+        <detaileddescription>
+<para>Sets up the arguments and code of a javascript function, compiles it, and returns the function itself for use.</para>
+<para><parameterlist kind="param"><parameteritem>
+<parameternamelist>
+<parametername>context</parametername>
+</parameternamelist>
+<parameterdescription>
+<para><ref refid="structpljs__context" kindref="compound">pljs_context</ref> - context to compile it into, which also has the current function </para>
+</parameterdescription>
+</parameteritem>
+<parameteritem>
+<parameternamelist>
+<parametername>is_trigger</parametername>
+</parameternamelist>
+<parameterdescription>
+<para>#bool - whether it is to be called as a trigger or not, this determines arguments </para>
+</parameterdescription>
+</parameteritem>
+</parameterlist>
+<simplesect kind="return"><para>#JSValue of the compiled function </para>
+</simplesect>
+</para>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="src/pljs.h" line="157" column="9" bodyfile="src/pljs.c" bodystart="772" bodyend="830" declfile="src/pljs.h" declline="157" declcolumn="9"/>
+      </memberdef>
+      <memberdef kind="function" id="pljs_8h_1a52d1faeecd9f81a777833865400af6a4" prot="public" static="no" const="no" explicit="no" inline="no" virt="non-virtual">
+        <type>JSValue</type>
+        <definition>JSValue pljs_find_js_function</definition>
+        <argsstring>(Oid fn_oid, JSContext *ctx)</argsstring>
+        <name>pljs_find_js_function</name>
+        <param>
+          <type>Oid</type>
+          <declname>fn_oid</declname>
+        </param>
+        <param>
+          <type>JSContext *</type>
+          <declname>ctx</declname>
+        </param>
+        <briefdescription>
+<para>Finds a <computeroutput>pljs</computeroutput> function and returns the JSValue of the function. </para>
+        </briefdescription>
+        <detaileddescription>
+<para>Finds a function by its #Oid, compiles it in its own context, and returns a #JSValue containing a compiled version of the function. Note that no permissions checks are done, it is assumed these are done before calling.</para>
+<para><parameterlist kind="param"><parameteritem>
+<parameternamelist>
+<parametername>fn_oid</parametername>
+</parameternamelist>
+<parameterdescription>
+<para>#Oid </para>
+</parameterdescription>
+</parameteritem>
+<parameteritem>
+<parameternamelist>
+<parametername>ctx</parametername>
+</parameternamelist>
+<parameterdescription>
+<para>#JSContext - if NULL, the cached ctx will be used </para>
+</parameterdescription>
+</parameteritem>
+</parameterlist>
+<simplesect kind="return"><para>#JSValue representation of either the function if it exists of <computeroutput>JS_UNDEFINED</computeroutput> if it does not </para>
+</simplesect>
+</para>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="src/pljs.h" line="158" column="9" bodyfile="src/pljs.c" bodystart="1262" bodyend="1328" declfile="src/pljs.h" declline="158" declcolumn="9"/>
+      </memberdef>
+      <memberdef kind="function" id="pljs_8h_1a2f00028bcded68c78b0c4a92eb60fc76" prot="public" static="no" const="no" explicit="no" inline="no" virt="non-virtual">
+        <type>bool</type>
+        <definition>bool pljs_has_permission_to_execute</definition>
+        <argsstring>(const char *signature)</argsstring>
+        <name>pljs_has_permission_to_execute</name>
+        <param>
+          <type>const char *</type>
+          <declname>signature</declname>
+        </param>
+        <briefdescription>
+<para>Check to see if there is permission to execute a function. </para>
+        </briefdescription>
+        <detaileddescription>
+<para>Searches the catalog for a function and checks to see if the current user has permission to execute it.</para>
+<para><parameterlist kind="param"><parameteritem>
+<parameternamelist>
+<parametername>signature</parametername>
+</parameternamelist>
+<parameterdescription>
+<para><computeroutput>char</computeroutput> * </para>
+</parameterdescription>
+</parameteritem>
+</parameterlist>
+<simplesect kind="return"><para><computeroutput>bool</computeroutput> </para>
+</simplesect>
+</para>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="src/pljs.h" line="159" column="6" bodyfile="src/pljs.c" bodystart="304" bodyend="343" declfile="src/pljs.h" declline="159" declcolumn="6"/>
+      </memberdef>
+      <memberdef kind="function" id="pljs_8h_1acd7a69e7499abdb35111679f8fe3a4e6" prot="public" static="no" const="no" explicit="no" inline="no" virt="non-virtual">
+        <type><ref refid="structpljs__storage" kindref="compound">pljs_storage</ref> *</type>
+        <definition>pljs_storage * pljs_storage_for_context</definition>
+        <argsstring>(JSContext *ctx)</argsstring>
+        <name>pljs_storage_for_context</name>
+        <param>
+          <type>JSContext *</type>
+          <declname>ctx</declname>
+        </param>
+        <briefdescription>
+<para>Retrieves the <ref refid="structpljs__storage" kindref="compound">pljs_storage</ref> for a given #JSContext. </para>
+        </briefdescription>
+        <detaileddescription>
+<para>We stash a <ref refid="structpljs__storage" kindref="compound">pljs_storage</ref> object as an opaque object connected to the <computeroutput>pljs</computeroutput> global Javascript object. This contains important function call contexts that allow us to do the conversions that we need.</para>
+<para><parameterlist kind="param"><parameteritem>
+<parameternamelist>
+<parametername>ctx</parametername>
+</parameternamelist>
+<parameterdescription>
+<para>#JSContext </para>
+</parameterdescription>
+</parameteritem>
+</parameterlist>
+<simplesect kind="return"><para><ref refid="structpljs__storage" kindref="compound">pljs_storage</ref> </para>
+</simplesect>
+</para>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="src/pljs.h" line="160" column="14" bodyfile="src/pljs.c" bodystart="487" bodyend="495" declfile="src/pljs.h" declline="160" declcolumn="14"/>
+      </memberdef>
+      <memberdef kind="function" id="pljs_8h_1aa287787fed1bce9d7047ebcc492e44e2" prot="public" static="no" const="no" explicit="no" inline="no" virt="non-virtual">
+        <type>void</type>
+        <definition>void pljs_cache_context_add</definition>
+        <argsstring>(Oid, JSContext *)</argsstring>
+        <name>pljs_cache_context_add</name>
+        <param>
+          <type>Oid</type>
+          <declname>user_id</declname>
+        </param>
+        <param>
+          <type>JSContext *</type>
+          <declname>ctx</declname>
+        </param>
+        <briefdescription>
+<para>Adds a <ref refid="structpljs__context__cache__value" kindref="compound">pljs_context_cache_value</ref> for a <computeroutput>user_id</computeroutput>. </para>
+        </briefdescription>
+        <detaileddescription>
+<para>Creates a <ref refid="structpljs__context__cache__value" kindref="compound">pljs_context_cache_value</ref> and fills it with the javascript context and #HTAB storing <ref refid="structpljs__function__cache__value" kindref="compound">pljs_function_cache_value</ref> entries by <computeroutput>fn_oid</computeroutput>.</para>
+<para><parameterlist kind="param"><parameteritem>
+<parameternamelist>
+<parametername>user_id</parametername>
+</parameternamelist>
+<parameterdescription>
+<para>#Oid - user ID for the #JSContext to be assigned to </para>
+</parameterdescription>
+</parameteritem>
+<parameteritem>
+<parameternamelist>
+<parametername>ctx</parametername>
+</parameternamelist>
+<parameterdescription>
+<para>#JSContext - context to be added to the cache </para>
+</parameterdescription>
+</parameteritem>
+</parameterlist>
+</para>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="src/pljs.h" line="165" column="6" bodyfile="src/cache.c" bodystart="70" bodyend="107" declfile="src/pljs.h" declline="165" declcolumn="6"/>
+      </memberdef>
+      <memberdef kind="function" id="pljs_8h_1ad6d0e32942e142c2839a8857dc8b0753" prot="public" static="no" const="no" explicit="no" inline="no" virt="non-virtual">
+        <type>void</type>
+        <definition>void pljs_cache_context_remove</definition>
+        <argsstring>(Oid)</argsstring>
+        <name>pljs_cache_context_remove</name>
+        <param>
+          <type>Oid</type>
+          <declname>user_id</declname>
+        </param>
+        <briefdescription>
+<para>Removes a <ref refid="structpljs__context__cache__value" kindref="compound">pljs_context_cache_value</ref> for a <computeroutput>user_id</computeroutput>. </para>
+        </briefdescription>
+        <detaileddescription>
+<para>Removes a cache entry from the cache by <computeroutput>user_id</computeroutput>. <parameterlist kind="param"><parameteritem>
+<parameternamelist>
+<parametername>user_id</parametername>
+</parameternamelist>
+<parameterdescription>
+<para>#Oid - user ID for which to remove the cache entries </para>
+</parameterdescription>
+</parameteritem>
+</parameterlist>
+</para>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="src/pljs.h" line="166" column="6" bodyfile="src/cache.c" bodystart="115" bodyend="125" declfile="src/pljs.h" declline="166" declcolumn="6"/>
+      </memberdef>
+      <memberdef kind="function" id="pljs_8h_1af7187372a9c8d6c4d76188ae7927f270" prot="public" static="no" const="no" explicit="no" inline="no" virt="non-virtual">
+        <type><ref refid="structpljs__context__cache__value" kindref="compound">pljs_context_cache_value</ref> *</type>
+        <definition>pljs_context_cache_value * pljs_cache_context_find</definition>
+        <argsstring>(Oid user_id)</argsstring>
+        <name>pljs_cache_context_find</name>
+        <param>
+          <type>Oid</type>
+          <declname>user_id</declname>
+        </param>
+        <briefdescription>
+<para>Finds a <ref refid="structpljs__context__cache__value" kindref="compound">pljs_context_cache_value</ref> for a <computeroutput>user_id</computeroutput>. </para>
+        </briefdescription>
+        <detaileddescription>
+<para><parameterlist kind="param"><parameteritem>
+<parameternamelist>
+<parametername>user_id</parametername>
+</parameternamelist>
+<parameterdescription>
+<para>#Oid </para>
+</parameterdescription>
+</parameteritem>
+</parameterlist>
+<simplesect kind="return"><para><ref refid="structpljs__context__cache__value" kindref="compound">pljs_context_cache_value</ref> that is found, or <computeroutput>NULL</computeroutput> if not found </para>
+</simplesect>
+</para>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="src/pljs.h" line="167" column="26" bodyfile="src/cache.c" bodystart="133" bodyend="138" declfile="src/pljs.h" declline="167" declcolumn="26"/>
+      </memberdef>
+      <memberdef kind="function" id="pljs_8h_1af93a799eb6018084c41cef176eaca2d4" prot="public" static="no" const="no" explicit="no" inline="no" virt="non-virtual">
+        <type><ref refid="structpljs__function__cache__value" kindref="compound">pljs_function_cache_value</ref> *</type>
+        <definition>pljs_function_cache_value * pljs_cache_function_find</definition>
+        <argsstring>(Oid user_id, Oid fn_oid)</argsstring>
+        <name>pljs_cache_function_find</name>
+        <param>
+          <type>Oid</type>
+          <declname>user_id</declname>
+        </param>
+        <param>
+          <type>Oid</type>
+          <declname>fn_oid</declname>
+        </param>
+        <briefdescription>
+<para>Finds a <ref refid="structpljs__function__cache__value" kindref="compound">pljs_function_cache_value</ref> for a <computeroutput>user_id</computeroutput> and <computeroutput>fn_oid</computeroutput>. </para>
+        </briefdescription>
+        <detaileddescription>
+<para><parameterlist kind="param"><parameteritem>
+<parameternamelist>
+<parametername>user_id</parametername>
+</parameternamelist>
+<parameterdescription>
+<para>#Oid </para>
+</parameterdescription>
+</parameteritem>
+<parameteritem>
+<parameternamelist>
+<parametername>fn_oid</parametername>
+</parameternamelist>
+<parameterdescription>
+<para>#Oid </para>
+</parameterdescription>
+</parameteritem>
+</parameterlist>
+<simplesect kind="return"><para><ref refid="structpljs__function__cache__value" kindref="compound">pljs_function_cache_value</ref> that is found, or <computeroutput>NULL</computeroutput> if not found </para>
+</simplesect>
+</para>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="src/pljs.h" line="170" column="27" bodyfile="src/cache.c" bodystart="194" bodyend="212" declfile="src/pljs.h" declline="170" declcolumn="27"/>
+      </memberdef>
+      <memberdef kind="function" id="pljs_8h_1a951f671ac3fb4cbd071796fc2ed34785" prot="public" static="no" const="no" explicit="no" inline="no" virt="non-virtual">
+        <type>void</type>
+        <definition>void pljs_cache_function_add</definition>
+        <argsstring>(pljs_context *context)</argsstring>
+        <name>pljs_cache_function_add</name>
+        <param>
+          <type><ref refid="structpljs__context" kindref="compound">pljs_context</ref> *</type>
+          <declname>context</declname>
+        </param>
+        <briefdescription>
+<para>Adds a javascript function in the cache for a <computeroutput>user_id</computeroutput> and <computeroutput>fn_oid</computeroutput>. </para>
+        </briefdescription>
+        <detaileddescription>
+<para>Adds a function by creating a <ref refid="structpljs__function__cache__value" kindref="compound">pljs_function_cache_value</ref> and populating it from a <ref refid="structpljs__context" kindref="compound">pljs_context</ref>. <parameterlist kind="param"><parameteritem>
+<parameternamelist>
+<parametername>context</parametername>
+</parameternamelist>
+<parameterdescription>
+<para>Pointer to <ref refid="structpljs__context" kindref="compound">pljs_context</ref> </para>
+</parameterdescription>
+</parameteritem>
+</parameterlist>
+</para>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="src/pljs.h" line="171" column="6" bodyfile="src/cache.c" bodystart="147" bodyend="185" declfile="src/pljs.h" declline="171" declcolumn="6"/>
+      </memberdef>
+      <memberdef kind="function" id="pljs_8h_1a31ddb06762e63be6911dcd4fa6b41d02" prot="public" static="no" const="no" explicit="no" inline="no" virt="non-virtual">
+        <type>void</type>
+        <definition>void pljs_function_cache_to_context</definition>
+        <argsstring>(pljs_context *, pljs_function_cache_value *)</argsstring>
+        <name>pljs_function_cache_to_context</name>
+        <param>
+          <type><ref refid="structpljs__context" kindref="compound">pljs_context</ref> *</type>
+          <declname>context</declname>
+        </param>
+        <param>
+          <type><ref refid="structpljs__function__cache__value" kindref="compound">pljs_function_cache_value</ref> *</type>
+          <declname>function_entry</declname>
+        </param>
+        <briefdescription>
+<para>Fills a <ref refid="structpljs__context" kindref="compound">pljs_context</ref> from a <ref refid="structpljs__function__cache__value" kindref="compound">pljs_function_cache_value</ref>. </para>
+        </briefdescription>
+        <detaileddescription>
+<para>Copies the data from a pljs context to a function cache value. <parameterlist kind="param"><parameteritem>
+<parameternamelist>
+<parametername>context</parametername>
+</parameternamelist>
+<parameterdescription>
+<para>Pointer to <ref refid="structpljs__context" kindref="compound">pljs_context</ref> to copy from </para>
+</parameterdescription>
+</parameteritem>
+<parameteritem>
+<parameternamelist>
+<parametername>function_entry</parametername>
+</parameternamelist>
+<parameterdescription>
+<para>Pointer to <ref refid="structpljs__function__cache__value" kindref="compound">pljs_function_cache_value</ref> to fill </para>
+</parameterdescription>
+</parameteritem>
+</parameterlist>
+</para>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="src/pljs.h" line="174" column="6" bodyfile="src/cache.c" bodystart="221" bodyend="248" declfile="src/pljs.h" declline="174" declcolumn="6"/>
+      </memberdef>
+      <memberdef kind="function" id="pljs_8h_1a0ea8b25fcfd4640a01392c284eac189f" prot="public" static="no" const="no" explicit="no" inline="no" virt="non-virtual">
+        <type>void</type>
+        <definition>void pljs_context_to_function_cache</definition>
+        <argsstring>(pljs_function_cache_value *function_entry, pljs_context *context)</argsstring>
+        <name>pljs_context_to_function_cache</name>
+        <param>
+          <type><ref refid="structpljs__function__cache__value" kindref="compound">pljs_function_cache_value</ref> *</type>
+          <declname>function_entry</declname>
+        </param>
+        <param>
+          <type><ref refid="structpljs__context" kindref="compound">pljs_context</ref> *</type>
+          <declname>context</declname>
+        </param>
+        <briefdescription>
+<para>Fills a <ref refid="structpljs__function__cache__value" kindref="compound">pljs_function_cache_value</ref> from a <ref refid="structpljs__context" kindref="compound">pljs_context</ref>. </para>
+        </briefdescription>
+        <detaileddescription>
+<para>Copies the data from a function cache value to a pljs context. <parameterlist kind="param"><parameteritem>
+<parameternamelist>
+<parametername>function_entry</parametername>
+</parameternamelist>
+<parameterdescription>
+<para>Pointer to <ref refid="structpljs__function__cache__value" kindref="compound">pljs_function_cache_value</ref> to copy from </para>
+</parameterdescription>
+</parameteritem>
+<parameteritem>
+<parameternamelist>
+<parametername>context</parametername>
+</parameternamelist>
+<parameterdescription>
+<para>Pointer to <ref refid="structpljs__context" kindref="compound">pljs_context</ref> to fill </para>
+</parameterdescription>
+</parameteritem>
+</parameterlist>
+</para>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="src/pljs.h" line="176" column="6" bodyfile="src/cache.c" bodystart="257" bodyend="285" declfile="src/pljs.h" declline="176" declcolumn="6"/>
+      </memberdef>
+      <memberdef kind="function" id="pljs_8h_1a413e1a83b7dabb756801a57fba2f688e" prot="public" static="no" const="no" explicit="no" inline="no" virt="non-virtual">
+        <type>void</type>
+        <definition>void pljs_cache_reset</definition>
+        <argsstring>(void)</argsstring>
+        <name>pljs_cache_reset</name>
+        <param>
+          <type>void</type>
+        </param>
+        <briefdescription>
+<para>Clears all caches and recreates them. </para>
+        </briefdescription>
+        <detaileddescription>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="src/pljs.h" line="179" column="6" bodyfile="src/cache.c" bodystart="54" bodyend="58" declfile="src/pljs.h" declline="179" declcolumn="6"/>
+      </memberdef>
+      <memberdef kind="function" id="pljs_8h_1a89fed90e2d89c886f56909af85059c8e" prot="public" static="no" const="no" explicit="no" inline="no" virt="non-virtual">
+        <type>JSValue</type>
+        <definition>JSValue pljs_datum_to_jsvalue</definition>
+        <argsstring>(Datum arg, Oid type, JSContext *ctx, bool skip_composite)</argsstring>
+        <name>pljs_datum_to_jsvalue</name>
+        <param>
+          <type>Datum</type>
+          <declname>arg</declname>
+        </param>
+        <param>
+          <type>Oid</type>
+          <declname>type</declname>
+          <defname>argtype</defname>
+        </param>
+        <param>
+          <type>JSContext *</type>
+          <declname>ctx</declname>
+        </param>
+        <param>
+          <type>bool</type>
+          <declname>skip_composite</declname>
+        </param>
+        <briefdescription>
+<para>Converts a Postgres #Datum to a Javascript value. </para>
+        </briefdescription>
+        <detaileddescription>
+<para>Takes a Postgres #Datum and type and converts it into a Javascript value. If the type is an array or is composite, then call out to the correct functions. If <computeroutput>skip_composite</computeroutput> is true, then the value is directly converted, even if it is composite. There is currently only one case for this: conversion from a window function.</para>
+<para><parameterlist kind="param"><parameteritem>
+<parameternamelist>
+<parametername>arg</parametername>
+</parameternamelist>
+<parameterdescription>
+<para>#Datum - Postgres array to convert @oaram type <ref refid="structpljs__type" kindref="compound">pljs_type</ref> - type information for the type </para>
+</parameterdescription>
+</parameteritem>
+<parameteritem>
+<parameternamelist>
+<parametername>ctx</parametername>
+</parameternamelist>
+<parameterdescription>
+<para>#JSContext - Javascript context to execute in </para>
+</parameterdescription>
+</parameteritem>
+<parameteritem>
+<parameternamelist>
+<parametername>skip_composite</parametername>
+</parameternamelist>
+<parameterdescription>
+<para><computeroutput>bool</computeroutput> - whether to skip the composite check </para>
+</parameterdescription>
+</parameteritem>
+</parameterlist>
+<simplesect kind="return"><para>#JSValue of the value, or JS_NULL if unable to convert </para>
+</simplesect>
+</para>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="src/pljs.h" line="184" column="9" bodyfile="src/types.c" bodystart="415" bodyend="544" declfile="src/pljs.h" declline="184" declcolumn="9"/>
+      </memberdef>
+      <memberdef kind="function" id="pljs_8h_1af6a5b7d501192c78d7efb7c2ed2f54e5" prot="public" static="no" const="no" explicit="no" inline="no" virt="non-virtual">
+        <type>JSValue</type>
+        <definition>JSValue pljs_datum_to_array</definition>
+        <argsstring>(Datum arg, pljs_type *type, JSContext *ctx)</argsstring>
+        <name>pljs_datum_to_array</name>
+        <param>
+          <type>Datum</type>
+          <declname>arg</declname>
+        </param>
+        <param>
+          <type><ref refid="structpljs__type" kindref="compound">pljs_type</ref> *</type>
+          <declname>type</declname>
+        </param>
+        <param>
+          <type>JSContext *</type>
+          <declname>ctx</declname>
+        </param>
+        <briefdescription>
+<para>Converts a Postgres array to a Javascript array. </para>
+        </briefdescription>
+        <detaileddescription>
+<para>Takes a Postgres #Datum and type and converts it into a Javascript array. All properties are set, including array length.</para>
+<para><parameterlist kind="param"><parameteritem>
+<parameternamelist>
+<parametername>arg</parametername>
+</parameternamelist>
+<parameterdescription>
+<para>#Datum - Postgres array to convert @oaram type <ref refid="structpljs__type" kindref="compound">pljs_type</ref> - type information for the array </para>
+</parameterdescription>
+</parameteritem>
+<parameteritem>
+<parameternamelist>
+<parametername>ctx</parametername>
+</parameternamelist>
+<parameterdescription>
+<para>#JSContext - Javascript context to execute in </para>
+</parameterdescription>
+</parameteritem>
+</parameterlist>
+<simplesect kind="return"><para>#JSValue of the array </para>
+</simplesect>
+</para>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="src/pljs.h" line="186" column="9" bodyfile="src/types.c" bodystart="336" bodyend="360" declfile="src/pljs.h" declline="186" declcolumn="9"/>
+      </memberdef>
+      <memberdef kind="function" id="pljs_8h_1afd84f85b9402760e769999b1bbdfa6fe" prot="public" static="no" const="no" explicit="no" inline="no" virt="non-virtual">
+        <type>JSValue</type>
+        <definition>JSValue pljs_datum_to_object</definition>
+        <argsstring>(Datum arg, pljs_type *type, JSContext *ctx)</argsstring>
+        <name>pljs_datum_to_object</name>
+        <param>
+          <type>Datum</type>
+          <declname>arg</declname>
+        </param>
+        <param>
+          <type><ref refid="structpljs__type" kindref="compound">pljs_type</ref> *</type>
+          <declname>type</declname>
+        </param>
+        <param>
+          <type>JSContext *</type>
+          <declname>ctx</declname>
+        </param>
+        <briefdescription>
+<para>Converts a #Datum for a Javascript object. </para>
+        </briefdescription>
+        <detaileddescription>
+<para>Takes a #Datum and converts it to a Javascript object. If there is an error, throws a Javascript exception.</para>
+<para><parameterlist kind="param"><parameteritem>
+<parameternamelist>
+<parametername>arg</parametername>
+</parameternamelist>
+<parameterdescription>
+<para>#Datum - value to convert </para>
+</parameterdescription>
+</parameteritem>
+<parameteritem>
+<parameternamelist>
+<parametername>type</parametername>
+</parameternamelist>
+<parameterdescription>
+<para><ref refid="structpljs__type" kindref="compound">pljs_type</ref> - type information of the #Datum </para>
+</parameterdescription>
+</parameteritem>
+<parameteritem>
+<parameternamelist>
+<parametername>ctx</parametername>
+</parameternamelist>
+<parameterdescription>
+<para>#JSContext - Javascript context to execute in </para>
+</parameterdescription>
+</parameteritem>
+</parameterlist>
+<simplesect kind="return"><para>#JSValue of the object or thrown exception in case of error </para>
+</simplesect>
+</para>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="src/pljs.h" line="187" column="9" bodyfile="src/types.c" bodystart="259" bodyend="323" declfile="src/pljs.h" declline="187" declcolumn="9"/>
+      </memberdef>
+      <memberdef kind="function" id="pljs_8h_1a9383e27220bfc8475a7eb89a70301311" prot="public" static="no" const="no" explicit="no" inline="no" virt="non-virtual">
+        <type>JSValue</type>
+        <definition>JSValue pljs_tuple_to_jsvalue</definition>
+        <argsstring>(TupleDesc, HeapTuple, JSContext *ctx)</argsstring>
+        <name>pljs_tuple_to_jsvalue</name>
+        <param>
+          <type>TupleDesc</type>
+          <declname>tupledesc</declname>
+        </param>
+        <param>
+          <type>HeapTuple</type>
+          <declname>heap_tuple</declname>
+        </param>
+        <param>
+          <type>JSContext *</type>
+          <declname>ctx</declname>
+        </param>
+        <briefdescription>
+<para>Converts a Postgres #HeapTuple to a Javascript value. </para>
+        </briefdescription>
+        <detaileddescription>
+<para><parameterlist kind="param"><parameteritem>
+<parameternamelist>
+<parametername>tupledesc</parametername>
+</parameternamelist>
+<parameterdescription>
+<para>#TupleDesc </para>
+</parameterdescription>
+</parameteritem>
+<parameteritem>
+<parameternamelist>
+<parametername>heap_tuple</parametername>
+</parameternamelist>
+<parameterdescription>
+<para>#HeapTuple - value to convert </para>
+</parameterdescription>
+</parameteritem>
+<parameteritem>
+<parameternamelist>
+<parametername>ctx</parametername>
+</parameternamelist>
+<parameterdescription>
+<para>#JSContext - Javascript context to execute in </para>
+</parameterdescription>
+</parameteritem>
+</parameterlist>
+<simplesect kind="return"><para>#JSValue of the tuple value passed </para>
+</simplesect>
+</para>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="src/pljs.h" line="188" column="9" bodyfile="src/types.c" bodystart="1163" bodyend="1188" declfile="src/pljs.h" declline="188" declcolumn="9"/>
+      </memberdef>
+      <memberdef kind="function" id="pljs_8h_1a9e360aa81d6fdf0e57763c6cd4411d24" prot="public" static="no" const="no" explicit="no" inline="no" virt="non-virtual">
+        <type>JSValue</type>
+        <definition>JSValue pljs_spi_result_to_jsvalue</definition>
+        <argsstring>(int, JSContext *)</argsstring>
+        <name>pljs_spi_result_to_jsvalue</name>
+        <param>
+          <type>int</type>
+          <declname>status</declname>
+        </param>
+        <param>
+          <type>JSContext *</type>
+          <declname>ctx</declname>
+        </param>
+        <briefdescription>
+<para>Converts a Postgres SPI result to a Javascript value. </para>
+        </briefdescription>
+        <detaileddescription>
+<para><parameterlist kind="param"><parameteritem>
+<parameternamelist>
+<parametername>status</parametername>
+</parameternamelist>
+<parameterdescription>
+<para><computeroutput>int</computeroutput> - SPI status to convert </para>
+</parameterdescription>
+</parameteritem>
+<parameteritem>
+<parameternamelist>
+<parametername>ctx</parametername>
+</parameternamelist>
+<parameterdescription>
+<para>#JSContext - Javascript context to execute in </para>
+</parameterdescription>
+</parameteritem>
+</parameterlist>
+<simplesect kind="return"><para>#JSValue of the SPI status </para>
+</simplesect>
+</para>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="src/pljs.h" line="189" column="9" bodyfile="src/types.c" bodystart="1197" bodyend="1238" declfile="src/pljs.h" declline="189" declcolumn="9"/>
+      </memberdef>
+      <memberdef kind="function" id="pljs_8h_1a508186530f48c250ef1fe345e85af811" prot="public" static="no" const="no" explicit="no" inline="no" virt="non-virtual">
+        <type>Datum</type>
+        <definition>Datum pljs_jsvalue_to_array</definition>
+        <argsstring>(JSValue, pljs_type *, JSContext *, FunctionCallInfo)</argsstring>
+        <name>pljs_jsvalue_to_array</name>
+        <param>
+          <type>JSValue</type>
+          <declname>val</declname>
+        </param>
+        <param>
+          <type><ref refid="structpljs__type" kindref="compound">pljs_type</ref> *</type>
+          <declname>type</declname>
+        </param>
+        <param>
+          <type>JSContext *</type>
+          <declname>ctx</declname>
+        </param>
+        <param>
+          <type>FunctionCallInfo</type>
+          <declname>fcinfo</declname>
+        </param>
+        <briefdescription>
+<para>Converts a Javascript array to a Postgres array. </para>
+        </briefdescription>
+        <detaileddescription>
+<para>Takes a Javascript #JSValue of an array and type and converts it into a Postgres array.</para>
+<para><parameterlist kind="param"><parameteritem>
+<parameternamelist>
+<parametername>val</parametername>
+</parameternamelist>
+<parameterdescription>
+<para>#JSValue - Javascript array to convert @oaram type <ref refid="structpljs__type" kindref="compound">pljs_type</ref> - type information for the array </para>
+</parameterdescription>
+</parameteritem>
+<parameteritem>
+<parameternamelist>
+<parametername>ctx</parametername>
+</parameternamelist>
+<parameterdescription>
+<para>#JSContext - Javascript context to execute in </para>
+</parameterdescription>
+</parameteritem>
+<parameteritem>
+<parameternamelist>
+<parametername>fcinfo</parametername>
+</parameternamelist>
+<parameterdescription>
+<para>#FunctionCallInfo - needed to conversion back to a #Datum </para>
+</parameterdescription>
+</parameteritem>
+</parameterlist>
+<simplesect kind="return"><para>#Datum of the array </para>
+</simplesect>
+</para>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="src/pljs.h" line="192" column="7" bodyfile="src/types.c" bodystart="558" bodyend="592" declfile="src/pljs.h" declline="192" declcolumn="7"/>
+      </memberdef>
+      <memberdef kind="function" id="pljs_8h_1aa0ccea12a81f6a553cd5cf7d9306d2a5" prot="public" static="no" const="no" explicit="no" inline="no" virt="non-virtual">
+        <type>Datum</type>
+        <definition>Datum pljs_jsvalue_to_datum</definition>
+        <argsstring>(JSValue, Oid, JSContext *, FunctionCallInfo, bool *)</argsstring>
+        <name>pljs_jsvalue_to_datum</name>
+        <param>
+          <type>JSValue</type>
+          <declname>val</declname>
+        </param>
+        <param>
+          <type>Oid</type>
+          <declname>rettype</declname>
+        </param>
+        <param>
+          <type>JSContext *</type>
+          <declname>ctx</declname>
+        </param>
+        <param>
+          <type>FunctionCallInfo</type>
+          <declname>fcinfo</declname>
+        </param>
+        <param>
+          <type>bool *</type>
+          <declname>isnull</declname>
+        </param>
+        <briefdescription>
+<para>Converts a Javascript value to a Postgres #Datum. </para>
+        </briefdescription>
+        <detaileddescription>
+<para>Takes a Javascript value and converts it into a Postgres #Datum, checking whether it is an array or record and converting it properly.</para>
+<para><parameterlist kind="param"><parameteritem>
+<parameternamelist>
+<parametername>val</parametername>
+</parameternamelist>
+<parameterdescription>
+<para>#JSValue - the Javascript object to convert @oaram type <ref refid="structpljs__type" kindref="compound">pljs_type</ref> - type information for the record </para>
+</parameterdescription>
+</parameteritem>
+<parameteritem>
+<parameternamelist>
+<parametername>ctx</parametername>
+</parameternamelist>
+<parameterdescription>
+<para>#JSContext - Javascript context to execute in </para>
+</parameterdescription>
+</parameteritem>
+<parameteritem>
+<parameternamelist>
+<parametername>fcinfo</parametername>
+</parameternamelist>
+<parameterdescription>
+<para>#FunctionCallInfo </para>
+</parameterdescription>
+</parameteritem>
+<parameteritem>
+<parameternamelist>
+<parametername>is_null</parametername>
+</parameternamelist>
+<parameterdescription>
+<para><computeroutput>bool</computeroutput> - pointer to fill of whether the record is null </para>
+</parameterdescription>
+</parameteritem>
+</parameterlist>
+<simplesect kind="return"><para>#Datum of the Postgres value </para>
+</simplesect>
+</para>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="src/pljs.h" line="194" column="7" bodyfile="src/types.c" bodystart="809" bodyend="1128" declfile="src/pljs.h" declline="194" declcolumn="7"/>
+      </memberdef>
+      <memberdef kind="function" id="pljs_8h_1a17af57cfbc35dace923379ecff02ef2d" prot="public" static="no" const="no" explicit="no" inline="no" virt="non-virtual">
+        <type>Datum</type>
+        <definition>Datum pljs_jsvalue_to_record</definition>
+        <argsstring>(JSValue val, pljs_type *type, JSContext *ctx, bool *is_null, TupleDesc, Tuplestorestate *)</argsstring>
+        <name>pljs_jsvalue_to_record</name>
+        <param>
+          <type>JSValue</type>
+          <declname>val</declname>
+        </param>
+        <param>
+          <type><ref refid="structpljs__type" kindref="compound">pljs_type</ref> *</type>
+          <declname>type</declname>
+        </param>
+        <param>
+          <type>JSContext *</type>
+          <declname>ctx</declname>
+        </param>
+        <param>
+          <type>bool *</type>
+          <declname>is_null</declname>
+        </param>
+        <param>
+          <type>TupleDesc</type>
+          <declname>tupdesc</declname>
+        </param>
+        <param>
+          <type>Tuplestorestate *</type>
+          <declname>tupstore</declname>
+        </param>
+        <briefdescription>
+<para>Converts a Javascript object into a Postgres record. </para>
+        </briefdescription>
+        <detaileddescription>
+<para>Takes a Javascript object and converts it into a Postgres record (composite Postgres type).</para>
+<para><parameterlist kind="param"><parameteritem>
+<parameternamelist>
+<parametername>val</parametername>
+</parameternamelist>
+<parameterdescription>
+<para>#JSValue - the Javascript object to convert @oaram type <ref refid="structpljs__type" kindref="compound">pljs_type</ref> - type information for the record </para>
+</parameterdescription>
+</parameteritem>
+<parameteritem>
+<parameternamelist>
+<parametername>ctx</parametername>
+</parameternamelist>
+<parameterdescription>
+<para>#JSContext - Javascript context to execute in </para>
+</parameterdescription>
+</parameteritem>
+<parameteritem>
+<parameternamelist>
+<parametername>is_null</parametername>
+</parameternamelist>
+<parameterdescription>
+<para><computeroutput>bool</computeroutput> - pointer to fill of whether the record is null </para>
+</parameterdescription>
+</parameteritem>
+<parameteritem>
+<parameternamelist>
+<parametername>tupdesc</parametername>
+</parameternamelist>
+<parameterdescription>
+<para>#TupleDesc - can be <computeroutput>NULL</computeroutput> </para>
+</parameterdescription>
+</parameteritem>
+<parameteritem>
+<parameternamelist>
+<parametername>tupstore</parametername>
+</parameternamelist>
+<parameterdescription>
+<para>#Tuplestorestate </para>
+</parameterdescription>
+</parameteritem>
+</parameterlist>
+<simplesect kind="return"><para>#Datum of the Postgres record </para>
+</simplesect>
+</para>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="src/pljs.h" line="196" column="7" bodyfile="src/types.c" bodystart="661" bodyend="725" declfile="src/pljs.h" declline="196" declcolumn="7"/>
+      </memberdef>
+      <memberdef kind="function" id="pljs_8h_1aa76f509aae40230c00abaed4ef25cfd8" prot="public" static="no" const="no" explicit="no" inline="no" virt="non-virtual">
+        <type>uint32_t</type>
+        <definition>uint32_t pljs_js_array_length</definition>
+        <argsstring>(JSValue, JSContext *)</argsstring>
+        <name>pljs_js_array_length</name>
+        <param>
+          <type>JSValue</type>
+        </param>
+        <param>
+          <type>JSContext *</type>
+        </param>
+        <briefdescription>
+        </briefdescription>
+        <detaileddescription>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="src/pljs.h" line="200" column="10" declfile="src/pljs.h" declline="200" declcolumn="10"/>
+      </memberdef>
+      <memberdef kind="function" id="pljs_8h_1a9dee95aa24754a9289c22119709f91d8" prot="public" static="no" const="no" explicit="no" inline="no" virt="non-virtual">
+        <type>void</type>
+        <definition>void pljs_type_fill</definition>
+        <argsstring>(pljs_type *, Oid)</argsstring>
+        <name>pljs_type_fill</name>
+        <param>
+          <type><ref refid="structpljs__type" kindref="compound">pljs_type</ref> *</type>
+          <declname>type</declname>
+        </param>
+        <param>
+          <type>Oid</type>
+          <declname>typid</declname>
+        </param>
+        <briefdescription>
+<para>Converts an <computeroutput>Oid</computeroutput> into <computeroutput><ref refid="structpljs__type" kindref="compound">pljs_type</ref></computeroutput>. </para>
+        </briefdescription>
+        <detaileddescription>
+<para>Takes an input of a pointer to <computeroutput><ref refid="structpljs__type" kindref="compound">pljs_type</ref></computeroutput> and an <computeroutput>Oid</computeroutput>, and queries Postgres for enough information for type conversions between Postgres and Javascript.</para>
+<para><parameterlist kind="param"><parameteritem>
+<parameternamelist>
+<parametername>type</parametername>
+</parameternamelist>
+<parameterdescription>
+<para><ref refid="structpljs__type" kindref="compound">pljs_type</ref> - the location to store the type data </para>
+</parameterdescription>
+</parameteritem>
+<parameteritem>
+<parameternamelist>
+<parametername>typid</parametername>
+</parameternamelist>
+<parameterdescription>
+<para>#Oid - the Postgres type to decode </para>
+</parameterdescription>
+</parameteritem>
+</parameterlist>
+</para>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="src/pljs.h" line="201" column="6" bodyfile="src/types.c" bodystart="221" bodyend="246" declfile="src/pljs.h" declline="201" declcolumn="6"/>
+      </memberdef>
+      <memberdef kind="function" id="pljs_8h_1a8d4cd10406c215047974d8993dd16b15" prot="public" static="no" const="no" explicit="no" inline="no" virt="non-virtual">
+        <type>bool</type>
+        <definition>bool pljs_jsvalue_object_contains_all_column_names</definition>
+        <argsstring>(JSValue val, JSContext *ctx, TupleDesc tupdesc)</argsstring>
+        <name>pljs_jsvalue_object_contains_all_column_names</name>
+        <param>
+          <type>JSValue</type>
+          <declname>val</declname>
+        </param>
+        <param>
+          <type>JSContext *</type>
+          <declname>ctx</declname>
+        </param>
+        <param>
+          <type>TupleDesc</type>
+          <declname>tupdesc</declname>
+        </param>
+        <briefdescription>
+<para>Determines whether a Javascript object contains all of the column names. </para>
+        </briefdescription>
+        <detaileddescription>
+<para>Takes a Javascript #JSValue object and the possible column names and determines whether all of the column names are reflected in the object.</para>
+<para><parameterlist kind="param"><parameteritem>
+<parameternamelist>
+<parametername>val</parametername>
+</parameternamelist>
+<parameterdescription>
+<para>#JSValue - Javascript object to check </para>
+</parameterdescription>
+</parameteritem>
+<parameteritem>
+<parameternamelist>
+<parametername>ctx</parametername>
+</parameternamelist>
+<parameterdescription>
+<para>#JSContext - Javascript context to execute in @oaram tupdesc #TupleDesc </para>
+</parameterdescription>
+</parameteritem>
+</parameterlist>
+<simplesect kind="return"><para><computeroutput>bool</computeroutput> </para>
+</simplesect>
+</para>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="src/pljs.h" line="202" column="6" bodyfile="src/types.c" bodystart="607" bodyend="645" declfile="src/pljs.h" declline="202" declcolumn="6"/>
+      </memberdef>
+      <memberdef kind="function" id="pljs_8h_1a66adc79cc3b1babf1c8a10cfdd82d4f7" prot="public" static="no" const="no" explicit="no" inline="no" virt="non-virtual">
+        <type>JSValue</type>
+        <definition>JSValue pljs_values_to_array</definition>
+        <argsstring>(JSValue *, int, int, JSContext *)</argsstring>
+        <name>pljs_values_to_array</name>
+        <param>
+          <type>JSValue *</type>
+          <declname>array</declname>
+        </param>
+        <param>
+          <type>int</type>
+          <declname>argc</declname>
+        </param>
+        <param>
+          <type>int</type>
+          <declname>start</declname>
+        </param>
+        <param>
+          <type>JSContext *</type>
+          <declname>ctx</declname>
+        </param>
+        <briefdescription>
+<para>Converts an array of Javascript values into a Javascript array. </para>
+        </briefdescription>
+        <detaileddescription>
+<para>Takes an array Javascript values and converts it into a Javascript array of values, starting at the index requested.</para>
+<para><parameterlist kind="param"><parameteritem>
+<parameternamelist>
+<parametername>array</parametername>
+</parameternamelist>
+<parameterdescription>
+<para>#JSValue - array of #JSValue values to convert </para>
+</parameterdescription>
+</parameteritem>
+<parameteritem>
+<parameternamelist>
+<parametername>argc</parametername>
+</parameternamelist>
+<parameterdescription>
+<para><computeroutput>int</computeroutput> - number of values to convert </para>
+</parameterdescription>
+</parameteritem>
+<parameteritem>
+<parameternamelist>
+<parametername>start</parametername>
+</parameternamelist>
+<parameterdescription>
+<para><computeroutput>int</computeroutput> - index to start the conversion </para>
+</parameterdescription>
+</parameteritem>
+<parameteritem>
+<parameternamelist>
+<parametername>ctx</parametername>
+</parameternamelist>
+<parameterdescription>
+<para>#JSContext - Javascript context to execute in </para>
+</parameterdescription>
+</parameteritem>
+</parameterlist>
+<simplesect kind="return"><para>#JSValue array of the results </para>
+</simplesect>
+</para>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="src/pljs.h" line="204" column="9" bodyfile="src/types.c" bodystart="1142" bodyend="1153" declfile="src/pljs.h" declline="204" declcolumn="9"/>
+      </memberdef>
+      <memberdef kind="function" id="pljs_8h_1a8161c20a3d2af55a487a63535cf6ef44" prot="public" static="no" const="no" explicit="no" inline="no" virt="non-virtual">
+        <type>void</type>
+        <definition>void pljs_variable_param_setup</definition>
+        <argsstring>(ParseState *, void *)</argsstring>
+        <name>pljs_variable_param_setup</name>
+        <param>
+          <type>ParseState *</type>
+          <declname>pstate</declname>
+        </param>
+        <param>
+          <type>void *</type>
+          <declname>arg</declname>
+        </param>
+        <briefdescription>
+        </briefdescription>
+        <detaileddescription>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="src/pljs.h" line="205" column="6" bodyfile="src/params.c" bodystart="15" bodyend="21" declfile="src/pljs.h" declline="205" declcolumn="6"/>
+      </memberdef>
+      <memberdef kind="function" id="pljs_8h_1a99ee4b303b6b34960a16e0f0386ad2e9" prot="public" static="no" const="no" explicit="no" inline="no" virt="non-virtual">
+        <type>ParamListInfo</type>
+        <definition>ParamListInfo pljs_setup_variable_paramlist</definition>
+        <argsstring>(pljs_param_state *, Datum *, char *)</argsstring>
+        <name>pljs_setup_variable_paramlist</name>
+        <param>
+          <type><ref refid="structpljs__param__state" kindref="compound">pljs_param_state</ref> *</type>
+          <declname>parstate</declname>
+        </param>
+        <param>
+          <type>Datum *</type>
+          <declname>values</declname>
+        </param>
+        <param>
+          <type>char *</type>
+          <declname>nulls</declname>
+        </param>
+        <briefdescription>
+        </briefdescription>
+        <detaileddescription>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="src/pljs.h" line="206" column="15" bodyfile="src/params.c" bodystart="136" bodyend="153" declfile="src/pljs.h" declline="206" declcolumn="15"/>
+      </memberdef>
+    </sectiondef>
+    <briefdescription>
+    </briefdescription>
+    <detaileddescription>
+    </detaileddescription>
+    <programlisting>
+<codeline lineno="1"><highlight class="preprocessor">#pragma<sp/>once</highlight><highlight class="normal"></highlight></codeline>
+<codeline lineno="2"><highlight class="normal"></highlight></codeline>
+<codeline lineno="3"><highlight class="normal"></highlight><highlight class="preprocessor">#include<sp/>&quot;postgres.h&quot;</highlight><highlight class="normal"></highlight></codeline>
+<codeline lineno="4"><highlight class="normal"></highlight></codeline>
+<codeline lineno="5"><highlight class="normal"></highlight><highlight class="preprocessor">#include<sp/>&quot;access/heapam.h&quot;</highlight><highlight class="normal"></highlight></codeline>
+<codeline lineno="6"><highlight class="normal"></highlight><highlight class="preprocessor">#include<sp/>&quot;access/htup.h&quot;</highlight><highlight class="normal"></highlight></codeline>
+<codeline lineno="7"><highlight class="normal"></highlight><highlight class="preprocessor">#include<sp/>&quot;access/tupdesc.h&quot;</highlight><highlight class="normal"></highlight></codeline>
+<codeline lineno="8"><highlight class="normal"></highlight><highlight class="preprocessor">#include<sp/>&quot;executor/spi.h&quot;</highlight><highlight class="normal"></highlight></codeline>
+<codeline lineno="9"><highlight class="normal"></highlight><highlight class="preprocessor">#include<sp/>&quot;fmgr.h&quot;</highlight><highlight class="normal"></highlight></codeline>
+<codeline lineno="10"><highlight class="normal"></highlight><highlight class="preprocessor">#include<sp/>&quot;funcapi.h&quot;</highlight><highlight class="normal"></highlight></codeline>
+<codeline lineno="11"><highlight class="normal"></highlight><highlight class="preprocessor">#include<sp/>&quot;nodes/params.h&quot;</highlight><highlight class="normal"></highlight></codeline>
+<codeline lineno="12"><highlight class="normal"></highlight><highlight class="preprocessor">#include<sp/>&quot;parser/parse_node.h&quot;</highlight><highlight class="normal"></highlight></codeline>
+<codeline lineno="13"><highlight class="normal"></highlight><highlight class="preprocessor">#include<sp/>&quot;utils/palloc.h&quot;</highlight><highlight class="normal"></highlight></codeline>
+<codeline lineno="14"><highlight class="normal"></highlight><highlight class="preprocessor">#include<sp/>&quot;windowapi.h&quot;</highlight><highlight class="normal"></highlight></codeline>
+<codeline lineno="15"><highlight class="normal"></highlight></codeline>
+<codeline lineno="16"><highlight class="normal"></highlight><highlight class="preprocessor">#include<sp/>&quot;deps/quickjs/quickjs-libc.h&quot;</highlight><highlight class="normal"></highlight></codeline>
+<codeline lineno="17"><highlight class="normal"></highlight><highlight class="preprocessor">#include<sp/>&quot;deps/quickjs/quickjs.h&quot;</highlight><highlight class="normal"></highlight></codeline>
+<codeline lineno="18"><highlight class="normal"></highlight></codeline>
+<codeline lineno="19" refid="pljs_8h_1ad0d2d80d8062b7efa868074d309dbc26" refkind="member"><highlight class="normal"></highlight><highlight class="preprocessor">#define<sp/>STORAGE_HASH_LEN<sp/>32</highlight><highlight class="normal"></highlight></codeline>
+<codeline lineno="20"><highlight class="normal"></highlight><highlight class="preprocessor">#ifndef<sp/>PLJS_VERSION</highlight><highlight class="normal"></highlight></codeline>
+<codeline lineno="21" refid="pljs_8h_1a5e4a0c86134a1552d41790c793f5955c" refkind="member"><highlight class="normal"></highlight><highlight class="preprocessor">#define<sp/>PLJS_VERSION<sp/>&quot;unknown&quot;</highlight><highlight class="normal"></highlight></codeline>
+<codeline lineno="22"><highlight class="normal"></highlight><highlight class="preprocessor">#endif</highlight><highlight class="normal"></highlight></codeline>
+<codeline lineno="23"><highlight class="normal"></highlight></codeline>
+<codeline lineno="24"><highlight class="normal"></highlight><highlight class="comment">//<sp/>pljs<sp/>current<sp/>runtime<sp/>configuration.</highlight><highlight class="normal"></highlight></codeline>
+<codeline lineno="25" refid="structpljs__configuration" refkind="compound"><highlight class="normal"></highlight><highlight class="keyword">typedef</highlight><highlight class="normal"><sp/></highlight><highlight class="keyword">struct<sp/></highlight><highlight class="normal"><ref refid="structpljs__configuration" kindref="compound">pljs_configuration</ref><sp/>{</highlight></codeline>
+<codeline lineno="26" refid="structpljs__configuration_1ae33edf0fbbe222c6b8308c74c12570fd" refkind="member"><highlight class="normal"><sp/><sp/></highlight><highlight class="keywordtype">size_t</highlight><highlight class="normal"><sp/><ref refid="structpljs__configuration_1ae33edf0fbbe222c6b8308c74c12570fd" kindref="member">memory_limit</ref>;</highlight></codeline>
+<codeline lineno="27" refid="structpljs__configuration_1a875e712139ce94e21ba682ab9ba0c1ca" refkind="member"><highlight class="normal"><sp/><sp/></highlight><highlight class="keywordtype">char</highlight><highlight class="normal"><sp/>*<ref refid="structpljs__configuration_1a875e712139ce94e21ba682ab9ba0c1ca" kindref="member">start_proc</ref>;</highlight></codeline>
+<codeline lineno="28" refid="structpljs__configuration_1aeca934f8a5702846f60ff1343875d250" refkind="member"><highlight class="normal"><sp/><sp/></highlight><highlight class="keywordtype">int</highlight><highlight class="normal"><sp/><ref refid="structpljs__configuration_1aeca934f8a5702846f60ff1343875d250" kindref="member">execution_timeout</ref>;</highlight></codeline>
+<codeline lineno="29" refid="pljs_8h_1a07fef1cb5871c08462b0b427e462f5ca" refkind="member"><highlight class="normal">}<sp/><ref refid="structpljs__configuration" kindref="compound">pljs_configuration</ref>;</highlight></codeline>
+<codeline lineno="30"><highlight class="normal"></highlight></codeline>
+<codeline lineno="31"><highlight class="normal"></highlight><highlight class="comment">//<sp/>Global<sp/>#pljs_configuration<sp/>configuration.</highlight><highlight class="normal"></highlight></codeline>
+<codeline lineno="32"><highlight class="normal"></highlight><highlight class="keyword">extern</highlight><highlight class="normal"><sp/><ref refid="structpljs__configuration" kindref="compound">pljs_configuration</ref><sp/><ref refid="pljs_8c_1a2f33e5a8bc923e37f3637368e0641568" kindref="member">configuration</ref>;</highlight></codeline>
+<codeline lineno="33"><highlight class="normal"></highlight></codeline>
+<codeline lineno="34"><highlight class="normal"></highlight><highlight class="comment">//<sp/>quickjs<sp/>runtime.</highlight><highlight class="normal"></highlight></codeline>
+<codeline lineno="35"><highlight class="normal"></highlight><highlight class="keyword">extern</highlight><highlight class="normal"><sp/>JSRuntime<sp/>*<ref refid="pljs_8c_1a3ba489a976915ca6161baede3c439066" kindref="member">rt</ref>;</highlight></codeline>
+<codeline lineno="36"><highlight class="normal"></highlight></codeline>
+<codeline lineno="37"><highlight class="normal"></highlight><highlight class="comment">//<sp/>Cpntext<sp/>cache<sp/>value<sp/>definition.</highlight><highlight class="normal"></highlight></codeline>
+<codeline lineno="38" refid="structpljs__context__cache__value" refkind="compound"><highlight class="normal"></highlight><highlight class="keyword">typedef</highlight><highlight class="normal"><sp/></highlight><highlight class="keyword">struct<sp/></highlight><highlight class="normal"><ref refid="structpljs__context__cache__value" kindref="compound">pljs_context_cache_value</ref><sp/>{</highlight></codeline>
+<codeline lineno="39" refid="structpljs__context__cache__value_1a248e251ff303ec1a94377483f3ae9f48" refkind="member"><highlight class="normal"><sp/><sp/>Oid<sp/><ref refid="structpljs__context__cache__value_1a248e251ff303ec1a94377483f3ae9f48" kindref="member">user_id</ref>;</highlight></codeline>
+<codeline lineno="40" refid="structpljs__context__cache__value_1aae6aa4e892dd43329299e0b8ecb15022" refkind="member"><highlight class="normal"><sp/><sp/>JSContext<sp/>*<ref refid="structpljs__context__cache__value_1aae6aa4e892dd43329299e0b8ecb15022" kindref="member">ctx</ref>;</highlight></codeline>
+<codeline lineno="41" refid="structpljs__context__cache__value_1ac308e2c3500814371babf56b3cefbce7" refkind="member"><highlight class="normal"><sp/><sp/>MemoryContext<sp/><ref refid="structpljs__context__cache__value_1ac308e2c3500814371babf56b3cefbce7" kindref="member">function_memory_context</ref>;</highlight></codeline>
+<codeline lineno="42" refid="structpljs__context__cache__value_1a1d86f180f13d681e2ba79380da2f7429" refkind="member"><highlight class="normal"><sp/><sp/>HTAB<sp/>*<ref refid="structpljs__context__cache__value_1a1d86f180f13d681e2ba79380da2f7429" kindref="member">function_hash_table</ref>;</highlight></codeline>
+<codeline lineno="43" refid="pljs_8h_1ac322c257c08b5090e78f7a16ab997358" refkind="member"><highlight class="normal">}<sp/><ref refid="structpljs__context__cache__value" kindref="compound">pljs_context_cache_value</ref>;</highlight></codeline>
+<codeline lineno="44"><highlight class="normal"></highlight></codeline>
+<codeline lineno="45"><highlight class="normal"></highlight><highlight class="comment">//<sp/>Function<sp/>cache<sp/>value<sp/>defition.</highlight><highlight class="normal"></highlight></codeline>
+<codeline lineno="46" refid="structpljs__function__cache__value" refkind="compound"><highlight class="normal"></highlight><highlight class="keyword">typedef</highlight><highlight class="normal"><sp/></highlight><highlight class="keyword">struct<sp/></highlight><highlight class="normal"><ref refid="structpljs__function__cache__value" kindref="compound">pljs_function_cache_value</ref><sp/>{</highlight></codeline>
+<codeline lineno="47" refid="structpljs__function__cache__value_1a3f88fbe7e56f3b846a8388c7beb3b9db" refkind="member"><highlight class="normal"><sp/><sp/>Oid<sp/><ref refid="structpljs__function__cache__value_1a3f88fbe7e56f3b846a8388c7beb3b9db" kindref="member">fn_oid</ref>;</highlight></codeline>
+<codeline lineno="48" refid="structpljs__function__cache__value_1af50c34a90b6eb2d6a7978886b4160aaf" refkind="member"><highlight class="normal"><sp/><sp/>JSValue<sp/><ref refid="structpljs__function__cache__value_1af50c34a90b6eb2d6a7978886b4160aaf" kindref="member">fn</ref>;</highlight></codeline>
+<codeline lineno="49" refid="structpljs__function__cache__value_1a695c60f0efde40c7157f027d959fa49b" refkind="member"><highlight class="normal"><sp/><sp/>JSContext<sp/>*<ref refid="structpljs__function__cache__value_1a695c60f0efde40c7157f027d959fa49b" kindref="member">ctx</ref>;</highlight></codeline>
+<codeline lineno="50" refid="structpljs__function__cache__value_1a2f8bdd6bd67b923737925d40cd565cdb" refkind="member"><highlight class="normal"><sp/><sp/></highlight><highlight class="keywordtype">bool</highlight><highlight class="normal"><sp/><ref refid="structpljs__function__cache__value_1a2f8bdd6bd67b923737925d40cd565cdb" kindref="member">trigger</ref>;</highlight></codeline>
+<codeline lineno="51" refid="structpljs__function__cache__value_1a3feb27efe06663c9b21f3914dfc78f78" refkind="member"><highlight class="normal"><sp/><sp/>Oid<sp/><ref refid="structpljs__function__cache__value_1a3feb27efe06663c9b21f3914dfc78f78" kindref="member">user_id</ref>;</highlight></codeline>
+<codeline lineno="52" refid="structpljs__function__cache__value_1acbb150625eaf6624edb8d6e05c224dbc" refkind="member"><highlight class="normal"><sp/><sp/></highlight><highlight class="keywordtype">int</highlight><highlight class="normal"><sp/><ref refid="structpljs__function__cache__value_1acbb150625eaf6624edb8d6e05c224dbc" kindref="member">nargs</ref>;</highlight></codeline>
+<codeline lineno="53" refid="structpljs__function__cache__value_1abc5ec0e480f66ec7b80aff7b7240c725" refkind="member"><highlight class="normal"><sp/><sp/></highlight><highlight class="keywordtype">bool</highlight><highlight class="normal"><sp/><ref refid="structpljs__function__cache__value_1abc5ec0e480f66ec7b80aff7b7240c725" kindref="member">is_srf</ref>;</highlight></codeline>
+<codeline lineno="54" refid="structpljs__function__cache__value_1a3ebf8d39ab6a2625a54e936c1241c8df" refkind="member"><highlight class="normal"><sp/><sp/></highlight><highlight class="keywordtype">char</highlight><highlight class="normal"><sp/><ref refid="structpljs__function__cache__value_1a3ebf8d39ab6a2625a54e936c1241c8df" kindref="member">proname</ref>[NAMEDATALEN];</highlight></codeline>
+<codeline lineno="55" refid="structpljs__function__cache__value_1a1c943e0c1d944325cb3113e6b1708bc8" refkind="member"><highlight class="normal"><sp/><sp/>Oid<sp/><ref refid="structpljs__function__cache__value_1a1c943e0c1d944325cb3113e6b1708bc8" kindref="member">argtypes</ref>[FUNC_MAX_ARGS];</highlight></codeline>
+<codeline lineno="56" refid="structpljs__function__cache__value_1aafc64f4013d172c02d4d6770df9b4135" refkind="member"><highlight class="normal"><sp/><sp/></highlight><highlight class="keywordtype">char</highlight><highlight class="normal"><sp/><ref refid="structpljs__function__cache__value_1aafc64f4013d172c02d4d6770df9b4135" kindref="member">argmodes</ref>[FUNC_MAX_ARGS];</highlight></codeline>
+<codeline lineno="57" refid="structpljs__function__cache__value_1a37e584460aa35b197e1d27f86132a61c" refkind="member"><highlight class="normal"><sp/><sp/></highlight><highlight class="keywordtype">char</highlight><highlight class="normal"><sp/>*<ref refid="structpljs__function__cache__value_1a37e584460aa35b197e1d27f86132a61c" kindref="member">prosrc</ref>;</highlight></codeline>
+<codeline lineno="58" refid="structpljs__function__cache__value_1a0ad6031a1a5be8b4c6159dda554105d7" refkind="member"><highlight class="normal"><sp/><sp/>TypeFuncClass<sp/><ref refid="structpljs__function__cache__value_1a0ad6031a1a5be8b4c6159dda554105d7" kindref="member">typeclass</ref>;</highlight></codeline>
+<codeline lineno="59" refid="pljs_8h_1a1490a412c5b08778b63e18a158dc2aeb" refkind="member"><highlight class="normal">}<sp/><ref refid="structpljs__function__cache__value" kindref="compound">pljs_function_cache_value</ref>;</highlight></codeline>
+<codeline lineno="60"><highlight class="normal"></highlight></codeline>
+<codeline lineno="61" refid="structpljs__param__state" refkind="compound"><highlight class="normal"></highlight><highlight class="keyword">typedef</highlight><highlight class="normal"><sp/></highlight><highlight class="keyword">struct<sp/></highlight><highlight class="normal"><ref refid="structpljs__param__state" kindref="compound">pljs_param_state</ref><sp/>{</highlight></codeline>
+<codeline lineno="62" refid="structpljs__param__state_1aa2e33085da1b0db6c99b3e2b42f76392" refkind="member"><highlight class="normal"><sp/><sp/>Oid<sp/>*<ref refid="structpljs__param__state_1aa2e33085da1b0db6c99b3e2b42f76392" kindref="member">param_types</ref>;</highlight></codeline>
+<codeline lineno="63" refid="structpljs__param__state_1ae34c0c06c44fb3b1634aec3f43d4dbac" refkind="member"><highlight class="normal"><sp/><sp/></highlight><highlight class="keywordtype">int</highlight><highlight class="normal"><sp/><ref refid="structpljs__param__state_1ae34c0c06c44fb3b1634aec3f43d4dbac" kindref="member">nparams</ref>;</highlight></codeline>
+<codeline lineno="64" refid="structpljs__param__state_1ab7fe0be72b44427025dc922edf05a30c" refkind="member"><highlight class="normal"><sp/><sp/>MemoryContext<sp/><ref refid="structpljs__param__state_1ab7fe0be72b44427025dc922edf05a30c" kindref="member">memory_context</ref>;</highlight></codeline>
+<codeline lineno="65" refid="pljs_8h_1a0d3470d2c645d93e8a1ed7bb4d17e72c" refkind="member"><highlight class="normal">}<sp/><ref refid="structpljs__param__state" kindref="compound">pljs_param_state</ref>;</highlight></codeline>
+<codeline lineno="66"><highlight class="normal"></highlight></codeline>
+<codeline lineno="67" refid="structpljs__return__state" refkind="compound"><highlight class="normal"></highlight><highlight class="keyword">typedef</highlight><highlight class="normal"><sp/></highlight><highlight class="keyword">struct<sp/></highlight><highlight class="normal"><ref refid="structpljs__return__state" kindref="compound">pljs_return_state</ref><sp/>{</highlight></codeline>
+<codeline lineno="68" refid="structpljs__return__state_1a7d027fe2fe2b7ece29cc633701367656" refkind="member"><highlight class="normal"><sp/><sp/>Tuplestorestate<sp/>*<ref refid="structpljs__return__state_1a7d027fe2fe2b7ece29cc633701367656" kindref="member">tuple_store_state</ref>;</highlight></codeline>
+<codeline lineno="69" refid="structpljs__return__state_1a07989dd4645d0f97d8c5db45248f33b6" refkind="member"><highlight class="normal"><sp/><sp/>TupleDesc<sp/><ref refid="structpljs__return__state_1a07989dd4645d0f97d8c5db45248f33b6" kindref="member">tuple_desc</ref>;</highlight></codeline>
+<codeline lineno="70" refid="structpljs__return__state_1a46f98ad474ed432cfc13510e7fb73af2" refkind="member"><highlight class="normal"><sp/><sp/>Oid<sp/><ref refid="structpljs__return__state_1a46f98ad474ed432cfc13510e7fb73af2" kindref="member">rettype</ref>;</highlight></codeline>
+<codeline lineno="71" refid="structpljs__return__state_1a39aa1abe37f2c884032c045da369cb10" refkind="member"><highlight class="normal"><sp/><sp/></highlight><highlight class="keywordtype">bool</highlight><highlight class="normal"><sp/><ref refid="structpljs__return__state_1a39aa1abe37f2c884032c045da369cb10" kindref="member">is_composite</ref>;</highlight></codeline>
+<codeline lineno="72" refid="pljs_8h_1a5b1d21ccdbb8631d9a79f38ff33259d6" refkind="member"><highlight class="normal">}<sp/><ref refid="structpljs__return__state" kindref="compound">pljs_return_state</ref>;</highlight></codeline>
+<codeline lineno="73"><highlight class="normal"></highlight></codeline>
+<codeline lineno="74"><highlight class="normal"></highlight><highlight class="comment">//<sp/>Expanded<sp/>type<sp/>definitions<sp/>for<sp/>pljs.</highlight><highlight class="normal"></highlight></codeline>
+<codeline lineno="75" refid="structpljs__type" refkind="compound"><highlight class="normal"></highlight><highlight class="keyword">typedef</highlight><highlight class="normal"><sp/></highlight><highlight class="keyword">struct<sp/></highlight><highlight class="normal"><ref refid="structpljs__type" kindref="compound">pljs_type</ref><sp/>{</highlight></codeline>
+<codeline lineno="76" refid="structpljs__type_1a4e46c912be85515edf6945a89f055057" refkind="member"><highlight class="normal"><sp/><sp/>Oid<sp/><ref refid="structpljs__type_1a4e46c912be85515edf6945a89f055057" kindref="member">typid</ref>;</highlight></codeline>
+<codeline lineno="77" refid="structpljs__type_1a5ece41b994687a28782e00277ea57237" refkind="member"><highlight class="normal"><sp/><sp/>Oid<sp/><ref refid="structpljs__type_1a5ece41b994687a28782e00277ea57237" kindref="member">ioparam</ref>;</highlight></codeline>
+<codeline lineno="78" refid="structpljs__type_1a619949d1bb0313665faf8ec74f5237fe" refkind="member"><highlight class="normal"><sp/><sp/>int16<sp/><ref refid="structpljs__type_1a619949d1bb0313665faf8ec74f5237fe" kindref="member">length</ref>;</highlight></codeline>
+<codeline lineno="79" refid="structpljs__type_1a8e4efd350166b4c3d4b96d83b36d4e6b" refkind="member"><highlight class="normal"><sp/><sp/></highlight><highlight class="keywordtype">bool</highlight><highlight class="normal"><sp/><ref refid="structpljs__type_1a8e4efd350166b4c3d4b96d83b36d4e6b" kindref="member">byval</ref>;</highlight></codeline>
+<codeline lineno="80" refid="structpljs__type_1a4c2a405a791e2ebb06eacd19bedcda28" refkind="member"><highlight class="normal"><sp/><sp/></highlight><highlight class="keywordtype">char</highlight><highlight class="normal"><sp/><ref refid="structpljs__type_1a4c2a405a791e2ebb06eacd19bedcda28" kindref="member">align</ref>;</highlight></codeline>
+<codeline lineno="81" refid="structpljs__type_1af043a49253c4bf9ba7728a9f471b11fb" refkind="member"><highlight class="normal"><sp/><sp/></highlight><highlight class="keywordtype">char</highlight><highlight class="normal"><sp/><ref refid="structpljs__type_1af043a49253c4bf9ba7728a9f471b11fb" kindref="member">category</ref>;</highlight></codeline>
+<codeline lineno="82" refid="structpljs__type_1af8b4b772dac3a325dff95f5c4410c28e" refkind="member"><highlight class="normal"><sp/><sp/></highlight><highlight class="keywordtype">bool</highlight><highlight class="normal"><sp/><ref refid="structpljs__type_1af8b4b772dac3a325dff95f5c4410c28e" kindref="member">is_composite</ref>;</highlight></codeline>
+<codeline lineno="83" refid="pljs_8h_1aca725d562934879748a5dacab41c6711" refkind="member"><highlight class="normal">}<sp/><ref refid="structpljs__type" kindref="compound">pljs_type</ref>;</highlight></codeline>
+<codeline lineno="84"><highlight class="normal"></highlight></codeline>
+<codeline lineno="85"><highlight class="normal"></highlight><highlight class="comment">//<sp/>Plan<sp/>for<sp/>prepared<sp/>statements.</highlight><highlight class="normal"></highlight></codeline>
+<codeline lineno="86" refid="structpljs__plan" refkind="compound"><highlight class="normal"></highlight><highlight class="keyword">typedef</highlight><highlight class="normal"><sp/></highlight><highlight class="keyword">struct<sp/></highlight><highlight class="normal"><ref refid="structpljs__plan" kindref="compound">pljs_plan</ref><sp/>{</highlight></codeline>
+<codeline lineno="87" refid="structpljs__plan_1a9fe9008dded9d11a2a86a00f24070764" refkind="member"><highlight class="normal"><sp/><sp/>SPIPlanPtr<sp/><ref refid="structpljs__plan_1a9fe9008dded9d11a2a86a00f24070764" kindref="member">plan</ref>;</highlight></codeline>
+<codeline lineno="88" refid="structpljs__plan_1aee0e57469c8b29bf833bcfd19577e722" refkind="member"><highlight class="normal"><sp/><sp/><ref refid="structpljs__param__state" kindref="compound">pljs_param_state</ref><sp/>*<ref refid="structpljs__plan_1aee0e57469c8b29bf833bcfd19577e722" kindref="member">parstate</ref>;</highlight></codeline>
+<codeline lineno="89" refid="pljs_8h_1ad29353c353c6579367fb946737ce83ea" refkind="member"><highlight class="normal">}<sp/><ref refid="structpljs__plan" kindref="compound">pljs_plan</ref>;</highlight></codeline>
+<codeline lineno="90"><highlight class="normal"></highlight></codeline>
+<codeline lineno="91"><highlight class="normal"></highlight><highlight class="comment">//<sp/>Context<sp/>and<sp/>information<sp/>for<sp/>the<sp/>function<sp/>to<sp/>be<sp/>called.</highlight><highlight class="normal"></highlight></codeline>
+<codeline lineno="92" refid="structpljs__func" refkind="compound"><highlight class="normal"></highlight><highlight class="keyword">typedef</highlight><highlight class="normal"><sp/></highlight><highlight class="keyword">struct<sp/></highlight><highlight class="normal"><ref refid="structpljs__func" kindref="compound">pljs_func</ref><sp/>{</highlight></codeline>
+<codeline lineno="93" refid="structpljs__func_1a81e88f4aa06c82abe173fe7bcf2db06b" refkind="member"><highlight class="normal"><sp/><sp/>Oid<sp/><ref refid="structpljs__func_1a81e88f4aa06c82abe173fe7bcf2db06b" kindref="member">fn_oid</ref>;<sp/></highlight><highlight class="comment">//<sp/>function&apos;s<sp/>OID</highlight><highlight class="normal"></highlight></codeline>
+<codeline lineno="94"><highlight class="normal"></highlight></codeline>
+<codeline lineno="95" refid="structpljs__func_1ab734fee5d2f16afaf7e2914a467228ca" refkind="member"><highlight class="normal"><sp/><sp/></highlight><highlight class="keywordtype">char</highlight><highlight class="normal"><sp/><ref refid="structpljs__func_1ab734fee5d2f16afaf7e2914a467228ca" kindref="member">proname</ref>[NAMEDATALEN];<sp/></highlight><highlight class="comment">//<sp/>the<sp/>function<sp/>name</highlight><highlight class="normal"></highlight></codeline>
+<codeline lineno="96" refid="structpljs__func_1a9d085ca52338a2e4b4cbc4a3ecba7021" refkind="member"><highlight class="normal"><sp/><sp/></highlight><highlight class="keywordtype">char</highlight><highlight class="normal"><sp/>*<ref refid="structpljs__func_1a9d085ca52338a2e4b4cbc4a3ecba7021" kindref="member">prosrc</ref>;<sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/></highlight><highlight class="comment">//<sp/>a<sp/>copy<sp/>of<sp/>its<sp/>source</highlight><highlight class="normal"></highlight></codeline>
+<codeline lineno="97"><highlight class="normal"></highlight></codeline>
+<codeline lineno="98" refid="structpljs__func_1ab41ffbc9bd8f2449e3f17cd8f79d7543" refkind="member"><highlight class="normal"><sp/><sp/>TransactionId<sp/><ref refid="structpljs__func_1ab41ffbc9bd8f2449e3f17cd8f79d7543" kindref="member">fn_xmin</ref>;</highlight></codeline>
+<codeline lineno="99" refid="structpljs__func_1a4c8f8fae7bb3c4eb47c1883f8a1b7542" refkind="member"><highlight class="normal"><sp/><sp/>ItemPointerData<sp/><ref refid="structpljs__func_1a4c8f8fae7bb3c4eb47c1883f8a1b7542" kindref="member">fn_tid</ref>;</highlight></codeline>
+<codeline lineno="100" refid="structpljs__func_1a0ee38b98d26d6f70e8c6c417d997d6f8" refkind="member"><highlight class="normal"><sp/><sp/>Oid<sp/><ref refid="structpljs__func_1a0ee38b98d26d6f70e8c6c417d997d6f8" kindref="member">user_id</ref>;<sp/></highlight><highlight class="comment">//<sp/>the<sp/>user<sp/>id</highlight><highlight class="normal"></highlight></codeline>
+<codeline lineno="101"><highlight class="normal"></highlight></codeline>
+<codeline lineno="102" refid="structpljs__func_1ad28456021cc500cf5d602c69a76b286b" refkind="member"><highlight class="normal"><sp/><sp/></highlight><highlight class="keywordtype">bool</highlight><highlight class="normal"><sp/><ref refid="structpljs__func_1ad28456021cc500cf5d602c69a76b286b" kindref="member">trigger</ref>;</highlight></codeline>
+<codeline lineno="103" refid="structpljs__func_1a9a7d3ac7a2bfdeabdec418bd67325327" refkind="member"><highlight class="normal"><sp/><sp/></highlight><highlight class="keywordtype">bool</highlight><highlight class="normal"><sp/><ref refid="structpljs__func_1a9a7d3ac7a2bfdeabdec418bd67325327" kindref="member">is_srf</ref>;<sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/></highlight><highlight class="comment">//<sp/>are<sp/>we<sp/>a<sp/>set<sp/>returning<sp/>function?</highlight><highlight class="normal"></highlight></codeline>
+<codeline lineno="104" refid="structpljs__func_1aa73482da78e19df4a171b100b0cba9fe" refkind="member"><highlight class="normal"><sp/><sp/></highlight><highlight class="keywordtype">int</highlight><highlight class="normal"><sp/><ref refid="structpljs__func_1aa73482da78e19df4a171b100b0cba9fe" kindref="member">inargs</ref>;<sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/></highlight><highlight class="comment">//<sp/>the<sp/>number<sp/>of<sp/>input<sp/>arguments</highlight><highlight class="normal"></highlight></codeline>
+<codeline lineno="105" refid="structpljs__func_1a68fb14920fdf280082f9c92c5c4ca725" refkind="member"><highlight class="normal"><sp/><sp/></highlight><highlight class="keywordtype">int</highlight><highlight class="normal"><sp/><ref refid="structpljs__func_1a68fb14920fdf280082f9c92c5c4ca725" kindref="member">nargs</ref>;<sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/></highlight><highlight class="comment">//<sp/>the<sp/>total<sp/>number<sp/>of<sp/>arguments</highlight><highlight class="normal"></highlight></codeline>
+<codeline lineno="106" refid="structpljs__func_1a56ce41038c4c31cc5933049fdf0674ae" refkind="member"><highlight class="normal"><sp/><sp/>TypeFuncClass<sp/><ref refid="structpljs__func_1a56ce41038c4c31cc5933049fdf0674ae" kindref="member">typeclass</ref>;<sp/><sp/><sp/><sp/><sp/><sp/></highlight><highlight class="comment">//<sp/>used<sp/>for<sp/>SRF</highlight><highlight class="normal"></highlight></codeline>
+<codeline lineno="107" refid="structpljs__func_1a381d2e791d9d5ebe6d8281380adfe178" refkind="member"><highlight class="normal"><sp/><sp/>Oid<sp/><ref refid="structpljs__func_1a381d2e791d9d5ebe6d8281380adfe178" kindref="member">rettype</ref>;<sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/></highlight><highlight class="comment">//<sp/>the<sp/>return<sp/>type</highlight><highlight class="normal"></highlight></codeline>
+<codeline lineno="108" refid="structpljs__func_1a302237244a7023e65e9791527b613e39" refkind="member"><highlight class="normal"><sp/><sp/>Oid<sp/><ref refid="structpljs__func_1a302237244a7023e65e9791527b613e39" kindref="member">argtypes</ref>[FUNC_MAX_ARGS];<sp/><sp/></highlight><highlight class="comment">//<sp/>the<sp/>types<sp/>of<sp/>the<sp/>argument<sp/>passed</highlight><highlight class="normal"></highlight></codeline>
+<codeline lineno="109" refid="structpljs__func_1af540b171e7f3f776274504f6de370d34" refkind="member"><highlight class="normal"><sp/><sp/></highlight><highlight class="keywordtype">char</highlight><highlight class="normal"><sp/><ref refid="structpljs__func_1af540b171e7f3f776274504f6de370d34" kindref="member">argmodes</ref>[FUNC_MAX_ARGS];<sp/></highlight><highlight class="comment">//<sp/>mode<sp/>of<sp/>each<sp/>argument</highlight><highlight class="normal"></highlight></codeline>
+<codeline lineno="110" refid="pljs_8h_1a520e6519e469e820cab0a1a4182026f2" refkind="member"><highlight class="normal">}<sp/><ref refid="structpljs__func" kindref="compound">pljs_func</ref>;</highlight></codeline>
+<codeline lineno="111"><highlight class="normal"></highlight></codeline>
+<codeline lineno="112" refid="structpljs__context" refkind="compound"><highlight class="normal"></highlight><highlight class="keyword">typedef</highlight><highlight class="normal"><sp/></highlight><highlight class="keyword">struct<sp/></highlight><highlight class="normal"><ref refid="structpljs__context" kindref="compound">pljs_context</ref><sp/>{</highlight></codeline>
+<codeline lineno="113" refid="structpljs__context_1a1c5df72f824d4a2d1e187262042162d6" refkind="member"><highlight class="normal"><sp/><sp/>JSContext<sp/>*<ref refid="structpljs__context_1a1c5df72f824d4a2d1e187262042162d6" kindref="member">ctx</ref>;</highlight></codeline>
+<codeline lineno="114" refid="structpljs__context_1a25d362dd5afd7172cdecba7d653708c5" refkind="member"><highlight class="normal"><sp/><sp/>JSValue<sp/><ref refid="structpljs__context_1a25d362dd5afd7172cdecba7d653708c5" kindref="member">js_function</ref>;<sp/></highlight><highlight class="comment">//<sp/>the<sp/>function<sp/>itself</highlight><highlight class="normal"></highlight></codeline>
+<codeline lineno="115"><highlight class="normal"></highlight></codeline>
+<codeline lineno="116" refid="structpljs__context_1ae5c43d362689ceee7787830acb6d25ed" refkind="member"><highlight class="normal"><sp/><sp/></highlight><highlight class="keywordtype">char</highlight><highlight class="normal"><sp/>*<ref refid="structpljs__context_1ae5c43d362689ceee7787830acb6d25ed" kindref="member">arguments</ref>[FUNC_MAX_ARGS];</highlight></codeline>
+<codeline lineno="117" refid="structpljs__context_1ac8898e6511e62306b0325d2d8205114b" refkind="member"><highlight class="normal"><sp/><sp/>MemoryContext<sp/><ref refid="structpljs__context_1ac8898e6511e62306b0325d2d8205114b" kindref="member">memory_context</ref>;</highlight></codeline>
+<codeline lineno="118" refid="structpljs__context_1ab0a92fe04577d390c3116740508de461" refkind="member"><highlight class="normal"><sp/><sp/><ref refid="structpljs__func" kindref="compound">pljs_func</ref><sp/>*<ref refid="structpljs__context_1ab0a92fe04577d390c3116740508de461" kindref="member">function</ref>;</highlight></codeline>
+<codeline lineno="119" refid="pljs_8h_1a92c5d731f71b22b7ad7ed3d12d0dd9f9" refkind="member"><highlight class="normal">}<sp/><ref refid="structpljs__context" kindref="compound">pljs_context</ref>;</highlight></codeline>
+<codeline lineno="120"><highlight class="normal"></highlight></codeline>
+<codeline lineno="121" refid="structpljs__storage" refkind="compound"><highlight class="normal"></highlight><highlight class="keyword">typedef</highlight><highlight class="normal"><sp/></highlight><highlight class="keyword">struct<sp/></highlight><highlight class="normal"><ref refid="structpljs__storage" kindref="compound">pljs_storage</ref><sp/>{</highlight></codeline>
+<codeline lineno="122" refid="structpljs__storage_1ae177619f8f9f93bbf812e5f8cb36824b" refkind="member"><highlight class="normal"><sp/><sp/><ref refid="structpljs__return__state" kindref="compound">pljs_return_state</ref><sp/>*<ref refid="structpljs__storage_1ae177619f8f9f93bbf812e5f8cb36824b" kindref="member">return_state</ref>;</highlight></codeline>
+<codeline lineno="123" refid="structpljs__storage_1aafe9452d9c468e01b9f111626f2ddf64" refkind="member"><highlight class="normal"><sp/><sp/><ref refid="structpljs__func" kindref="compound">pljs_func</ref><sp/>*<ref refid="structpljs__storage_1aafe9452d9c468e01b9f111626f2ddf64" kindref="member">function</ref>;</highlight></codeline>
+<codeline lineno="124" refid="structpljs__storage_1a5ee47f2daae565d33adf4da1a8d70981" refkind="member"><highlight class="normal"><sp/><sp/>FunctionCallInfo<sp/><ref refid="structpljs__storage_1a5ee47f2daae565d33adf4da1a8d70981" kindref="member">fcinfo</ref>;</highlight></codeline>
+<codeline lineno="125" refid="structpljs__storage_1ab8959d35866367a1faec231c6cc5c498" refkind="member"><highlight class="normal"><sp/><sp/>WindowObject<sp/><ref refid="structpljs__storage_1ab8959d35866367a1faec231c6cc5c498" kindref="member">window_object</ref>;</highlight></codeline>
+<codeline lineno="126" refid="structpljs__storage_1a71639941493b9e873307f5689ab46fdb" refkind="member"><highlight class="normal"><sp/><sp/>MemoryContext<sp/><ref refid="structpljs__storage_1a71639941493b9e873307f5689ab46fdb" kindref="member">execution_memory_context</ref>;</highlight></codeline>
+<codeline lineno="127" refid="pljs_8h_1a6651ec531405d595c92c78e34bd0ed97" refkind="member"><highlight class="normal">}<sp/><ref refid="structpljs__storage" kindref="compound">pljs_storage</ref>;</highlight></codeline>
+<codeline lineno="128"><highlight class="normal"></highlight></codeline>
+<codeline lineno="129" refid="structpljs__window__storage" refkind="compound"><highlight class="normal"></highlight><highlight class="keyword">typedef</highlight><highlight class="normal"><sp/></highlight><highlight class="keyword">struct<sp/></highlight><highlight class="normal"><ref refid="structpljs__window__storage" kindref="compound">pljs_window_storage</ref><sp/>{</highlight></codeline>
+<codeline lineno="130" refid="structpljs__window__storage_1ad5febead5f463db5544037459cffe631" refkind="member"><highlight class="normal"><sp/><sp/></highlight><highlight class="keywordtype">size_t</highlight><highlight class="normal"><sp/><ref refid="structpljs__window__storage_1ad5febead5f463db5544037459cffe631" kindref="member">max_length</ref>;<sp/></highlight><highlight class="comment">//<sp/>allocated<sp/>memory</highlight><highlight class="normal"></highlight></codeline>
+<codeline lineno="131" refid="structpljs__window__storage_1afd3562b9d863f8facf94bb4bae41862b" refkind="member"><highlight class="normal"><sp/><sp/></highlight><highlight class="keywordtype">size_t</highlight><highlight class="normal"><sp/><ref refid="structpljs__window__storage_1afd3562b9d863f8facf94bb4bae41862b" kindref="member">length</ref>;<sp/><sp/><sp/><sp/><sp/></highlight><highlight class="comment">//<sp/>the<sp/>byte<sp/>size<sp/>of<sp/>data</highlight><highlight class="normal"></highlight></codeline>
+<codeline lineno="132" refid="structpljs__window__storage_1a3bfeb8096a608be5732acb9550b8c652" refkind="member"><highlight class="normal"><sp/><sp/></highlight><highlight class="keywordtype">char</highlight><highlight class="normal"><sp/><ref refid="structpljs__window__storage_1a3bfeb8096a608be5732acb9550b8c652" kindref="member">data</ref>[1];<sp/><sp/><sp/><sp/><sp/><sp/></highlight><highlight class="comment">//<sp/>actual<sp/>string<sp/>(without<sp/>null-termination</highlight><highlight class="normal"></highlight></codeline>
+<codeline lineno="133" refid="pljs_8h_1ae399ccc95110ddc5061031229912705c" refkind="member"><highlight class="normal">}<sp/><ref refid="structpljs__window__storage" kindref="compound">pljs_window_storage</ref>;</highlight></codeline>
+<codeline lineno="134"><highlight class="normal"></highlight></codeline>
+<codeline lineno="135"><highlight class="normal"></highlight><highlight class="keyword">extern</highlight><highlight class="normal"><sp/>JSClassID<sp/><ref refid="pljs_8c_1a547c7fe655de1d579ad374806634f87b" kindref="member">js_prepared_statement_handle_id</ref>;</highlight></codeline>
+<codeline lineno="136"><highlight class="normal"></highlight><highlight class="keyword">extern</highlight><highlight class="normal"><sp/>JSClassID<sp/><ref refid="pljs_8c_1a4fd096886ec3f8e78a13024678b0461a" kindref="member">js_cursor_handle_id</ref>;</highlight></codeline>
+<codeline lineno="137"><highlight class="normal"></highlight><highlight class="keyword">extern</highlight><highlight class="normal"><sp/>JSClassID<sp/><ref refid="pljs_8c_1a6ebe1cb0d20a2821eaa5045e38834b92" kindref="member">js_pljs_storage_id</ref>;</highlight></codeline>
+<codeline lineno="138"><highlight class="normal"></highlight><highlight class="keyword">extern</highlight><highlight class="normal"><sp/>JSClassID<sp/><ref refid="pljs_8c_1ae684e942afc4d8a2df483bd473170966" kindref="member">js_window_id</ref>;</highlight></codeline>
+<codeline lineno="139"><highlight class="normal"></highlight></codeline>
+<codeline lineno="140"><highlight class="normal"></highlight><highlight class="comment">//<sp/>pljs.c</highlight><highlight class="normal"></highlight></codeline>
+<codeline lineno="141"><highlight class="normal"></highlight></codeline>
+<codeline lineno="142"><highlight class="normal"></highlight><highlight class="comment">//<sp/>Language<sp/>call<sp/>handlers</highlight><highlight class="normal"></highlight></codeline>
+<codeline lineno="143"><highlight class="normal">Datum<sp/><ref refid="pljs_8h_1a7b3f1b74e9ed8d56963cf0d057cd3e0c" kindref="member">pljs_call_handler</ref>(PG_FUNCTION_ARGS);</highlight></codeline>
+<codeline lineno="144"><highlight class="normal">Datum<sp/><ref refid="pljs_8h_1aae27a65776a319aa74d574e180ff30d1" kindref="member">pljs_call_validator</ref>(PG_FUNCTION_ARGS);</highlight></codeline>
+<codeline lineno="145"><highlight class="normal">Datum<sp/><ref refid="pljs_8h_1ac4c0dd8dcb2cf09451fe57e08221363f" kindref="member">pljs_inline_handler</ref>(PG_FUNCTION_ARGS);</highlight></codeline>
+<codeline lineno="146"><highlight class="normal"></highlight></codeline>
+<codeline lineno="147"><highlight class="normal"></highlight><highlight class="comment">//<sp/>Extension<sp/>initialization</highlight><highlight class="normal"></highlight></codeline>
+<codeline lineno="148"><highlight class="normal"></highlight><highlight class="keywordtype">void</highlight><highlight class="normal"><sp/><ref refid="pljs_8h_1a29e1a0b0688ac19dbde93824e4ae1a59" kindref="member">_PG_init</ref>(</highlight><highlight class="keywordtype">void</highlight><highlight class="normal">);</highlight></codeline>
+<codeline lineno="149"><highlight class="normal"></highlight><highlight class="keywordtype">void</highlight><highlight class="normal"><sp/><ref refid="pljs_8h_1a8b70c9d1056c61ae1a9ad1802f2d6418" kindref="member">pljs_guc_init</ref>(</highlight><highlight class="keywordtype">void</highlight><highlight class="normal">);</highlight></codeline>
+<codeline lineno="150"><highlight class="normal"></highlight><highlight class="keywordtype">void</highlight><highlight class="normal"><sp/><ref refid="pljs_8h_1a023b4d31657b7c6aa51e7f3594e4efae" kindref="member">pljs_cache_init</ref>(</highlight><highlight class="keywordtype">void</highlight><highlight class="normal">);</highlight></codeline>
+<codeline lineno="151"><highlight class="normal"></highlight><highlight class="keywordtype">void</highlight><highlight class="normal"><sp/><ref refid="pljs_8h_1a791b7d28ece4dcd54dd041d9814270ca" kindref="member">pljs_setup_namespace</ref>(JSContext<sp/>*ctx);</highlight></codeline>
+<codeline lineno="152"><highlight class="normal"></highlight></codeline>
+<codeline lineno="153"><highlight class="normal"></highlight><highlight class="comment">//<sp/>Throw<sp/>a<sp/>Javascript<sp/>error</highlight><highlight class="normal"></highlight></codeline>
+<codeline lineno="154"><highlight class="normal">JSValue<sp/><ref refid="pljs_8h_1aafd3ae0c3a562fb1f575f9a18c779bbb" kindref="member">js_throw</ref>(</highlight><highlight class="keyword">const</highlight><highlight class="normal"><sp/></highlight><highlight class="keywordtype">char</highlight><highlight class="normal"><sp/>*,<sp/>JSContext<sp/>*);</highlight></codeline>
+<codeline lineno="155"><highlight class="normal"></highlight></codeline>
+<codeline lineno="156"><highlight class="normal"></highlight><highlight class="comment">//<sp/>Functions</highlight><highlight class="normal"></highlight></codeline>
+<codeline lineno="157"><highlight class="normal">JSValue<sp/><ref refid="pljs_8h_1afe2893544542bcd57a59eb8de200db84" kindref="member">pljs_compile_function</ref>(<ref refid="structpljs__context" kindref="compound">pljs_context</ref><sp/>*context,<sp/></highlight><highlight class="keywordtype">bool</highlight><highlight class="normal"><sp/>is_trigger);</highlight></codeline>
+<codeline lineno="158"><highlight class="normal">JSValue<sp/><ref refid="pljs_8h_1a52d1faeecd9f81a777833865400af6a4" kindref="member">pljs_find_js_function</ref>(Oid<sp/>fn_oid,<sp/>JSContext<sp/>*ctx);</highlight></codeline>
+<codeline lineno="159"><highlight class="normal"></highlight><highlight class="keywordtype">bool</highlight><highlight class="normal"><sp/><ref refid="pljs_8h_1a2f00028bcded68c78b0c4a92eb60fc76" kindref="member">pljs_has_permission_to_execute</ref>(</highlight><highlight class="keyword">const</highlight><highlight class="normal"><sp/></highlight><highlight class="keywordtype">char</highlight><highlight class="normal"><sp/>*signature);</highlight></codeline>
+<codeline lineno="160"><highlight class="normal"><ref refid="structpljs__storage" kindref="compound">pljs_storage</ref><sp/>*<ref refid="pljs_8h_1acd7a69e7499abdb35111679f8fe3a4e6" kindref="member">pljs_storage_for_context</ref>(JSContext<sp/>*ctx);</highlight></codeline>
+<codeline lineno="161"><highlight class="normal"></highlight></codeline>
+<codeline lineno="162"><highlight class="normal"></highlight><highlight class="comment">//<sp/>cache.c</highlight><highlight class="normal"></highlight></codeline>
+<codeline lineno="163"><highlight class="normal"></highlight></codeline>
+<codeline lineno="164"><highlight class="normal"></highlight><highlight class="comment">//<sp/>Contexts</highlight><highlight class="normal"></highlight></codeline>
+<codeline lineno="165"><highlight class="normal"></highlight><highlight class="keywordtype">void</highlight><highlight class="normal"><sp/><ref refid="pljs_8h_1aa287787fed1bce9d7047ebcc492e44e2" kindref="member">pljs_cache_context_add</ref>(Oid,<sp/>JSContext<sp/>*);</highlight></codeline>
+<codeline lineno="166"><highlight class="normal"></highlight><highlight class="keywordtype">void</highlight><highlight class="normal"><sp/><ref refid="pljs_8h_1ad6d0e32942e142c2839a8857dc8b0753" kindref="member">pljs_cache_context_remove</ref>(Oid);</highlight></codeline>
+<codeline lineno="167"><highlight class="normal"><ref refid="structpljs__context__cache__value" kindref="compound">pljs_context_cache_value</ref><sp/>*<ref refid="pljs_8h_1af7187372a9c8d6c4d76188ae7927f270" kindref="member">pljs_cache_context_find</ref>(Oid<sp/>user_id);</highlight></codeline>
+<codeline lineno="168"><highlight class="normal"></highlight></codeline>
+<codeline lineno="169"><highlight class="normal"></highlight><highlight class="comment">//<sp/>Functions</highlight><highlight class="normal"></highlight></codeline>
+<codeline lineno="170"><highlight class="normal"><ref refid="structpljs__function__cache__value" kindref="compound">pljs_function_cache_value</ref><sp/>*<ref refid="pljs_8h_1af93a799eb6018084c41cef176eaca2d4" kindref="member">pljs_cache_function_find</ref>(Oid<sp/>user_id,<sp/>Oid<sp/>fn_oid);</highlight></codeline>
+<codeline lineno="171"><highlight class="normal"></highlight><highlight class="keywordtype">void</highlight><highlight class="normal"><sp/><ref refid="pljs_8h_1a951f671ac3fb4cbd071796fc2ed34785" kindref="member">pljs_cache_function_add</ref>(<ref refid="structpljs__context" kindref="compound">pljs_context</ref><sp/>*context);</highlight></codeline>
+<codeline lineno="172"><highlight class="normal"></highlight></codeline>
+<codeline lineno="173"><highlight class="normal"></highlight><highlight class="comment">//<sp/>Serialization<sp/>and<sp/>Deserialization</highlight><highlight class="normal"></highlight></codeline>
+<codeline lineno="174"><highlight class="normal"></highlight><highlight class="keywordtype">void</highlight><highlight class="normal"><sp/><ref refid="pljs_8h_1a31ddb06762e63be6911dcd4fa6b41d02" kindref="member">pljs_function_cache_to_context</ref>(<ref refid="structpljs__context" kindref="compound">pljs_context</ref><sp/>*,</highlight></codeline>
+<codeline lineno="175"><highlight class="normal"><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><ref refid="structpljs__function__cache__value" kindref="compound">pljs_function_cache_value</ref><sp/>*);</highlight></codeline>
+<codeline lineno="176"><highlight class="normal"></highlight><highlight class="keywordtype">void</highlight><highlight class="normal"><sp/><ref refid="pljs_8h_1a0ea8b25fcfd4640a01392c284eac189f" kindref="member">pljs_context_to_function_cache</ref>(<ref refid="structpljs__function__cache__value" kindref="compound">pljs_function_cache_value</ref><sp/>*function_entry,</highlight></codeline>
+<codeline lineno="177"><highlight class="normal"><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><ref refid="structpljs__context" kindref="compound">pljs_context</ref><sp/>*context);</highlight></codeline>
+<codeline lineno="178"><highlight class="normal"></highlight><highlight class="comment">//<sp/>Utility</highlight><highlight class="normal"></highlight></codeline>
+<codeline lineno="179"><highlight class="normal"></highlight><highlight class="keywordtype">void</highlight><highlight class="normal"><sp/><ref refid="pljs_8h_1a413e1a83b7dabb756801a57fba2f688e" kindref="member">pljs_cache_reset</ref>(</highlight><highlight class="keywordtype">void</highlight><highlight class="normal">);</highlight></codeline>
+<codeline lineno="180"><highlight class="normal"></highlight></codeline>
+<codeline lineno="181"><highlight class="normal"></highlight><highlight class="comment">//<sp/>type.c</highlight><highlight class="normal"></highlight></codeline>
+<codeline lineno="182"><highlight class="normal"></highlight></codeline>
+<codeline lineno="183"><highlight class="normal"></highlight><highlight class="comment">//<sp/>To<sp/>Javascript</highlight><highlight class="normal"></highlight></codeline>
+<codeline lineno="184"><highlight class="normal">JSValue<sp/><ref refid="pljs_8h_1a89fed90e2d89c886f56909af85059c8e" kindref="member">pljs_datum_to_jsvalue</ref>(Datum<sp/>arg,<sp/>Oid<sp/>type,<sp/>JSContext<sp/>*ctx,</highlight></codeline>
+<codeline lineno="185"><highlight class="normal"><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/></highlight><highlight class="keywordtype">bool</highlight><highlight class="normal"><sp/>skip_composite);</highlight></codeline>
+<codeline lineno="186"><highlight class="normal">JSValue<sp/><ref refid="pljs_8h_1af6a5b7d501192c78d7efb7c2ed2f54e5" kindref="member">pljs_datum_to_array</ref>(Datum<sp/>arg,<sp/><ref refid="structpljs__type" kindref="compound">pljs_type</ref><sp/>*type,<sp/>JSContext<sp/>*ctx);</highlight></codeline>
+<codeline lineno="187"><highlight class="normal">JSValue<sp/><ref refid="pljs_8h_1afd84f85b9402760e769999b1bbdfa6fe" kindref="member">pljs_datum_to_object</ref>(Datum<sp/>arg,<sp/><ref refid="structpljs__type" kindref="compound">pljs_type</ref><sp/>*type,<sp/>JSContext<sp/>*ctx);</highlight></codeline>
+<codeline lineno="188"><highlight class="normal">JSValue<sp/><ref refid="pljs_8h_1a9383e27220bfc8475a7eb89a70301311" kindref="member">pljs_tuple_to_jsvalue</ref>(TupleDesc,<sp/>HeapTuple,<sp/>JSContext<sp/>*ctx);</highlight></codeline>
+<codeline lineno="189"><highlight class="normal">JSValue<sp/><ref refid="pljs_8h_1a9e360aa81d6fdf0e57763c6cd4411d24" kindref="member">pljs_spi_result_to_jsvalue</ref>(</highlight><highlight class="keywordtype">int</highlight><highlight class="normal">,<sp/>JSContext<sp/>*);</highlight></codeline>
+<codeline lineno="190"><highlight class="normal"></highlight></codeline>
+<codeline lineno="191"><highlight class="normal"></highlight><highlight class="comment">//<sp/>To<sp/>Datum</highlight><highlight class="normal"></highlight></codeline>
+<codeline lineno="192"><highlight class="normal">Datum<sp/><ref refid="pljs_8h_1a508186530f48c250ef1fe345e85af811" kindref="member">pljs_jsvalue_to_array</ref>(JSValue,<sp/><ref refid="structpljs__type" kindref="compound">pljs_type</ref><sp/>*,<sp/>JSContext<sp/>*,</highlight></codeline>
+<codeline lineno="193"><highlight class="normal"><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/>FunctionCallInfo);</highlight></codeline>
+<codeline lineno="194"><highlight class="normal">Datum<sp/><ref refid="pljs_8h_1aa0ccea12a81f6a553cd5cf7d9306d2a5" kindref="member">pljs_jsvalue_to_datum</ref>(JSValue,<sp/>Oid,<sp/>JSContext<sp/>*,<sp/>FunctionCallInfo,</highlight></codeline>
+<codeline lineno="195"><highlight class="normal"><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/></highlight><highlight class="keywordtype">bool</highlight><highlight class="normal"><sp/>*);</highlight></codeline>
+<codeline lineno="196"><highlight class="normal">Datum<sp/><ref refid="pljs_8h_1a17af57cfbc35dace923379ecff02ef2d" kindref="member">pljs_jsvalue_to_record</ref>(JSValue<sp/>val,<sp/><ref refid="structpljs__type" kindref="compound">pljs_type</ref><sp/>*type,<sp/>JSContext<sp/>*ctx,</highlight></codeline>
+<codeline lineno="197"><highlight class="normal"><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/></highlight><highlight class="keywordtype">bool</highlight><highlight class="normal"><sp/>*is_null,<sp/>TupleDesc,<sp/>Tuplestorestate<sp/>*);</highlight></codeline>
+<codeline lineno="198"><highlight class="normal"></highlight></codeline>
+<codeline lineno="199"><highlight class="normal"></highlight><highlight class="comment">//<sp/>Utility</highlight><highlight class="normal"></highlight></codeline>
+<codeline lineno="200" refid="pljs_8h_1aa76f509aae40230c00abaed4ef25cfd8" refkind="member"><highlight class="normal">uint32_t<sp/><ref refid="pljs_8h_1aa76f509aae40230c00abaed4ef25cfd8" kindref="member">pljs_js_array_length</ref>(JSValue,<sp/>JSContext<sp/>*);</highlight></codeline>
+<codeline lineno="201"><highlight class="normal"></highlight><highlight class="keywordtype">void</highlight><highlight class="normal"><sp/><ref refid="pljs_8h_1a9dee95aa24754a9289c22119709f91d8" kindref="member">pljs_type_fill</ref>(<ref refid="structpljs__type" kindref="compound">pljs_type</ref><sp/>*,<sp/>Oid);</highlight></codeline>
+<codeline lineno="202"><highlight class="normal"></highlight><highlight class="keywordtype">bool</highlight><highlight class="normal"><sp/><ref refid="pljs_8h_1a8d4cd10406c215047974d8993dd16b15" kindref="member">pljs_jsvalue_object_contains_all_column_names</ref>(JSValue<sp/>val,<sp/>JSContext<sp/>*ctx,</highlight></codeline>
+<codeline lineno="203"><highlight class="normal"><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/>TupleDesc<sp/>tupdesc);</highlight></codeline>
+<codeline lineno="204"><highlight class="normal">JSValue<sp/><ref refid="pljs_8h_1a66adc79cc3b1babf1c8a10cfdd82d4f7" kindref="member">pljs_values_to_array</ref>(JSValue<sp/>*,<sp/></highlight><highlight class="keywordtype">int</highlight><highlight class="normal">,<sp/></highlight><highlight class="keywordtype">int</highlight><highlight class="normal">,<sp/>JSContext<sp/>*);</highlight></codeline>
+<codeline lineno="205"><highlight class="normal"></highlight><highlight class="keywordtype">void</highlight><highlight class="normal"><sp/><ref refid="pljs_8h_1a8161c20a3d2af55a487a63535cf6ef44" kindref="member">pljs_variable_param_setup</ref>(ParseState<sp/>*,<sp/></highlight><highlight class="keywordtype">void</highlight><highlight class="normal"><sp/>*);</highlight></codeline>
+<codeline lineno="206"><highlight class="normal">ParamListInfo<sp/><ref refid="pljs_8h_1a99ee4b303b6b34960a16e0f0386ad2e9" kindref="member">pljs_setup_variable_paramlist</ref>(<ref refid="structpljs__param__state" kindref="compound">pljs_param_state</ref><sp/>*,<sp/>Datum<sp/>*,</highlight></codeline>
+<codeline lineno="207"><highlight class="normal"><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/><sp/></highlight><highlight class="keywordtype">char</highlight><highlight class="normal"><sp/>*);</highlight></codeline>
+    </programlisting>
+    <location file="src/pljs.h"/>
+  </compounddef>
+</doxygen>
