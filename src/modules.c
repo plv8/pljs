@@ -1,4 +1,3 @@
-#include "deps/quickjs/quickjs.h"
 #include "postgres.h"
 
 #include "access/genam.h"
