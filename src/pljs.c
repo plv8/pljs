@@ -849,7 +849,8 @@ static void call_anonymous_function(const char *source, JSContext *ctx) {
   JS_SetInterruptHandler(JS_GetRuntime(ctx), interrupt_handler, NULL);
   os_pending_signals &= ~((uint64_t)1 << SIGINT);
 
-  JSValue val = JS_Eval(ctx, src.data, strlen(src.data), "<function>", 0);
+  JSValue val = JS_Eval(ctx, src.data, strlen(src.data), "<function>",
+                        JS_EVAL_TYPE_MODULE);
 
   if (!JS_IsException(val)) {
     pfree(src.data);

@@ -1564,9 +1564,33 @@ static JSValue pljs_gc(JSContext *ctx, JSValueConst this_val, int argc,
 }
 #endif
 
+static inline bool JS_IsModule(JSValueConst v) {
+  return JS_VALUE_GET_TAG(v) == JS_TAG_MODULE;
+}
+
+void log_names_for_object(JSContext *ctx, JSValue val) {
+  uint32_t object_keys_length = 0;
+  JSPropertyEnum *tab;
+
+  if (JS_GetOwnPropertyNames(ctx, &tab, &object_keys_length, val,
+                             JS_GPN_STRING_MASK) < 0) {
+    elog(NOTICE, "no properties");
+    return;
+  }
+
+  elog(NOTICE, "object has %d properties", object_keys_length);
+
+  for (uint32_t object_key = 0; object_key < object_keys_length; object_key++) {
+    const char *atom = JS_AtomToCString(ctx, tab[object_key].atom);
+
+    elog(NOTICE, "property: %s", atom);
+    JS_FreeCString(ctx, atom);
+  }
+}
+
 void log_type(JSContext *ctx, JSValue val) {
-  if (JS_IsException(val)) {
-    elog(NOTICE, "is exception");
+  if (JS_IsUndefined(val)) {
+    elog(NOTICE, "is undefined");
   }
 
   if (JS_IsException(val)) {
@@ -1583,6 +1607,7 @@ void log_type(JSContext *ctx, JSValue val) {
 
   if (JS_IsObject(val)) {
     elog(NOTICE, "is object");
+    log_names_for_object(ctx, val);
   }
 
   if (JS_IsNull(val)) {
@@ -1596,7 +1621,17 @@ void log_type(JSContext *ctx, JSValue val) {
   if (JS_IsFunction(ctx, val)) {
     elog(NOTICE, "is function");
   }
+
+  if (JS_IsSymbol(val)) {
+    elog(NOTICE, "is symbol");
+  }
+
+  if (JS_IsModule(val)) {
+    elog(NOTICE, "is module");
+  }
 }
+
+int js_resolve_module(JSContext *ctx, JSModuleDef *m);
 
 static JSValue pljs_import(JSContext *ctx, JSValueConst this_val, int argc,
                            JSValueConst *argv) {
@@ -1613,15 +1648,19 @@ static JSValue pljs_import(JSContext *ctx, JSValueConst this_val, int argc,
   JSValue ret = pljs_module_load(ctx, path);
   elog(NOTICE, "have ret");
   log_type(ctx, ret);
+  JSModuleDef *m = JS_VALUE_GET_PTR(ret);
+  JS_FreeValue(ctx, ret);
 
-  ret = JS_EvalFunction(ctx, ret);
-  elog(NOTICE, "evald function");
-  log_type(ctx, ret);
+  js_resolve_module(ctx, m);
+
+  JSValue v = JS_GetModuleNamespace(ctx, m);
+  log_type(ctx, v);
+
   // ret = js_std_await(ctx, ret);
   // log_type(ctx, ret);
   elog(NOTICE, "returning");
 
-  return ret;
+  return v;
 }
 
 /**

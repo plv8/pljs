@@ -9,6 +9,8 @@
 
 #include "pljs.h"
 
+#include <execinfo.h>
+
 enum module_data_access {
   Amodule_path = 1,
   Amodule_source,
@@ -170,6 +172,8 @@ JSValue pljs_module_load(JSContext *ctx, const char *module_name) {
   return func_val;
 }
 
+void log_type(JSContext *ctx, JSValue val);
+
 /**
  * @brief Import a JavaScript module from the databse.
  *
@@ -184,6 +188,16 @@ JSValue pljs_module_load(JSContext *ctx, const char *module_name) {
 JSModuleDef *pljs_defaultjs_module_loader(JSContext *ctx,
                                           const char *module_name,
                                           void *opaque) {
+  // Retrieve the stacktrace
+  void *array[10];
+  size_t size = backtrace(array, 10);
+  char **strings = backtrace_symbols(array, size);
+
+  // Log the stacktrace
+  for (size_t i = 0; i < size; i++) {
+    elog(NOTICE, "Stacktrace: %s", strings[i]);
+  }
+
   JSModuleDef *m;
 
   JSValue func_val = pljs_module_load(ctx, module_name);
@@ -196,5 +210,7 @@ JSModuleDef *pljs_defaultjs_module_loader(JSContext *ctx,
   m = JS_VALUE_GET_PTR(func_val);
   JS_FreeValue(ctx, func_val);
 
+  JSValue v = JS_GetModuleNamespace(ctx, m);
+  log_type(ctx, v);
   return m;
 }
