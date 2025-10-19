@@ -645,6 +645,73 @@ bool pljs_jsvalue_object_contains_all_column_names(JSValue val, JSContext *ctx,
 }
 
 /**
+ * @brief Converts a composite Javascript object into an array of Datums.
+ *
+ * Takes a Javascript object and converts it into an array of Datums, setting
+ * the null flag for each Datum if it is null.  Note that this function assumes
+ * that `nulls` is allocated and initialied to `0` (`false`) for each element.
+ *
+ * @param val #JSValue - the Javascript object to convert
+ * @oaram type #pljs_type - type information for the record
+ * @param ctx #JSContext - Javascript context to execute in
+ * @param is_null @c bool - pointer to fill of whether the record is null
+ * @param tupdesc #TupleDesc - can be `NULL`
+ * @returns Array of #Datum of the Javascript object
+ */
+Datum *pljs_jsvalue_to_datums(JSValue val, pljs_type *type, JSContext *ctx,
+                              bool **nulls, TupleDesc tupdesc) {
+  Datum *values = (Datum *)palloc(sizeof(Datum) * tupdesc->natts);
+
+  if (JS_IsNull(val) || JS_IsUndefined(val)) {
+    return NULL;
+  }
+
+  // If we are not passed a tuple descriptor, then we need to look it up and
+  // release it after we are done.
+  bool cleanup_tupdesc = false;
+
+  if (tupdesc == NULL) {
+    Oid rettype = type->typid;
+
+    tupdesc = lookup_rowtype_tupdesc(rettype, -1);
+    cleanup_tupdesc = true;
+  }
+
+  if (tupdesc != NULL) {
+    for (int16 c = 0; c < tupdesc->natts; c++) {
+      // If this is a dropped column, we can skip it, and set the null flag to
+      // true.
+      if (TupleDescAttr(tupdesc, c)->attisdropped) {
+        *nulls[c] = true;
+        continue;
+      }
+
+      // Retrieve the column name of each attribute that we are expecting, we
+      // only care about named tuples.
+      char *colname = NameStr(TupleDescAttr(tupdesc, c)->attname);
+
+      JSValue o = JS_GetPropertyStr(ctx, val, colname);
+
+      if (JS_IsNull(o) || JS_IsUndefined(o)) {
+        *nulls[c] = true;
+        continue;
+      }
+
+      // Set the value of each Datum, or set the `nulls` flag if it is
+      // considered `NULL`.
+      values[c] = pljs_jsvalue_to_datum(o, TupleDescAttr(tupdesc, c)->atttypid,
+                                        ctx, NULL, nulls[c]);
+    }
+
+    if (cleanup_tupdesc) {
+      ReleaseTupleDesc(tupdesc);
+    }
+  }
+
+  return values;
+}
+
+/**
  * @brief Converts a Javascript object into a Postgres record.
  *
  * Takes a Javascript object and converts it into a Postgres
@@ -655,40 +722,33 @@ bool pljs_jsvalue_object_contains_all_column_names(JSValue val, JSContext *ctx,
  * @param ctx #JSContext - Javascript context to execute in
  * @param is_null @c bool - pointer to fill of whether the record is null
  * @param tupdesc #TupleDesc - can be `NULL`
- * @param tupstore #Tuplestorestate
  * @returns #Datum of the Postgres record
  */
 Datum pljs_jsvalue_to_record(JSValue val, pljs_type *type, JSContext *ctx,
-                             bool *is_null, TupleDesc tupdesc,
-                             Tuplestorestate *tupstore) {
+                             bool *is_null, TupleDesc tupdesc) {
   Datum result = 0;
 
+  // If the value is null or undefined, we can simply set the record to null
+  // and return a `NULL` Datum.
   if (JS_IsNull(val) || JS_IsUndefined(val)) {
     *is_null = true;
     return (Datum)0;
   }
 
+  // If we are not passed a tuple descriptor, then we need to look it up and
+  // release it after we are done.
   bool cleanup_tupdesc = false;
-  PG_TRY();
-  {
-    if (tupdesc == NULL) {
-      Oid rettype = type->typid;
 
-      tupdesc = lookup_rowtype_tupdesc(rettype, -1);
-      cleanup_tupdesc = true;
-    }
+  if (tupdesc == NULL) {
+    Oid rettype = type->typid;
+
+    tupdesc = lookup_rowtype_tupdesc(rettype, -1);
+    cleanup_tupdesc = true;
   }
-  PG_CATCH();
-  {
-    PG_RE_THROW();
-  }
-  PG_END_TRY();
 
   if (tupdesc != NULL) {
-    Datum *values = (Datum *)palloc(sizeof(Datum) * tupdesc->natts);
-    bool *nulls = (bool *)palloc(sizeof(bool) * tupdesc->natts);
-
-    memset(nulls, 0, sizeof(bool) * tupdesc->natts);
+    Datum *values = (Datum *)palloc0(sizeof(Datum) * tupdesc->natts);
+    bool *nulls = (bool *)palloc0(sizeof(bool) * tupdesc->natts);
 
     for (int16 c = 0; c < tupdesc->natts; c++) {
       if (TupleDescAttr(tupdesc, c)->attisdropped) {
@@ -709,12 +769,12 @@ Datum pljs_jsvalue_to_record(JSValue val, pljs_type *type, JSContext *ctx,
                                         ctx, NULL, &nulls[c]);
     }
 
-    if (tupstore != NULL) {
-      result = (Datum)0;
-      tuplestore_putvalues(tupstore, tupdesc, values, nulls);
-    } else {
-      result = HeapTupleGetDatum(heap_form_tuple(tupdesc, values, nulls));
-    }
+    // Form a Tuple from the values and nulls using the tuple descriptor
+    // as the template for the tuple.
+    result = HeapTupleGetDatum(heap_form_tuple(tupdesc, values, nulls));
+
+    pfree(nulls);
+    pfree(values);
 
     if (cleanup_tupdesc) {
       ReleaseTupleDesc(tupdesc);
@@ -822,7 +882,7 @@ Datum pljs_jsvalue_to_datum(JSValue val, Oid rettype, JSContext *ctx,
   }
 
   if (type.is_composite) {
-    return pljs_jsvalue_to_record(val, &type, ctx, isnull, NULL, NULL);
+    return pljs_jsvalue_to_record(val, &type, ctx, isnull, NULL);
   }
 
   if (JS_IsNull(val) || JS_IsUndefined(val)) {

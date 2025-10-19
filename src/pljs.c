@@ -986,8 +986,7 @@ static Datum call_trigger(FunctionCallInfo fcinfo, pljs_context *context) {
 
     pljs_type type;
     pljs_type_fill(&type, context->function->rettype);
-    Datum d =
-        pljs_jsvalue_to_record(ret, &type, context->ctx, NULL, tupdesc, NULL);
+    Datum d = pljs_jsvalue_to_record(ret, &type, context->ctx, NULL, tupdesc);
 
     HeapTupleHeader header = DatumGetHeapTupleHeader(d);
 
@@ -1056,7 +1055,7 @@ static Datum call_function(FunctionCallInfo fcinfo, pljs_context *context,
     /* Shuts up the compiler, since ereports of ERROR stop execution. */
     return (Datum)0;
   } else {
-    Datum datum;
+    Datum datum = 0;
 
     if (rettype == RECORDOID) {
       TupleDesc tupdesc;
@@ -1065,8 +1064,7 @@ static Datum call_function(FunctionCallInfo fcinfo, pljs_context *context,
       pljs_type type;
       pljs_type_fill(&type, rettype);
 
-      datum =
-          pljs_jsvalue_to_record(ret, &type, context->ctx, NULL, tupdesc, NULL);
+      datum = pljs_jsvalue_to_record(ret, &type, context->ctx, NULL, tupdesc);
     } else {
       bool is_null;
       datum =
@@ -1183,14 +1181,21 @@ static Datum call_srf_function(FunctionCallInfo fcinfo, pljs_context *context,
     return (Datum)0;
   } else {
     // Check to see if we have any values to append
-    if (!JS_IsUndefined(ret) || !JS_IsNull(ret)) {
+    if (!JS_IsUndefined(ret) && !JS_IsNull(ret)) {
       MemoryContextSwitchTo(rsinfo->econtext->ecxt_per_query_memory);
 
-      bool is_null;
+      bool is_null = false;
 
       if (state->is_composite) {
-        pljs_jsvalue_to_record(ret, NULL, context->ctx, &is_null,
-                               state->tuple_desc, state->tuple_store_state);
+        bool *nulls = (bool *)palloc0(sizeof(bool) * state->tuple_desc->natts);
+
+        Datum *values = pljs_jsvalue_to_datums(argv[0], NULL, context->ctx,
+                                               &nulls, state->tuple_desc);
+        tuplestore_putvalues(state->tuple_store_state, state->tuple_desc,
+                             values, nulls);
+
+        pfree(nulls);
+        pfree(values);
       } else {
         if (JS_IsArray(context->ctx, ret)) {
           for (uint32_t i = 0; i < pljs_js_array_length(ret, context->ctx);

@@ -1069,9 +1069,15 @@ static JSValue pljs_return_next(JSContext *ctx, JSValueConst this_val, int argc,
       return js_throw("field name / property name mismatch", ctx);
     }
 
-    bool is_null = false;
-    pljs_jsvalue_to_record(argv[0], NULL, ctx, &is_null, retstate->tuple_desc,
-                           retstate->tuple_store_state);
+    bool *nulls = (bool *)palloc0(sizeof(bool) * retstate->tuple_desc->natts);
+    Datum *values = pljs_jsvalue_to_datums(argv[0], NULL, ctx, &nulls,
+                                           retstate->tuple_desc);
+
+    tuplestore_putvalues(retstate->tuple_store_state, retstate->tuple_desc,
+                         values, nulls);
+
+    pfree(nulls);
+    pfree(values);
   } else {
     bool is_null = false;
     Datum result = pljs_jsvalue_to_datum(

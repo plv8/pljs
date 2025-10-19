@@ -188,13 +188,15 @@ JSValue pljs_datum_to_object(Datum arg, pljs_type *type, JSContext *ctx);
 JSValue pljs_tuple_to_jsvalue(TupleDesc, HeapTuple, JSContext *ctx);
 JSValue pljs_spi_result_to_jsvalue(int, JSContext *);
 
-// To Datum
+// To Postgres
 Datum pljs_jsvalue_to_array(JSValue, pljs_type *, JSContext *,
                             FunctionCallInfo);
 Datum pljs_jsvalue_to_datum(JSValue, Oid, JSContext *, FunctionCallInfo,
                             bool *);
 Datum pljs_jsvalue_to_record(JSValue val, pljs_type *type, JSContext *ctx,
-                             bool *is_null, TupleDesc, Tuplestorestate *);
+                             bool *is_null, TupleDesc);
+Datum *pljs_jsvalue_to_datums(JSValue val, pljs_type *type, JSContext *ctx,
+                              bool **nulls, TupleDesc tupdesc);
 
 // Utility
 uint32_t pljs_js_array_length(JSValue, JSContext *);
