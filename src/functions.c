@@ -362,7 +362,7 @@ static int pljs_execute_params(const char *sql, JSValue params,
     JSValue param = JS_GetPropertyUint32(ctx, params, i);
     bool is_null;
 
-    values[i] = pljs_jsvalue_to_datum(param, parstate.param_types[i], ctx, NULL,
+    values[i] = pljs_jsvalue_to_datum(parstate.param_types[i], param, ctx, NULL,
                                       &is_null);
 
     JS_FreeValue(ctx, param);
@@ -441,7 +441,7 @@ static JSValue pljs_plan_execute(JSContext *ctx, JSValueConst this_val,
     bool is_null;
 
     values[i] = pljs_jsvalue_to_datum(
-        param, plan->parstate ? plan->parstate->param_types[i] : 0, ctx, NULL,
+        plan->parstate ? plan->parstate->param_types[i] : 0, param, ctx, NULL,
         &is_null);
 
     JS_FreeValue(ctx, param);
@@ -739,7 +739,7 @@ static JSValue pljs_plan_cursor(JSContext *ctx, JSValueConst this_val, int argc,
     bool is_null;
 
     values[i] = pljs_jsvalue_to_datum(
-        param, plan->parstate ? plan->parstate->param_types[i] : 0, ctx, NULL,
+        plan->parstate ? plan->parstate->param_types[i] : 0, param, ctx, NULL,
         &is_null);
   }
 
@@ -1070,7 +1070,7 @@ static JSValue pljs_return_next(JSContext *ctx, JSValueConst this_val, int argc,
     }
 
     bool *nulls = (bool *)palloc0(sizeof(bool) * retstate->tuple_desc->natts);
-    Datum *values = pljs_jsvalue_to_datums(argv[0], NULL, ctx, &nulls,
+    Datum *values = pljs_jsvalue_to_datums(NULL, argv[0], ctx, &nulls,
                                            retstate->tuple_desc);
 
     tuplestore_putvalues(retstate->tuple_store_state, retstate->tuple_desc,
@@ -1080,9 +1080,9 @@ static JSValue pljs_return_next(JSContext *ctx, JSValueConst this_val, int argc,
     pfree(values);
   } else {
     bool is_null = false;
-    Datum result = pljs_jsvalue_to_datum(
-        argv[0], TupleDescAttr(retstate->tuple_desc, 0)->atttypid, ctx, NULL,
-        &is_null);
+    Datum result =
+        pljs_jsvalue_to_datum(TupleDescAttr(retstate->tuple_desc, 0)->atttypid,
+                              argv[0], ctx, NULL, &is_null);
     tuplestore_putvalues(retstate->tuple_store_state, retstate->tuple_desc,
                          &result, &is_null);
   }
@@ -1378,7 +1378,7 @@ static JSValue pljs_window_get_func_arg_in_partition(JSContext *ctx,
     return JS_UNDEFINED;
   }
 
-  return pljs_datum_to_jsvalue(res, storage->function->argtypes[argno], ctx,
+  return pljs_datum_to_jsvalue(storage->function->argtypes[argno], res, ctx,
                                false);
 }
 
@@ -1424,7 +1424,7 @@ static JSValue pljs_window_get_func_arg_in_frame(JSContext *ctx,
   if (isout) {
     return JS_UNDEFINED;
   }
-  return pljs_datum_to_jsvalue(res, storage->function->argtypes[argno], ctx,
+  return pljs_datum_to_jsvalue(storage->function->argtypes[argno], res, ctx,
                                false);
 }
 
@@ -1456,7 +1456,7 @@ static JSValue pljs_window_get_func_arg_current(JSContext *ctx,
   }
   PG_END_TRY();
 
-  return pljs_datum_to_jsvalue(res, storage->function->argtypes[argno], ctx,
+  return pljs_datum_to_jsvalue(storage->function->argtypes[argno], res, ctx,
                                false);
 }
 

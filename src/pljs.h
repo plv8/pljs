@@ -181,22 +181,22 @@ void pljs_cache_reset(void);
 // type.c
 
 // To Javascript
-JSValue pljs_datum_to_jsvalue(Datum arg, Oid type, JSContext *ctx,
+JSValue pljs_datum_to_jsvalue(Oid type, Datum arg, JSContext *ctx,
                               bool skip_composite);
-JSValue pljs_datum_to_array(Datum arg, pljs_type *type, JSContext *ctx);
-JSValue pljs_datum_to_object(Datum arg, pljs_type *type, JSContext *ctx);
+JSValue pljs_datum_to_array(pljs_type *type, Datum arg, JSContext *ctx);
+JSValue pljs_datum_to_object(pljs_type *type, Datum arg, JSContext *ctx);
 JSValue pljs_tuple_to_jsvalue(TupleDesc, HeapTuple, JSContext *ctx);
 JSValue pljs_spi_result_to_jsvalue(int, JSContext *);
 
 // To Postgres
-Datum pljs_jsvalue_to_array(JSValue, pljs_type *, JSContext *,
+Datum pljs_jsvalue_to_array(pljs_type *, JSValue, JSContext *,
                             FunctionCallInfo);
-Datum pljs_jsvalue_to_datum(JSValue, Oid, JSContext *, FunctionCallInfo,
-                            bool *);
-Datum pljs_jsvalue_to_record(JSValue val, pljs_type *type, JSContext *ctx,
+Datum pljs_jsvalue_to_datum(Oid, JSValue, JSContext *, FunctionCallInfo,
+                            bool *is_null);
+Datum pljs_jsvalue_to_record(pljs_type *type, JSValue val, JSContext *ctx,
                              bool *is_null, TupleDesc);
-Datum *pljs_jsvalue_to_datums(JSValue val, pljs_type *type, JSContext *ctx,
-                              bool **nulls, TupleDesc tupdesc);
+Datum *pljs_jsvalue_to_datums(pljs_type *type, JSValue val, JSContext *ctx,
+                              bool **is_null, TupleDesc tupdesc);
 
 // Utility
 uint32_t pljs_js_array_length(JSValue, JSContext *);

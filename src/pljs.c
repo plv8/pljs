@@ -432,7 +432,7 @@ static JSValueConst *convert_arguments_to_javascript(FunctionCallInfo fcinfo,
       if (isnull) {
         argv[i] = JS_NULL;
       } else {
-        argv[i] = pljs_datum_to_jsvalue(arg, argtypes[i], context->ctx, true);
+        argv[i] = pljs_datum_to_jsvalue(argtypes[i], arg, context->ctx, true);
       }
     }
   } else {
@@ -456,8 +456,8 @@ static JSValueConst *convert_arguments_to_javascript(FunctionCallInfo fcinfo,
       if (fcinfo->args[inargs].isnull == 1) {
         argv[inargs] = JS_NULL;
       } else {
-        argv[inargs] = pljs_datum_to_jsvalue(fcinfo->args[inargs].value,
-                                             argtype, context->ctx, false);
+        argv[inargs] = pljs_datum_to_jsvalue(
+            argtype, fcinfo->args[inargs].value, context->ctx, false);
       }
 
       inargs++;
@@ -986,7 +986,7 @@ static Datum call_trigger(FunctionCallInfo fcinfo, pljs_context *context) {
 
     pljs_type type;
     pljs_type_fill(&type, context->function->rettype);
-    Datum d = pljs_jsvalue_to_record(ret, &type, context->ctx, NULL, tupdesc);
+    Datum d = pljs_jsvalue_to_record(&type, ret, context->ctx, NULL, tupdesc);
 
     HeapTupleHeader header = DatumGetHeapTupleHeader(d);
 
@@ -1064,11 +1064,11 @@ static Datum call_function(FunctionCallInfo fcinfo, pljs_context *context,
       pljs_type type;
       pljs_type_fill(&type, rettype);
 
-      datum = pljs_jsvalue_to_record(ret, &type, context->ctx, NULL, tupdesc);
+      datum = pljs_jsvalue_to_record(&type, ret, context->ctx, NULL, tupdesc);
     } else {
       bool is_null;
       datum =
-          pljs_jsvalue_to_datum(ret, rettype, context->ctx, fcinfo, &is_null);
+          pljs_jsvalue_to_datum(rettype, ret, context->ctx, fcinfo, &is_null);
     }
 
     JS_FreeValue(context->ctx, ret);
@@ -1189,7 +1189,7 @@ static Datum call_srf_function(FunctionCallInfo fcinfo, pljs_context *context,
       if (state->is_composite) {
         bool *nulls = (bool *)palloc0(sizeof(bool) * state->tuple_desc->natts);
 
-        Datum *values = pljs_jsvalue_to_datums(argv[0], NULL, context->ctx,
+        Datum *values = pljs_jsvalue_to_datums(NULL, argv[0], context->ctx,
                                                &nulls, state->tuple_desc);
         tuplestore_putvalues(state->tuple_store_state, state->tuple_desc,
                              values, nulls);
@@ -1203,7 +1203,7 @@ static Datum call_srf_function(FunctionCallInfo fcinfo, pljs_context *context,
             JSValue val = JS_GetPropertyUint32(context->ctx, ret, i);
 
             Datum result = pljs_jsvalue_to_datum(
-                val, TupleDescAttr(state->tuple_desc, 0)->atttypid,
+                TupleDescAttr(state->tuple_desc, 0)->atttypid, val,
                 context->ctx, NULL, &is_null);
             tuplestore_putvalues(state->tuple_store_state, state->tuple_desc,
                                  &result, &is_null);
@@ -1211,7 +1211,7 @@ static Datum call_srf_function(FunctionCallInfo fcinfo, pljs_context *context,
         } else {
           if (!JS_IsUndefined(ret)) {
             Datum result = pljs_jsvalue_to_datum(
-                ret, TupleDescAttr(state->tuple_desc, 0)->atttypid,
+                TupleDescAttr(state->tuple_desc, 0)->atttypid, ret,
                 context->ctx, NULL, &is_null);
 
             tuplestore_putvalues(state->tuple_store_state, state->tuple_desc,

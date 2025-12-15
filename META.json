@@ -17,9 +17,9 @@
   },
   "provides": {
     "pljs": {
-      "file": "pljs--1.0.3.sql",
+      "file": "pljs--1.0.4.sql",
       "docfile": "README.md",
-      "version": "1.0.3",
+      "version": "1.0.4",
       "abstract": "PLJS trusted procedural language"
     }
   },

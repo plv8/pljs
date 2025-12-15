@@ -251,12 +251,12 @@ void pljs_type_fill(pljs_type *type, Oid typid) {
  * Takes a #Datum and converts it to a Javascript object.  If there is
  * an error, throws a Javascript exception.
  *
- * @param arg #Datum - value to convert
  * @param type #pljs_type - type information of the #Datum
+ * @param arg #Datum - value to convert
  * @param ctx #JSContext - Javascript context to execute in
  * @returns #JSValue of the object or thrown exception in case of error
  */
-JSValue pljs_datum_to_object(Datum arg, pljs_type *type, JSContext *ctx) {
+JSValue pljs_datum_to_object(pljs_type *type, Datum arg, JSContext *ctx) {
   if (arg == 0) {
     return JS_UNDEFINED;
   }
@@ -311,7 +311,7 @@ JSValue pljs_datum_to_object(Datum arg, pljs_type *type, JSContext *ctx) {
       } else {
         JS_SetPropertyStr(
             ctx, obj, colname,
-            pljs_datum_to_jsvalue(datum, TupleDescAttr(tupdesc, i)->atttypid,
+            pljs_datum_to_jsvalue(TupleDescAttr(tupdesc, i)->atttypid, datum,
                                   ctx, false));
       }
     }
@@ -328,12 +328,12 @@ JSValue pljs_datum_to_object(Datum arg, pljs_type *type, JSContext *ctx) {
  * Takes a Postgres #Datum and type and converts it into a Javascript
  * array.  All properties are set, including array length.
  *
+ * @param type #pljs_type - type information for the array
  * @param arg #Datum - Postgres array to convert
- * @oaram type #pljs_type - type information for the array
  * @param ctx #JSContext - Javascript context to execute in
  * @returns #JSValue of the array
  */
-JSValue pljs_datum_to_array(Datum arg, pljs_type *type, JSContext *ctx) {
+JSValue pljs_datum_to_array(pljs_type *type, Datum arg, JSContext *ctx) {
   JSValue array = JS_NewArray(ctx);
   Datum *values;
   bool *nulls;
@@ -345,7 +345,7 @@ JSValue pljs_datum_to_array(Datum arg, pljs_type *type, JSContext *ctx) {
   for (int i = 0; i < nelems; i++) {
     JSValue value =
         nulls[i] ? JS_NULL
-                 : pljs_datum_to_jsvalue(values[i], type->typid, ctx, false);
+                 : pljs_datum_to_jsvalue(type->typid, values[i], ctx, false);
 
     JS_SetPropertyUint32(ctx, array, i, value);
   }
@@ -406,13 +406,13 @@ static JSValue pljs_datum_to_jsvalue_default(Datum arg, pljs_type type,
  * is directly converted, even if it is composite.  There is currently
  * only one case for this: conversion from a window function.
  *
+ * @param argtype #Oid - type information for the type
  * @param arg #Datum - Postgres array to convert
- * @oaram type #pljs_type - type information for the type
  * @param ctx #JSContext - Javascript context to execute in
  * @param skip_composite @c bool - whether to skip the composite check
  * @returns #JSValue of the value, or JS_NULL if unable to convert
  */
-JSValue pljs_datum_to_jsvalue(Datum arg, Oid argtype, JSContext *ctx,
+JSValue pljs_datum_to_jsvalue(Oid argtype, Datum arg, JSContext *ctx,
                               bool skip_composite) {
   JSValue return_result;
   char *str;
@@ -421,11 +421,11 @@ JSValue pljs_datum_to_jsvalue(Datum arg, Oid argtype, JSContext *ctx,
   pljs_type_fill(&type, argtype);
 
   if (type.category == TYPCATEGORY_ARRAY) {
-    return pljs_datum_to_array(arg, &type, ctx);
+    return pljs_datum_to_array(&type, arg, ctx);
   }
 
   if (!skip_composite && type.is_composite) {
-    return pljs_datum_to_object(arg, &type, ctx);
+    return pljs_datum_to_object(&type, arg, ctx);
   }
 
   switch (type.typid) {
@@ -549,13 +549,13 @@ JSValue pljs_datum_to_jsvalue(Datum arg, Oid argtype, JSContext *ctx,
  * Takes a Javascript #JSValue of an array and type and converts
  * it into a Postgres array.
  *
+ * @param type #pljs_type - type information for the array
  * @param val #JSValue - Javascript array to convert
- * @oaram type #pljs_type - type information for the array
  * @param ctx #JSContext - Javascript context to execute in
  * @param fcinfo #FunctionCallInfo - needed to conversion back to a #Datum
  * @returns #Datum of the array
  */
-Datum pljs_jsvalue_to_array(JSValue val, pljs_type *type, JSContext *ctx,
+Datum pljs_jsvalue_to_array(pljs_type *type, JSValue val, JSContext *ctx,
                             FunctionCallInfo fcinfo) {
   ArrayType *result;
   Datum *values;
@@ -579,7 +579,7 @@ Datum pljs_jsvalue_to_array(JSValue val, pljs_type *type, JSContext *ctx,
       nulls[i] = true;
     } else {
       values[i] =
-          pljs_jsvalue_to_datum(elem, type->typid, ctx, fcinfo, &nulls[i]);
+          pljs_jsvalue_to_datum(type->typid, elem, ctx, fcinfo, &nulls[i]);
     }
   }
 
@@ -649,17 +649,17 @@ bool pljs_jsvalue_object_contains_all_column_names(JSValue val, JSContext *ctx,
  *
  * Takes a Javascript object and converts it into an array of Datums, setting
  * the null flag for each Datum if it is null.  Note that this function assumes
- * that `nulls` is allocated and initialied to `0` (`false`) for each element.
+ * that `is_null` is allocated and initialied to `0` (`false`) for each element.
  *
+ * @param type #pljs_type - type information for the record
  * @param val #JSValue - the Javascript object to convert
- * @oaram type #pljs_type - type information for the record
  * @param ctx #JSContext - Javascript context to execute in
- * @param is_null @c bool - pointer to fill of whether the record is null
+ * @param is_null @c bool - pointer to array of null flags for each element
  * @param tupdesc #TupleDesc - can be `NULL`
  * @returns Array of #Datum of the Javascript object
  */
-Datum *pljs_jsvalue_to_datums(JSValue val, pljs_type *type, JSContext *ctx,
-                              bool **nulls, TupleDesc tupdesc) {
+Datum *pljs_jsvalue_to_datums(pljs_type *type, JSValue val, JSContext *ctx,
+                              bool **is_null, TupleDesc tupdesc) {
   Datum *values = (Datum *)palloc(sizeof(Datum) * tupdesc->natts);
 
   if (JS_IsNull(val) || JS_IsUndefined(val)) {
@@ -682,7 +682,7 @@ Datum *pljs_jsvalue_to_datums(JSValue val, pljs_type *type, JSContext *ctx,
       // If this is a dropped column, we can skip it, and set the null flag to
       // true.
       if (TupleDescAttr(tupdesc, c)->attisdropped) {
-        *nulls[c] = true;
+        (*is_null)[c] = true;
         continue;
       }
 
@@ -693,14 +693,14 @@ Datum *pljs_jsvalue_to_datums(JSValue val, pljs_type *type, JSContext *ctx,
       JSValue o = JS_GetPropertyStr(ctx, val, colname);
 
       if (JS_IsNull(o) || JS_IsUndefined(o)) {
-        *nulls[c] = true;
+        (*is_null)[c] = true;
         continue;
       }
 
-      // Set the value of each Datum, or set the `nulls` flag if it is
+      // Set the value of each Datum, or set the `is_null` flag if it is
       // considered `NULL`.
-      values[c] = pljs_jsvalue_to_datum(o, TupleDescAttr(tupdesc, c)->atttypid,
-                                        ctx, NULL, nulls[c]);
+      values[c] = pljs_jsvalue_to_datum(TupleDescAttr(tupdesc, c)->atttypid, o,
+                                        ctx, NULL, &(*is_null)[c]);
     }
 
     if (cleanup_tupdesc) {
@@ -717,14 +717,14 @@ Datum *pljs_jsvalue_to_datums(JSValue val, pljs_type *type, JSContext *ctx,
  * Takes a Javascript object and converts it into a Postgres
  * record (composite Postgres type).
  *
+ * @param type #pljs_type - type information for the record
  * @param val #JSValue - the Javascript object to convert
- * @oaram type #pljs_type - type information for the record
  * @param ctx #JSContext - Javascript context to execute in
  * @param is_null @c bool - pointer to fill of whether the record is null
  * @param tupdesc #TupleDesc - can be `NULL`
  * @returns #Datum of the Postgres record
  */
-Datum pljs_jsvalue_to_record(JSValue val, pljs_type *type, JSContext *ctx,
+Datum pljs_jsvalue_to_record(pljs_type *type, JSValue val, JSContext *ctx,
                              bool *is_null, TupleDesc tupdesc) {
   Datum result = 0;
 
@@ -765,7 +765,7 @@ Datum pljs_jsvalue_to_record(JSValue val, pljs_type *type, JSContext *ctx,
         continue;
       }
 
-      values[c] = pljs_jsvalue_to_datum(o, TupleDescAttr(tupdesc, c)->atttypid,
+      values[c] = pljs_jsvalue_to_datum(TupleDescAttr(tupdesc, c)->atttypid, o,
                                         ctx, NULL, &nulls[c]);
     }
 
@@ -795,22 +795,22 @@ Datum pljs_jsvalue_to_record(JSValue val, pljs_type *type, JSContext *ctx,
  * a `varlena` will be used and the size set appropriately.
  *
  * @param value #JSValue - Javascript to convert
- * @param isnull
+ * @param is_null @c bool - pointer to fill of whether the value is null
  * @param type #pljs_type - type of the datum
  * @param ctx #JSContext - Javascript context
  * @returns #Datum conversion of the JSValue
  */
-static Datum jsvalue_to_datum_default(JSValue value, bool *isnull,
+static Datum jsvalue_to_datum_default(JSValue value, bool *is_null,
                                       pljs_type type, JSContext *ctx) {
   Datum ret = 0;
 
   // Set whether the Datum is `NULL` or not.
   JSValue is_set_null_value = JS_GetPropertyStr(ctx, value, "is_null");
-  *isnull = JS_ToBool(ctx, is_set_null_value);
+  *is_null = JS_ToBool(ctx, is_set_null_value);
 
   // If the value's property of `null` is set to `true`, we return an empty
   // Datum.
-  if (*isnull) {
+  if (*is_null) {
     return (Datum)0;
   }
 
@@ -859,22 +859,22 @@ static Datum jsvalue_to_datum_default(JSValue value, bool *isnull,
  * checking whether it is an array or record and converting it
  * properly.
  *
+ * @param rettype #Oid - type information for the record
  * @param val #JSValue - the Javascript object to convert
- * @oaram type #pljs_type - type information for the record
  * @param ctx #JSContext - Javascript context to execute in
  * @param fcinfo #FunctionCallInfo
  * @param is_null @c bool - pointer to fill of whether the record is null
  * @returns #Datum of the Postgres value
  */
-Datum pljs_jsvalue_to_datum(JSValue val, Oid rettype, JSContext *ctx,
-                            FunctionCallInfo fcinfo, bool *isnull) {
+Datum pljs_jsvalue_to_datum(Oid rettype, JSValue val, JSContext *ctx,
+                            FunctionCallInfo fcinfo, bool *is_null) {
 
   pljs_type type;
 
   pljs_type_fill(&type, rettype);
 
   if (type.typid != JSONOID && type.typid != JSONBOID && JS_IsArray(ctx, val)) {
-    return pljs_jsvalue_to_array(val, &type, ctx, fcinfo);
+    return pljs_jsvalue_to_array(&type, val, ctx, fcinfo);
   }
 
   if (type.category == TYPCATEGORY_ARRAY && !JS_IsArray(ctx, val)) {
@@ -882,15 +882,15 @@ Datum pljs_jsvalue_to_datum(JSValue val, Oid rettype, JSContext *ctx,
   }
 
   if (type.is_composite) {
-    return pljs_jsvalue_to_record(val, &type, ctx, isnull, NULL);
+    return pljs_jsvalue_to_record(&type, val, ctx, is_null, NULL);
   }
 
   if (JS_IsNull(val) || JS_IsUndefined(val)) {
     if (fcinfo) {
       PG_RETURN_NULL();
     } else {
-      if (isnull) {
-        *isnull = true;
+      if (is_null) {
+        *is_null = true;
       }
 
       PG_RETURN_NULL();
@@ -1180,7 +1180,7 @@ Datum pljs_jsvalue_to_datum(JSValue val, Oid rettype, JSContext *ctx,
     break;
 
   default:
-    return jsvalue_to_datum_default(val, isnull, type, ctx);
+    return jsvalue_to_datum_default(val, is_null, type, ctx);
   }
 
   // shut up, compiler
@@ -1240,7 +1240,7 @@ JSValue pljs_tuple_to_jsvalue(TupleDesc tupledesc, HeapTuple heap_tuple,
     } else {
       JS_SetPropertyStr(
           ctx, obj, name,
-          pljs_datum_to_jsvalue(datum, tuple_attrs->atttypid, ctx, false));
+          pljs_datum_to_jsvalue(tuple_attrs->atttypid, datum, ctx, false));
     }
   }
 

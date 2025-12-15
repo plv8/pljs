@@ -29,8 +29,10 @@ Released _August 20, 2025_.
 
 - PGXN release went out with an incorrect control file
 
-### 1.1.0
+### 1.0.4
 
 - Up memory default limit to 512MB
 - Remove unnecessary include from modules.c
 - Remove extra running of GC after each execution
+- Better handling of SRF's, including freeing resources
+- Increased test timeouts to accommodate slower CI machines
