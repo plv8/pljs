@@ -427,13 +427,11 @@ static JSValueConst *convert_arguments_to_javascript(FunctionCallInfo fcinfo,
 
   if (WindowObjectIsValid(window_obj)) {
     for (int i = 0; i < nargs; i++) {
-      bool isnull;
-      Datum arg = WinGetFuncArgCurrent(window_obj, i, &isnull);
-      if (isnull) {
-        argv[i] = JS_NULL;
-      } else {
-        argv[i] = pljs_datum_to_jsvalue(argtypes[i], arg, context->ctx, true);
-      }
+      bool is_null;
+      Datum arg = WinGetFuncArgCurrent(window_obj, i, &is_null);
+      // Window functions: expand_composite=false (skip composite expansion)
+      argv[i] =
+          pljs_datum_to_jsvalue(argtypes[i], arg, is_null, false, context->ctx);
     }
   } else {
     for (int i = 0; i < nargs; i++) {
@@ -453,12 +451,10 @@ static JSValueConst *convert_arguments_to_javascript(FunctionCallInfo fcinfo,
       if (fcinfo && IsPolymorphicType(argtype)) {
         argtype = get_fn_expr_argtype(fcinfo->flinfo, i);
       }
-      if (fcinfo->args[inargs].isnull == 1) {
-        argv[inargs] = JS_NULL;
-      } else {
-        argv[inargs] = pljs_datum_to_jsvalue(
-            argtype, fcinfo->args[inargs].value, context->ctx, false);
-      }
+      bool is_null = (fcinfo->args[inargs].isnull == 1);
+      // Regular functions: expand_composite=true (expand composite types)
+      argv[inargs] = pljs_datum_to_jsvalue(argtype, fcinfo->args[inargs].value,
+                                           is_null, true, context->ctx);
 
       inargs++;
     }
@@ -1068,7 +1064,7 @@ static Datum call_function(FunctionCallInfo fcinfo, pljs_context *context,
     } else {
       bool is_null;
       datum =
-          pljs_jsvalue_to_datum(rettype, ret, context->ctx, fcinfo, &is_null);
+          pljs_jsvalue_to_datum(rettype, ret, &is_null, context->ctx, fcinfo);
     }
 
     JS_FreeValue(context->ctx, ret);
@@ -1203,16 +1199,16 @@ static Datum call_srf_function(FunctionCallInfo fcinfo, pljs_context *context,
             JSValue val = JS_GetPropertyUint32(context->ctx, ret, i);
 
             Datum result = pljs_jsvalue_to_datum(
-                TupleDescAttr(state->tuple_desc, 0)->atttypid, val,
-                context->ctx, NULL, &is_null);
+                TupleDescAttr(state->tuple_desc, 0)->atttypid, val, &is_null,
+                context->ctx, NULL);
             tuplestore_putvalues(state->tuple_store_state, state->tuple_desc,
                                  &result, &is_null);
           }
         } else {
           if (!JS_IsUndefined(ret)) {
             Datum result = pljs_jsvalue_to_datum(
-                TupleDescAttr(state->tuple_desc, 0)->atttypid, ret,
-                context->ctx, NULL, &is_null);
+                TupleDescAttr(state->tuple_desc, 0)->atttypid, ret, &is_null,
+                context->ctx, NULL);
 
             tuplestore_putvalues(state->tuple_store_state, state->tuple_desc,
                                  &result, &is_null);

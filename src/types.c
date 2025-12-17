@@ -20,6 +20,19 @@
 
 #include <string.h>
 
+/*
+ * Error handling helper macros for consistent error patterns.
+ */
+#define PLJS_THROW_IF_NULL(ptr, msg, ctx)                                      \
+  do {                                                                         \
+    if ((ptr) == NULL) {                                                       \
+      return js_throw((msg), (ctx));                                           \
+    }                                                                          \
+  } while (0)
+
+#define PLJS_THROW_TYPE_ERROR(expected, ctx)                                   \
+  js_throw("expected " expected " type", (ctx))
+
 // Helper functions that should really exist as part of quickjs.
 static JSClassID JS_CLASS_OBJECT = 1;
 static JSClassID JS_CLASS_DATE = 10;
@@ -72,7 +85,7 @@ static Jsonb *convert_object(JSValue object, JSContext *ctx);
  * @param @c double Javascript epoch
  * @returns #Datum of type `DATEADT`
  */
-static Datum epoch_to_date(double epoch) {
+static Datum pljs_convert_epoch_to_date(double epoch) {
   epoch -= (POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE) * 86400000.0;
 
 #ifdef HAVE_INT64_TIMESTAMP
@@ -89,7 +102,7 @@ static Datum epoch_to_date(double epoch) {
  * @param @c double Javascript epoch
  * @returns #Datum of a timestamptz
  */
-static Datum epoch_to_timestamptz(double epoch) {
+static Datum pljs_convert_epoch_to_timestamptz(double epoch) {
   epoch -= (POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE) * 86400000.0;
 
 #ifdef HAVE_INT64_TIMESTAMP
@@ -105,7 +118,7 @@ static Datum epoch_to_timestamptz(double epoch) {
  * @param #Datum of type `DateADT`
  * @returns @c double Javascript epoch
  */
-static double date_to_epoch(DateADT date) {
+static double pljs_convert_date_to_epoch(DateADT date) {
   double epoch;
 
 #ifdef HAVE_INT64_TIMESTAMP
@@ -123,7 +136,7 @@ static double date_to_epoch(DateADT date) {
  * @param #Datum of type `TimestampTz`
  * @returns @c double Javascript epoch
  */
-static double timestamptz_to_epoch(TimestampTz tm) {
+static double pljs_convert_timestamptz_to_epoch(TimestampTz tm) {
   double epoch;
 
 #ifdef HAVE_INT64_TIMESTAMP
@@ -145,7 +158,7 @@ static double timestamptz_to_epoch(TimestampTz tm) {
  * @param what #text - string to duplicate
  * @returns @c char * copy of the text field
  */
-static char *dup_pgtext(text *what) {
+static char *pljs_util_dup_pgtext(text *what) {
   size_t len = VARSIZE(what) - VARHDRSZ;
   char *dup = palloc(len + 1);
 
@@ -158,7 +171,7 @@ static char *dup_pgtext(text *what) {
 /**
  * @brief Converts an SPI status into static text.
  */
-static const char *spi_status_string(int status) {
+static const char *pljs_util_spi_status_string(int status) {
   static char private_buf[1024];
 
   if (status > 0)
@@ -246,6 +259,31 @@ void pljs_type_fill(pljs_type *type, Oid typid) {
 }
 
 /**
+ * @brief Helper to get or lookup a TupleDesc with consistent ownership
+ * semantics.
+ *
+ * If a TupleDesc is provided, it is used directly and needs_release is set to
+ * false. If NULL is provided, a TupleDesc is looked up from the type OID and
+ * needs_release is set to true, indicating the caller must call
+ * ReleaseTupleDesc when done.
+ *
+ * @param typid #Oid - the type OID to look up if provided is NULL
+ * @param provided #TupleDesc - optional pre-existing TupleDesc to use
+ * @param needs_release @c bool* - output indicating if caller must release
+ * @returns #TupleDesc the tuple descriptor to use
+ */
+static TupleDesc pljs_get_tupdesc(Oid typid, TupleDesc provided,
+                                  bool *needs_release) {
+  if (provided != NULL) {
+    *needs_release = false;
+    return provided;
+  }
+
+  *needs_release = true;
+  return lookup_rowtype_tupdesc(typid, -1);
+}
+
+/**
  * @brief Converts a #Datum for a Javascript object.
  *
  * Takes a #Datum and converts it to a Javascript object.  If there is
@@ -306,14 +344,10 @@ JSValue pljs_datum_to_object(pljs_type *type, Datum arg, JSContext *ctx) {
 
       datum = heap_getattr(&tuple, i + 1, tupdesc, &isnull);
 
-      if (isnull) {
-        JS_SetPropertyStr(ctx, obj, colname, JS_NULL);
-      } else {
-        JS_SetPropertyStr(
-            ctx, obj, colname,
-            pljs_datum_to_jsvalue(TupleDescAttr(tupdesc, i)->atttypid, datum,
-                                  ctx, false));
-      }
+      JS_SetPropertyStr(
+          ctx, obj, colname,
+          pljs_datum_to_jsvalue(TupleDescAttr(tupdesc, i)->atttypid, datum,
+                                isnull, true, ctx));
     }
 
     ReleaseTupleDesc(tupdesc);
@@ -344,8 +378,7 @@ JSValue pljs_datum_to_array(pljs_type *type, Datum arg, JSContext *ctx) {
 
   for (int i = 0; i < nelems; i++) {
     JSValue value =
-        nulls[i] ? JS_NULL
-                 : pljs_datum_to_jsvalue(type->typid, values[i], ctx, false);
+        pljs_datum_to_jsvalue(type->typid, values[i], nulls[i], true, ctx);
 
     JS_SetPropertyUint32(ctx, array, i, value);
   }
@@ -360,7 +393,7 @@ JSValue pljs_datum_to_array(pljs_type *type, Datum arg, JSContext *ctx) {
 }
 
 /**
- * @brief Default type conversion from @Datum to @JSValue.
+ * @brief Fallback type conversion from @Datum to @JSValue.
  *
  * If a type is unknown, instead of returning `undefined` or `NULL`, do a
  * `cstring` or `varlena`, or value based conversion to an `String` or `Int32`
@@ -376,8 +409,8 @@ JSValue pljs_datum_to_array(pljs_type *type, Datum arg, JSContext *ctx) {
  * @param ctx #JSContext - Javascript context
  * @returns #JSValue conversion of the Datum
  */
-static JSValue pljs_datum_to_jsvalue_default(Datum arg, pljs_type type,
-                                             JSContext *ctx) {
+static JSValue pljs_datum_to_jsvalue_fallback(Datum arg, pljs_type type,
+                                              JSContext *ctx) {
   JSValue ret = JS_UNDEFINED;
 
   if (type.byval) {
@@ -402,18 +435,23 @@ static JSValue pljs_datum_to_jsvalue_default(Datum arg, pljs_type type,
  *
  * Takes a Postgres #Datum and type and converts it into a Javascript
  * value.  If the type is an array or is composite, then call out to
- * the correct functions.  If `skip_composite` is true, then the value
- * is directly converted, even if it is composite.  There is currently
- * only one case for this: conversion from a window function.
+ * the correct functions.
  *
  * @param argtype #Oid - type information for the type
- * @param arg #Datum - Postgres array to convert
+ * @param arg #Datum - Postgres value to convert
+ * @param is_null @c bool - whether the datum is null
+ * @param expand_composite @c bool - whether to expand composite types to
+ * objects
  * @param ctx #JSContext - Javascript context to execute in
- * @param skip_composite @c bool - whether to skip the composite check
- * @returns #JSValue of the value, or JS_NULL if unable to convert
+ * @returns #JSValue of the value, or JS_NULL if null
  */
-JSValue pljs_datum_to_jsvalue(Oid argtype, Datum arg, JSContext *ctx,
-                              bool skip_composite) {
+JSValue pljs_datum_to_jsvalue(Oid argtype, Datum arg, bool is_null,
+                              bool expand_composite, JSContext *ctx) {
+  // Handle null case explicitly
+  if (is_null) {
+    return JS_NULL;
+  }
+
   JSValue return_result;
   char *str;
 
@@ -424,7 +462,7 @@ JSValue pljs_datum_to_jsvalue(Oid argtype, Datum arg, JSContext *ctx,
     return pljs_datum_to_array(&type, arg, ctx);
   }
 
-  if (!skip_composite && type.is_composite) {
+  if (expand_composite && type.is_composite) {
     return pljs_datum_to_object(&type, arg, ctx);
   }
 
@@ -467,7 +505,7 @@ JSValue pljs_datum_to_jsvalue(Oid argtype, Datum arg, JSContext *ctx,
   case BPCHAROID:
   case XMLOID:
     // Get a copy of the string.
-    str = dup_pgtext(DatumGetTextP(arg));
+    str = pljs_util_dup_pgtext(DatumGetTextP(arg));
 
     return_result = JS_NewString(ctx, str);
 
@@ -481,7 +519,7 @@ JSValue pljs_datum_to_jsvalue(Oid argtype, Datum arg, JSContext *ctx,
 
   case JSONOID:
     // Get a copy of the string.
-    str = dup_pgtext(DatumGetTextP(arg));
+    str = pljs_util_dup_pgtext(DatumGetTextP(arg));
 
     return_result = JS_ParseJSON(ctx, str, strlen(str), NULL);
 
@@ -528,16 +566,17 @@ JSValue pljs_datum_to_jsvalue(Oid argtype, Datum arg, JSContext *ctx,
   }
 
   case DATEOID:
-    return_result = JS_NewDate(ctx, date_to_epoch(DatumGetDateADT(arg)));
+    return_result =
+        JS_NewDate(ctx, pljs_convert_date_to_epoch(DatumGetDateADT(arg)));
     break;
   case TIMESTAMPOID:
   case TIMESTAMPTZOID:
-    return_result =
-        JS_NewDate(ctx, timestamptz_to_epoch(DatumGetTimestampTz(arg)));
+    return_result = JS_NewDate(
+        ctx, pljs_convert_timestamptz_to_epoch(DatumGetTimestampTz(arg)));
     break;
 
   default:
-    return_result = pljs_datum_to_jsvalue_default(arg, type, ctx);
+    return_result = pljs_datum_to_jsvalue_fallback(arg, type, ctx);
   }
 
   return return_result;
@@ -579,7 +618,7 @@ Datum pljs_jsvalue_to_array(pljs_type *type, JSValue val, JSContext *ctx,
       nulls[i] = true;
     } else {
       values[i] =
-          pljs_jsvalue_to_datum(type->typid, elem, ctx, fcinfo, &nulls[i]);
+          pljs_jsvalue_to_datum(type->typid, elem, &nulls[i], ctx, fcinfo);
     }
   }
 
@@ -649,63 +688,60 @@ bool pljs_jsvalue_object_contains_all_column_names(JSValue val, JSContext *ctx,
  *
  * Takes a Javascript object and converts it into an array of Datums, setting
  * the null flag for each Datum if it is null.  Note that this function assumes
- * that `is_null` is allocated and initialied to `0` (`false`) for each element.
+ * that `is_null` is allocated and initialized to `0` (`false`) for each
+ * element.
  *
- * @param type #pljs_type - type information for the record
+ * @param type #pljs_type - type information for the record (used if tupdesc is
+ * NULL)
  * @param val #JSValue - the Javascript object to convert
  * @param ctx #JSContext - Javascript context to execute in
- * @param is_null @c bool - pointer to array of null flags for each element
- * @param tupdesc #TupleDesc - can be `NULL`
- * @returns Array of #Datum of the Javascript object
+ * @param is_null @c bool** - pointer to array of null flags for each element
+ * @param tupdesc #TupleDesc - can be `NULL`, will be looked up from type if so
+ * @returns Array of #Datum of the Javascript object, or NULL if val is
+ * null/undefined
  */
 Datum *pljs_jsvalue_to_datums(pljs_type *type, JSValue val, JSContext *ctx,
                               bool **is_null, TupleDesc tupdesc) {
-  Datum *values = (Datum *)palloc(sizeof(Datum) * tupdesc->natts);
-
+  // Check for null/undefined BEFORE any allocations to avoid memory leaks
   if (JS_IsNull(val) || JS_IsUndefined(val)) {
     return NULL;
   }
 
-  // If we are not passed a tuple descriptor, then we need to look it up and
-  // release it after we are done.
-  bool cleanup_tupdesc = false;
+  // Get the tuple descriptor, looking it up if not provided
+  bool cleanup_tupdesc;
+  tupdesc = pljs_get_tupdesc(type ? type->typid : InvalidOid, tupdesc,
+                             &cleanup_tupdesc);
 
-  if (tupdesc == NULL) {
-    Oid rettype = type->typid;
+  // Allocate the values array now that we have the tuple descriptor
+  Datum *values = (Datum *)palloc(sizeof(Datum) * tupdesc->natts);
 
-    tupdesc = lookup_rowtype_tupdesc(rettype, -1);
-    cleanup_tupdesc = true;
+  for (int16 c = 0; c < tupdesc->natts; c++) {
+    // If this is a dropped column, we can skip it, and set the null flag to
+    // true.
+    if (TupleDescAttr(tupdesc, c)->attisdropped) {
+      (*is_null)[c] = true;
+      continue;
+    }
+
+    // Retrieve the column name of each attribute that we are expecting, we
+    // only care about named tuples.
+    char *colname = NameStr(TupleDescAttr(tupdesc, c)->attname);
+
+    JSValue o = JS_GetPropertyStr(ctx, val, colname);
+
+    if (JS_IsNull(o) || JS_IsUndefined(o)) {
+      (*is_null)[c] = true;
+      continue;
+    }
+
+    // Set the value of each Datum, or set the `is_null` flag if it is
+    // considered `NULL`.
+    values[c] = pljs_jsvalue_to_datum(TupleDescAttr(tupdesc, c)->atttypid, o,
+                                      &(*is_null)[c], ctx, NULL);
   }
 
-  if (tupdesc != NULL) {
-    for (int16 c = 0; c < tupdesc->natts; c++) {
-      // If this is a dropped column, we can skip it, and set the null flag to
-      // true.
-      if (TupleDescAttr(tupdesc, c)->attisdropped) {
-        (*is_null)[c] = true;
-        continue;
-      }
-
-      // Retrieve the column name of each attribute that we are expecting, we
-      // only care about named tuples.
-      char *colname = NameStr(TupleDescAttr(tupdesc, c)->attname);
-
-      JSValue o = JS_GetPropertyStr(ctx, val, colname);
-
-      if (JS_IsNull(o) || JS_IsUndefined(o)) {
-        (*is_null)[c] = true;
-        continue;
-      }
-
-      // Set the value of each Datum, or set the `is_null` flag if it is
-      // considered `NULL`.
-      values[c] = pljs_jsvalue_to_datum(TupleDescAttr(tupdesc, c)->atttypid, o,
-                                        ctx, NULL, &(*is_null)[c]);
-    }
-
-    if (cleanup_tupdesc) {
-      ReleaseTupleDesc(tupdesc);
-    }
+  if (cleanup_tupdesc) {
+    ReleaseTupleDesc(tupdesc);
   }
 
   return values;
@@ -735,57 +771,48 @@ Datum pljs_jsvalue_to_record(pljs_type *type, JSValue val, JSContext *ctx,
     return (Datum)0;
   }
 
-  // If we are not passed a tuple descriptor, then we need to look it up and
-  // release it after we are done.
-  bool cleanup_tupdesc = false;
+  // Get the tuple descriptor, looking it up if not provided
+  bool cleanup_tupdesc;
+  tupdesc = pljs_get_tupdesc(type->typid, tupdesc, &cleanup_tupdesc);
 
-  if (tupdesc == NULL) {
-    Oid rettype = type->typid;
+  Datum *values = (Datum *)palloc0(sizeof(Datum) * tupdesc->natts);
+  bool *nulls = (bool *)palloc0(sizeof(bool) * tupdesc->natts);
 
-    tupdesc = lookup_rowtype_tupdesc(rettype, -1);
-    cleanup_tupdesc = true;
+  for (int16 c = 0; c < tupdesc->natts; c++) {
+    if (TupleDescAttr(tupdesc, c)->attisdropped) {
+      nulls[c] = true;
+      continue;
+    }
+
+    char *colname = NameStr(TupleDescAttr(tupdesc, c)->attname);
+
+    JSValue o = JS_GetPropertyStr(ctx, val, colname);
+
+    if (JS_IsNull(o) || JS_IsUndefined(o)) {
+      nulls[c] = true;
+      continue;
+    }
+
+    values[c] = pljs_jsvalue_to_datum(TupleDescAttr(tupdesc, c)->atttypid, o,
+                                      &nulls[c], ctx, NULL);
   }
 
-  if (tupdesc != NULL) {
-    Datum *values = (Datum *)palloc0(sizeof(Datum) * tupdesc->natts);
-    bool *nulls = (bool *)palloc0(sizeof(bool) * tupdesc->natts);
+  // Form a Tuple from the values and nulls using the tuple descriptor
+  // as the template for the tuple.
+  result = HeapTupleGetDatum(heap_form_tuple(tupdesc, values, nulls));
 
-    for (int16 c = 0; c < tupdesc->natts; c++) {
-      if (TupleDescAttr(tupdesc, c)->attisdropped) {
-        nulls[c] = true;
-        continue;
-      }
+  pfree(nulls);
+  pfree(values);
 
-      char *colname = NameStr(TupleDescAttr(tupdesc, c)->attname);
-
-      JSValue o = JS_GetPropertyStr(ctx, val, colname);
-
-      if (JS_IsNull(o) || JS_IsUndefined(o)) {
-        nulls[c] = true;
-        continue;
-      }
-
-      values[c] = pljs_jsvalue_to_datum(TupleDescAttr(tupdesc, c)->atttypid, o,
-                                        ctx, NULL, &nulls[c]);
-    }
-
-    // Form a Tuple from the values and nulls using the tuple descriptor
-    // as the template for the tuple.
-    result = HeapTupleGetDatum(heap_form_tuple(tupdesc, values, nulls));
-
-    pfree(nulls);
-    pfree(values);
-
-    if (cleanup_tupdesc) {
-      ReleaseTupleDesc(tupdesc);
-    }
+  if (cleanup_tupdesc) {
+    ReleaseTupleDesc(tupdesc);
   }
 
   return result;
 }
 
 /**
- * @brief Default type conversion from @JSValue to @Datum.
+ * @brief Fallback type conversion from @JSValue to @Datum.
  *
  * If a type is unknown, instead of returning `NULL`, do a
  * `cstring` or `varlena`, or value based conversion to an `Datum`.
@@ -800,8 +827,8 @@ Datum pljs_jsvalue_to_record(pljs_type *type, JSValue val, JSContext *ctx,
  * @param ctx #JSContext - Javascript context
  * @returns #Datum conversion of the JSValue
  */
-static Datum jsvalue_to_datum_default(JSValue value, bool *is_null,
-                                      pljs_type type, JSContext *ctx) {
+static Datum pljs_jsvalue_to_datum_fallback(JSValue value, bool *is_null,
+                                            pljs_type type, JSContext *ctx) {
   Datum ret = 0;
 
   // Set whether the Datum is `NULL` or not.
@@ -861,13 +888,17 @@ static Datum jsvalue_to_datum_default(JSValue value, bool *is_null,
  *
  * @param rettype #Oid - type information for the record
  * @param val #JSValue - the Javascript object to convert
+ * @param is_null @c bool* - pointer to fill with whether the result is null
  * @param ctx #JSContext - Javascript context to execute in
- * @param fcinfo #FunctionCallInfo
- * @param is_null @c bool - pointer to fill of whether the record is null
+ * @param fcinfo #FunctionCallInfo - optional, can be NULL
  * @returns #Datum of the Postgres value
  */
-Datum pljs_jsvalue_to_datum(Oid rettype, JSValue val, JSContext *ctx,
-                            FunctionCallInfo fcinfo, bool *is_null) {
+Datum pljs_jsvalue_to_datum(Oid rettype, JSValue val, bool *is_null,
+                            JSContext *ctx, FunctionCallInfo fcinfo) {
+  // Initialize is_null to false
+  if (is_null) {
+    *is_null = false;
+  }
 
   pljs_type type;
 
@@ -1167,7 +1198,7 @@ Datum pljs_jsvalue_to_datum(Oid rettype, JSValue val, JSContext *ctx,
     if (Is_Date(val)) {
       double in;
       JS_ToFloat64(ctx, &in, val);
-      return epoch_to_date(in);
+      return pljs_convert_epoch_to_date(in);
     }
     break;
   case TIMESTAMPOID:
@@ -1175,12 +1206,12 @@ Datum pljs_jsvalue_to_datum(Oid rettype, JSValue val, JSContext *ctx,
     if (Is_Date(val)) {
       double in;
       JS_ToFloat64(ctx, &in, val);
-      return epoch_to_timestamptz(in);
+      return pljs_convert_epoch_to_timestamptz(in);
     }
     break;
 
   default:
-    return jsvalue_to_datum_default(val, is_null, type, ctx);
+    return pljs_jsvalue_to_datum_fallback(val, is_null, type, ctx);
   }
 
   // shut up, compiler
@@ -1235,13 +1266,9 @@ JSValue pljs_tuple_to_jsvalue(TupleDesc tupledesc, HeapTuple heap_tuple,
 
     char *name = NameStr(tuple_attrs->attname);
 
-    if (isnull) {
-      JS_SetPropertyStr(ctx, obj, name, JS_NULL);
-    } else {
-      JS_SetPropertyStr(
-          ctx, obj, name,
-          pljs_datum_to_jsvalue(tuple_attrs->atttypid, datum, ctx, false));
-    }
+    JS_SetPropertyStr(
+        ctx, obj, name,
+        pljs_datum_to_jsvalue(tuple_attrs->atttypid, datum, isnull, true, ctx));
   }
 
   return obj;
@@ -1258,7 +1285,7 @@ JSValue pljs_spi_result_to_jsvalue(int status, JSContext *ctx) {
   JSValue result;
 
   if (status < 0) {
-    return js_throw(spi_status_string(status), ctx);
+    return js_throw(pljs_util_spi_status_string(status), ctx);
   }
 
   switch (status) {
