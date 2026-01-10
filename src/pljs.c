@@ -982,7 +982,7 @@ static Datum call_trigger(FunctionCallInfo fcinfo, pljs_context *context) {
 
     pljs_type type;
     pljs_type_fill(&type, context->function->rettype);
-    Datum d = pljs_jsvalue_to_record(&type, ret, context->ctx, NULL, tupdesc);
+    Datum d = pljs_jsvalue_to_record(&type, ret, NULL, tupdesc, context->ctx);
 
     HeapTupleHeader header = DatumGetHeapTupleHeader(d);
 
@@ -1060,7 +1060,7 @@ static Datum call_function(FunctionCallInfo fcinfo, pljs_context *context,
       pljs_type type;
       pljs_type_fill(&type, rettype);
 
-      datum = pljs_jsvalue_to_record(&type, ret, context->ctx, NULL, tupdesc);
+      datum = pljs_jsvalue_to_record(&type, ret, NULL, tupdesc, context->ctx);
     } else {
       bool is_null;
       datum =
@@ -1185,8 +1185,8 @@ static Datum call_srf_function(FunctionCallInfo fcinfo, pljs_context *context,
       if (state->is_composite) {
         bool *nulls = (bool *)palloc0(sizeof(bool) * state->tuple_desc->natts);
 
-        Datum *values = pljs_jsvalue_to_datums(NULL, argv[0], context->ctx,
-                                               &nulls, state->tuple_desc);
+        Datum *values = pljs_jsvalue_to_datums(NULL, argv[0], &nulls,
+                                               state->tuple_desc, context->ctx);
         tuplestore_putvalues(state->tuple_store_state, state->tuple_desc,
                              values, nulls);
 

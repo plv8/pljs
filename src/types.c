@@ -694,14 +694,14 @@ bool pljs_jsvalue_object_contains_all_column_names(JSValue val, JSContext *ctx,
  * @param type #pljs_type - type information for the record (used if tupdesc is
  * NULL)
  * @param val #JSValue - the Javascript object to convert
- * @param ctx #JSContext - Javascript context to execute in
  * @param is_null @c bool** - pointer to array of null flags for each element
  * @param tupdesc #TupleDesc - can be `NULL`, will be looked up from type if so
+ * @param ctx #JSContext - Javascript context to execute in
  * @returns Array of #Datum of the Javascript object, or NULL if val is
  * null/undefined
  */
-Datum *pljs_jsvalue_to_datums(pljs_type *type, JSValue val, JSContext *ctx,
-                              bool **is_null, TupleDesc tupdesc) {
+Datum *pljs_jsvalue_to_datums(pljs_type *type, JSValue val, bool **is_null,
+                              TupleDesc tupdesc, JSContext *ctx) {
   // Check for null/undefined BEFORE any allocations to avoid memory leaks
   if (JS_IsNull(val) || JS_IsUndefined(val)) {
     return NULL;
@@ -755,13 +755,13 @@ Datum *pljs_jsvalue_to_datums(pljs_type *type, JSValue val, JSContext *ctx,
  *
  * @param type #pljs_type - type information for the record
  * @param val #JSValue - the Javascript object to convert
- * @param ctx #JSContext - Javascript context to execute in
  * @param is_null @c bool - pointer to fill of whether the record is null
  * @param tupdesc #TupleDesc - can be `NULL`
+ * @param ctx #JSContext - Javascript context to execute in
  * @returns #Datum of the Postgres record
  */
-Datum pljs_jsvalue_to_record(pljs_type *type, JSValue val, JSContext *ctx,
-                             bool *is_null, TupleDesc tupdesc) {
+Datum pljs_jsvalue_to_record(pljs_type *type, JSValue val, bool *is_null,
+                             TupleDesc tupdesc, JSContext *ctx) {
   Datum result = 0;
 
   // If the value is null or undefined, we can simply set the record to null
@@ -913,7 +913,7 @@ Datum pljs_jsvalue_to_datum(Oid rettype, JSValue val, bool *is_null,
   }
 
   if (type.is_composite) {
-    return pljs_jsvalue_to_record(&type, val, ctx, is_null, NULL);
+    return pljs_jsvalue_to_record(&type, val, is_null, NULL, ctx);
   }
 
   if (JS_IsNull(val) || JS_IsUndefined(val)) {

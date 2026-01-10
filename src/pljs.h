@@ -193,10 +193,10 @@ Datum pljs_jsvalue_to_array(pljs_type *, JSValue, JSContext *,
                             FunctionCallInfo);
 Datum pljs_jsvalue_to_datum(Oid rettype, JSValue val, bool *is_null,
                             JSContext *ctx, FunctionCallInfo fcinfo);
-Datum pljs_jsvalue_to_record(pljs_type *type, JSValue val, JSContext *ctx,
-                             bool *is_null, TupleDesc);
-Datum *pljs_jsvalue_to_datums(pljs_type *type, JSValue val, JSContext *ctx,
-                              bool **is_null, TupleDesc tupdesc);
+Datum pljs_jsvalue_to_record(pljs_type *type, JSValue val, bool *is_null,
+                             TupleDesc tupdesc, JSContext *ctx);
+Datum *pljs_jsvalue_to_datums(pljs_type *type, JSValue val, bool **is_null,
+                              TupleDesc tupdesc, JSContext *ctx);
 
 // Utility
 uint32_t pljs_js_array_length(JSValue, JSContext *);

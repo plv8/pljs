@@ -1070,8 +1070,8 @@ static JSValue pljs_return_next(JSContext *ctx, JSValueConst this_val, int argc,
     }
 
     bool *nulls = (bool *)palloc0(sizeof(bool) * retstate->tuple_desc->natts);
-    Datum *values = pljs_jsvalue_to_datums(NULL, argv[0], ctx, &nulls,
-                                           retstate->tuple_desc);
+    Datum *values = pljs_jsvalue_to_datums(NULL, argv[0], &nulls,
+                                           retstate->tuple_desc, ctx);
 
     tuplestore_putvalues(retstate->tuple_store_state, retstate->tuple_desc,
                          values, nulls);
