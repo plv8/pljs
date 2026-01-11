@@ -53,7 +53,7 @@ AS $$
   return arr;
 $$;
 
-SELECT filled_int16array_bytea() = '\x0100020003000400'::bytea;
+SELECT filled_int16array_bytea();
 
 CREATE FUNCTION filled_int32array_bytea() RETURNS bytea
 LANGUAGE pljs IMMUTABLE STRICT
@@ -67,7 +67,7 @@ AS $$
   return arr;
 $$;
 
-SELECT filled_int32array_bytea() = '\x01000000020000000300000004000000'::bytea;
+SELECT filled_int32array_bytea();
 
 DO $$
   const test = 'string test';

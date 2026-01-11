@@ -105,7 +105,7 @@ void pljs_guc_init(void) {
   DefineCustomIntVariable("pljs.memory_limit",
                           gettext_noop("Runtime limit in MBytes"),
                           gettext_noop("The default value is 512 MB"),
-                          (int *)&configuration.memory_limit, 512, 256, 3096,
+                          (int *)&configuration.memory_limit, 512, 64, 3096,
                           PGC_SUSET, 0, NULL, NULL, NULL);
 
   DefineCustomStringVariable(

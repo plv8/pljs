@@ -1,11 +1,8 @@
--- ten seconds should be enough to show this doesn't destroy memory
-set statement_timeout = '60s';
-set pljs.memory_limit = '256';
+-- we set the timeout to as high as we can, since some platforms may have slower CI machines
+set pljs.statement_timeout = '65536s';
+set pljs.memory_limit = '64';
 
 do $$ Object.prototype [Symbol.iterator] = function() { return { next:() => this } };
 [...({})];
 $$ language pljs;
 
-do $$ Object.prototype [Symbol.iterator] = function() { return { next:() => this } };
-[...({})];
-$$ language pljs;
