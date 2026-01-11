@@ -104,8 +104,8 @@ void pljs_guc_init(void) {
 
   DefineCustomIntVariable("pljs.memory_limit",
                           gettext_noop("Runtime limit in MBytes"),
-                          gettext_noop("The default value is 256 MB"),
-                          (int *)&configuration.memory_limit, 256, 256, 3096,
+                          gettext_noop("The default value is 512 MB"),
+                          (int *)&configuration.memory_limit, 512, 64, 3096,
                           PGC_SUSET, 0, NULL, NULL, NULL);
 
   DefineCustomStringVariable(
@@ -427,13 +427,11 @@ static JSValueConst *convert_arguments_to_javascript(FunctionCallInfo fcinfo,
 
   if (WindowObjectIsValid(window_obj)) {
     for (int i = 0; i < nargs; i++) {
-      bool isnull;
-      Datum arg = WinGetFuncArgCurrent(window_obj, i, &isnull);
-      if (isnull) {
-        argv[i] = JS_NULL;
-      } else {
-        argv[i] = pljs_datum_to_jsvalue(arg, argtypes[i], context->ctx, true);
-      }
+      bool is_null;
+      Datum arg = WinGetFuncArgCurrent(window_obj, i, &is_null);
+      // Window functions: expand_composite=false (skip composite expansion)
+      argv[i] =
+          pljs_datum_to_jsvalue(argtypes[i], arg, is_null, false, context->ctx);
     }
   } else {
     for (int i = 0; i < nargs; i++) {
@@ -453,12 +451,10 @@ static JSValueConst *convert_arguments_to_javascript(FunctionCallInfo fcinfo,
       if (fcinfo && IsPolymorphicType(argtype)) {
         argtype = get_fn_expr_argtype(fcinfo->flinfo, i);
       }
-      if (fcinfo->args[inargs].isnull == 1) {
-        argv[inargs] = JS_NULL;
-      } else {
-        argv[inargs] = pljs_datum_to_jsvalue(fcinfo->args[inargs].value,
-                                             argtype, context->ctx, false);
-      }
+      bool is_null = (fcinfo->args[inargs].isnull == 1);
+      // Regular functions: expand_composite=true (expand composite types)
+      argv[inargs] = pljs_datum_to_jsvalue(argtype, fcinfo->args[inargs].value,
+                                           is_null, true, context->ctx);
 
       inargs++;
     }
@@ -986,8 +982,7 @@ static Datum call_trigger(FunctionCallInfo fcinfo, pljs_context *context) {
 
     pljs_type type;
     pljs_type_fill(&type, context->function->rettype);
-    Datum d =
-        pljs_jsvalue_to_record(ret, &type, context->ctx, NULL, tupdesc, NULL);
+    Datum d = pljs_jsvalue_to_record(&type, ret, NULL, tupdesc, context->ctx);
 
     HeapTupleHeader header = DatumGetHeapTupleHeader(d);
 
@@ -1043,7 +1038,7 @@ static Datum call_function(FunctionCallInfo fcinfo, pljs_context *context,
 
   JSValue ret = JS_Call(context->ctx, context->js_function, JS_UNDEFINED,
                         context->function->inargs, argv);
-  JS_RunGC(rt);
+
   SPI_finish();
 
   if (JS_IsException(ret)) {
@@ -1056,7 +1051,7 @@ static Datum call_function(FunctionCallInfo fcinfo, pljs_context *context,
     /* Shuts up the compiler, since ereports of ERROR stop execution. */
     return (Datum)0;
   } else {
-    Datum datum;
+    Datum datum = 0;
 
     if (rettype == RECORDOID) {
       TupleDesc tupdesc;
@@ -1065,12 +1060,11 @@ static Datum call_function(FunctionCallInfo fcinfo, pljs_context *context,
       pljs_type type;
       pljs_type_fill(&type, rettype);
 
-      datum =
-          pljs_jsvalue_to_record(ret, &type, context->ctx, NULL, tupdesc, NULL);
+      datum = pljs_jsvalue_to_record(&type, ret, NULL, tupdesc, context->ctx);
     } else {
       bool is_null;
       datum =
-          pljs_jsvalue_to_datum(ret, rettype, context->ctx, fcinfo, &is_null);
+          pljs_jsvalue_to_datum(rettype, ret, &is_null, context->ctx, fcinfo);
     }
 
     JS_FreeValue(context->ctx, ret);
@@ -1183,14 +1177,21 @@ static Datum call_srf_function(FunctionCallInfo fcinfo, pljs_context *context,
     return (Datum)0;
   } else {
     // Check to see if we have any values to append
-    if (!JS_IsUndefined(ret) || !JS_IsNull(ret)) {
+    if (!JS_IsUndefined(ret) && !JS_IsNull(ret)) {
       MemoryContextSwitchTo(rsinfo->econtext->ecxt_per_query_memory);
 
-      bool is_null;
+      bool is_null = false;
 
       if (state->is_composite) {
-        pljs_jsvalue_to_record(ret, NULL, context->ctx, &is_null,
-                               state->tuple_desc, state->tuple_store_state);
+        bool *nulls = (bool *)palloc0(sizeof(bool) * state->tuple_desc->natts);
+
+        Datum *values = pljs_jsvalue_to_datums(NULL, argv[0], &nulls,
+                                               state->tuple_desc, context->ctx);
+        tuplestore_putvalues(state->tuple_store_state, state->tuple_desc,
+                             values, nulls);
+
+        pfree(nulls);
+        pfree(values);
       } else {
         if (JS_IsArray(context->ctx, ret)) {
           for (uint32_t i = 0; i < pljs_js_array_length(ret, context->ctx);
@@ -1198,16 +1199,16 @@ static Datum call_srf_function(FunctionCallInfo fcinfo, pljs_context *context,
             JSValue val = JS_GetPropertyUint32(context->ctx, ret, i);
 
             Datum result = pljs_jsvalue_to_datum(
-                val, TupleDescAttr(state->tuple_desc, 0)->atttypid,
-                context->ctx, NULL, &is_null);
+                TupleDescAttr(state->tuple_desc, 0)->atttypid, val, &is_null,
+                context->ctx, NULL);
             tuplestore_putvalues(state->tuple_store_state, state->tuple_desc,
                                  &result, &is_null);
           }
         } else {
           if (!JS_IsUndefined(ret)) {
             Datum result = pljs_jsvalue_to_datum(
-                ret, TupleDescAttr(state->tuple_desc, 0)->atttypid,
-                context->ctx, NULL, &is_null);
+                TupleDescAttr(state->tuple_desc, 0)->atttypid, ret, &is_null,
+                context->ctx, NULL);
 
             tuplestore_putvalues(state->tuple_store_state, state->tuple_desc,
                                  &result, &is_null);

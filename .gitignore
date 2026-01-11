@@ -9,5 +9,6 @@ regression.out
 .depend
 docs/html
 docs/latex
+docs/xml
 pljs--*.sql
 compile_commands.json

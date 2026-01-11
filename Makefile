@@ -1,6 +1,6 @@
 .PHONY: lintcheck format cleansql docs clean test all
 
-PLJS_VERSION = 1.0.3
+PLJS_VERSION = 1.0.4
 
 PG_CONFIG ?= pg_config
 PGXS := $(shell $(PG_CONFIG) --pgxs)
@@ -21,9 +21,6 @@ SHLIB_LINK = -Ldeps/quickjs -lquickjs
 ifeq ($(DEBUG), 1)
 PG_CFLAGS += -g
 SHLIB_LINK += -g
-else
-PG_CFLAGS += -O3
-SHLIB_LINK += -O3
 endif
 
 ifeq ($(DEBUG_MEMORY), 1)

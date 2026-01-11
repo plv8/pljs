@@ -28,3 +28,17 @@ Released _August 20, 2025_.
 Released _August 20, 2025_.
 
 - PGXN release went out with an incorrect control file
+
+### 1.0.4
+
+Released _January 11, 2026_.
+
+- Up memory default limit to 512MB
+- Remove unnecessary include from modules.c
+- Remove extra running of GC after each execution
+- Better handling of SRF's, including freeing resources
+- Increased test timeouts to accommodate slower CI machines
+- Alter memory limit minimum to 64MB to facilitate testing
+- Alter some tests for s390x testing
+- Clean up parameter orders for function calls
+- Fixed potential memory leak in `pljs_jsvalue_to_datums`

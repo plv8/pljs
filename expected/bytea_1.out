@@ -67,7 +67,7 @@ $$;
 SELECT filled_int16array_bytea();
  filled_int16array_bytea 
 -------------------------
- \x0100020003000400
+ \x0001000200030004
 (1 row)
 
 CREATE FUNCTION filled_int32array_bytea() RETURNS bytea
@@ -84,7 +84,7 @@ $$;
 SELECT filled_int32array_bytea();
       filled_int32array_bytea       
 ------------------------------------
- \x01000000020000000300000004000000
+ \x00000001000000020000000300000004
 (1 row)
 
 DO $$
