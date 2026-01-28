@@ -1540,14 +1540,14 @@ static char *time_as_8601(double millis) {
  */
 static JsonbValue *jsonb_from_value(JSValue value,
                                     JsonbParseState **parse_state,
-                                    JsonbIteratorToken type, JSContext *ctx) {
+                                    JsonbIteratorToken type, JSContext *ctx,
+                                    const char *key) {
   JsonbValue val;
 
   // If the token type is a key, the only valid value is `jbvString`.
   if (type == WJB_KEY) {
     val.type = jbvString;
-    size_t len;
-    const char *key = JS_ToCStringLen(ctx, &len, value);
+    size_t len = strlen(key);
 
     val.val.string.val = palloc(len);
     memcpy(val.val.string.val, key, len);
@@ -1638,7 +1638,7 @@ static JsonbValue *jsonb_array_from_array(JSValue array,
     } else if (JS_IsObject(elem)) {
       value = jsonb_object_from_object(elem, parse_state, ctx);
     } else {
-      value = jsonb_from_value(elem, parse_state, WJB_ELEM, ctx);
+      value = jsonb_from_value(elem, parse_state, WJB_ELEM, ctx, NULL);
     }
 
     // Free up the element.
@@ -1664,7 +1664,6 @@ static JsonbValue *jsonb_object_from_object(JSValue object,
                                             JSContext *ctx) {
   // Push the beginning of the object intp the parse state.
   JsonbValue *value = pushJsonbValue(parse_state, WJB_BEGIN_OBJECT, NULL);
-
   uint32_t object_keys_length = 0;
   JSPropertyEnum *tab;
 
@@ -1680,7 +1679,9 @@ static JsonbValue *jsonb_object_from_object(JSValue object,
     JSValue o =
         JS_GetPropertyInternal(ctx, object, tab[object_key].atom, object, 0);
 
-    value = jsonb_from_value(o, parse_state, WJB_KEY, ctx);
+    const char *key = JS_AtomToCString(ctx, tab[object_key].atom);
+
+    value = jsonb_from_value(o, parse_state, WJB_KEY, ctx, key);
 
     // If the value is an `Array` the convert it.
     if (JS_IsArray(ctx, o)) {
@@ -1690,7 +1691,7 @@ static JsonbValue *jsonb_object_from_object(JSValue object,
       value = jsonb_object_from_object(o, parse_state, ctx);
     } else {
       // Or anything else.
-      value = jsonb_from_value(o, parse_state, WJB_VALUE, ctx);
+      value = jsonb_from_value(o, parse_state, WJB_VALUE, ctx, NULL);
     }
 
     // Free up the memory.
@@ -1714,7 +1715,6 @@ static Jsonb *convert_object(JSValue object, JSContext *ctx) {
   // Create a new memory context for conversion.
   MemoryContext oldcontext = CurrentMemoryContext;
   MemoryContext conversion_context;
-
   conversion_context = AllocSetContextCreate(
       CurrentMemoryContext, "JSONB Conversion Context", ALLOCSET_SMALL_SIZES);
 
@@ -1730,7 +1730,7 @@ static Jsonb *convert_object(JSValue object, JSContext *ctx) {
     value = jsonb_object_from_object(object, &parse_state, ctx);
   } else {
     pushJsonbValue(&parse_state, WJB_BEGIN_ARRAY, NULL);
-    jsonb_from_value(object, &parse_state, WJB_ELEM, ctx);
+    jsonb_from_value(object, &parse_state, WJB_ELEM, ctx, NULL);
     value = pushJsonbValue(&parse_state, WJB_END_ARRAY, NULL);
     value->val.array.rawScalar = true;
   }

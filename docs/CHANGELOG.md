@@ -42,3 +42,9 @@ Released _January 11, 2026_.
 - Alter some tests for s390x testing
 - Clean up parameter orders for function calls
 - Fixed potential memory leak in `pljs_jsvalue_to_datums`
+
+### 1.0.5
+
+Released _January 27, 2026_.
+
+- Fix key name issue in JSONB_DIRECT_CONVERSION path
