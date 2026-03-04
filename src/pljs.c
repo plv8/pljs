@@ -1183,15 +1183,42 @@ static Datum call_srf_function(FunctionCallInfo fcinfo, pljs_context *context,
       bool is_null = false;
 
       if (state->is_composite) {
-        bool *nulls = (bool *)palloc0(sizeof(bool) * state->tuple_desc->natts);
+        // Handle composite (RETURNS TABLE / RETURNS SETOF record):
+        // JS can return a single object or an array of objects.
+        if (JS_IsArray(context->ctx, ret)) {
+          // Array of objects: iterate and put each as a row.
+          for (uint32_t i = 0; i < pljs_js_array_length(ret, context->ctx);
+               i++) {
+            JSValue val = JS_GetPropertyUint32(context->ctx, ret, i);
+            bool *nulls =
+                (bool *)palloc0(sizeof(bool) * state->tuple_desc->natts);
 
-        Datum *values = pljs_jsvalue_to_datums(NULL, argv[0], &nulls,
-                                               state->tuple_desc, context->ctx);
-        tuplestore_putvalues(state->tuple_store_state, state->tuple_desc,
-                             values, nulls);
+            Datum *values = pljs_jsvalue_to_datums(
+                NULL, val, &nulls, state->tuple_desc, context->ctx);
 
-        pfree(nulls);
-        pfree(values);
+            if (values != NULL) {
+              tuplestore_putvalues(state->tuple_store_state,
+                                   state->tuple_desc, values, nulls);
+              pfree(values);
+            }
+            pfree(nulls);
+            JS_FreeValue(context->ctx, val);
+          }
+        } else {
+          // Single object: put as one row.
+          bool *nulls =
+              (bool *)palloc0(sizeof(bool) * state->tuple_desc->natts);
+
+          Datum *values = pljs_jsvalue_to_datums(
+              NULL, ret, &nulls, state->tuple_desc, context->ctx);
+
+          if (values != NULL) {
+            tuplestore_putvalues(state->tuple_store_state,
+                                 state->tuple_desc, values, nulls);
+            pfree(values);
+          }
+          pfree(nulls);
+        }
       } else {
         if (JS_IsArray(context->ctx, ret)) {
           for (uint32_t i = 0; i < pljs_js_array_length(ret, context->ctx);
@@ -1203,6 +1230,7 @@ static Datum call_srf_function(FunctionCallInfo fcinfo, pljs_context *context,
                 context->ctx, NULL);
             tuplestore_putvalues(state->tuple_store_state, state->tuple_desc,
                                  &result, &is_null);
+            JS_FreeValue(context->ctx, val);
           }
         } else {
           if (!JS_IsUndefined(ret)) {
