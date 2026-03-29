@@ -36,12 +36,12 @@ Current Release Version: `1.0.0`
 
 # 1.1
 
-`1.1` will expand on what exists in PLV8, and attempt to create a new Javascript language plugin universe.
+`1.1` will expand on what exists in PLV8, and attempt to create a new JavaScript language plugin universe.
 
 ## Major Features
 
 - [ ] initial hook management
-- [ ] module imports via `import`
+- [x] module imports via `pljs.import`
 - [ ] resetting of contexts (`pljs_reset()`)
 
 # 1.2

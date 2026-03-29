@@ -94,62 +94,59 @@ static uint8_t *pljs_read_module(size_t *pbuf_len, const char *filename) {
 }
 
 /**
- * @brief Import a JavaScript module from the databse.
+ * @brief Import a JavaScript module from the database.
  *
  * @param ctx The JavaScript context to use for loading the module.
  * @param module_name The name of the module to load.
- * @returns JSValue A copy of the compiled function.
+ * @returns JSValue A copy of the compiled module.
  */
 JSValue pljs_module_load(JSContext *ctx, const char *module_name) {
   size_t buf_len;
-  uint8_t *buf;
-  JSValue func_val;
+  char *buf;
 
-  buf = pljs_read_module(&buf_len, module_name);
+  buf = (char *)pljs_read_module(&buf_len, module_name);
   if (!buf) {
     JS_ThrowReferenceError(ctx, "could not load module '%s'", module_name);
-    elog(NOTICE, "could not load module '%s'", module_name);
 
     return JS_EXCEPTION;
   }
 
   /* compile the module */
-  func_val = JS_Eval(ctx, (char *)buf, buf_len, module_name,
-                     JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY);
-  pfree(buf);
+  JSValue res = JS_Eval(ctx, buf, buf_len, module_name,
+                        JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY);
+  // pfree(buf);
 
-  if (JS_IsException(func_val)) {
+  if (JS_IsException(res)) {
+    JSValue ex = JS_GetException(ctx);
+    const char *err = JS_ToCString(ctx, ex);
+    elog(WARNING, "could not compile module '%s': %s", module_name, err);
+
+    JS_FreeCString(ctx, err);
+    JS_FreeValue(ctx, ex);
+
     return JS_EXCEPTION;
   }
 
-  return func_val;
-}
+  if (JS_ResolveModule(ctx, res) < 0) {
+    JS_FreeValue(ctx, res);
+    elog(WARNING, "unable to resolve module %s", module_name);
 
-/**
- * @brief Import a JavaScript module from the databse.
- *
- * Default module loader implementation.  The default behavior is to load
- * the module from the database.
- *
- * @param ctx The JavaScript context to use for loading the module.
- * @param module_name The name of the module to load.
- * @param opaque An opaque pointer that can be used by the module loader.
- * @returns JSModuleDef* A pointer to the loaded module, or NULL on error.
- */
-JSModuleDef *pljs_defaultjs_module_loader(JSContext *ctx,
-                                          const char *module_name,
-                                          void *opaque) {
-  JSModuleDef *m;
-
-  JSValue func_val = pljs_module_load(ctx, module_name);
-
-  if (JS_IsException(func_val)) {
-    return NULL;
+    return JS_EXCEPTION;
   }
 
-  /* the module is already referenced, so we must free it */
-  m = JS_VALUE_GET_PTR(func_val);
-  JS_FreeValue(ctx, func_val);
+  JSValue mod_res = JS_EvalFunction(ctx, JS_DupValue(ctx, res));
+  mod_res = js_std_await(ctx, mod_res);
 
-  return m;
+  if (JS_IsException(mod_res)) {
+    JS_FreeValue(ctx, res);
+    js_std_dump_error(ctx);
+    return JS_EXCEPTION;
+  }
+  JS_FreeValue(ctx, mod_res);
+
+  /* get namespace from the *compiled* module object, not the eval result */
+  JSModuleDef *m = JS_VALUE_GET_PTR(res);
+  JS_FreeValue(ctx, res);
+  JSValue ns = JS_GetModuleNamespace(ctx, m);
+  return ns;
 }

@@ -38,7 +38,7 @@ endif
 
 REGRESS = init-extension function json jsonb json_conv types bytea context \
 	cursor array_spread plv8_regressions memory_limits inline composites \
-	trigger procedure find_function start_proc window regressions
+	trigger procedure find_function start_proc window modules regressions
 
 all: deps/quickjs/quickjs.h deps/quickjs/libquickjs.a pljs--$(PLJS_VERSION).sql
 

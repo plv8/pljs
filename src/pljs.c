@@ -86,8 +86,6 @@ void _PG_init(void) {
   if (configuration.memory_limit) {
     JS_SetMemoryLimit(rt, configuration.memory_limit * 1024 * 1024);
   }
-
-  JS_SetModuleLoaderFunc(rt, NULL, pljs_defaultjs_module_loader, NULL);
 }
 
 /**
@@ -1200,8 +1198,8 @@ static Datum call_srf_function(FunctionCallInfo fcinfo, pljs_context *context,
                 NULL, val, &nulls, state->tuple_desc, context->ctx);
 
             if (values != NULL) {
-              tuplestore_putvalues(state->tuple_store_state,
-                                   state->tuple_desc, values, nulls);
+              tuplestore_putvalues(state->tuple_store_state, state->tuple_desc,
+                                   values, nulls);
               pfree(values);
             }
             pfree(nulls);
@@ -1216,8 +1214,8 @@ static Datum call_srf_function(FunctionCallInfo fcinfo, pljs_context *context,
               NULL, ret, &nulls, state->tuple_desc, context->ctx);
 
           if (values != NULL) {
-            tuplestore_putvalues(state->tuple_store_state,
-                                 state->tuple_desc, values, nulls);
+            tuplestore_putvalues(state->tuple_store_state, state->tuple_desc,
+                                 values, nulls);
             pfree(values);
           }
           pfree(nulls);

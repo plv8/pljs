@@ -1676,8 +1676,7 @@ static JsonbValue *jsonb_object_from_object(JSValue object,
   // Iterate through the `Object` keys.
   for (uint32_t object_key = 0; object_key < object_keys_length; object_key++) {
     // Get the value.
-    JSValue o =
-        JS_GetPropertyInternal(ctx, object, tab[object_key].atom, object, 0);
+    JSValue o = JS_GetProperty(ctx, object, tab[object_key].atom);
 
     const char *key = JS_AtomToCString(ctx, tab[object_key].atom);
 
