@@ -148,6 +148,37 @@ SELECT * FROM set_of_unnamed_records() AS x(a int, c int);
 -- name counts and values match
 SELECT * FROM set_of_unnamed_records() AS x(a int, b int);
 
+-- RETURNS TABLE with array of objects (composite SRF array return)
+CREATE FUNCTION returns_table_array() RETURNS TABLE(id int, name text) AS
+$$
+	return [
+		{ id: 1, name: 'Alice' },
+		{ id: 2, name: 'Bob' },
+		{ id: 3, name: 'Charlie' }
+	];
+$$
+LANGUAGE pljs;
+SELECT * FROM returns_table_array();
+
+-- RETURNS TABLE with single object
+CREATE FUNCTION returns_table_single() RETURNS TABLE(x int, y text) AS
+$$
+	return { x: 42, y: 'hello' };
+$$
+LANGUAGE pljs;
+SELECT * FROM returns_table_single();
+
+-- RETURNS SETOF composite with array return
+CREATE FUNCTION set_of_rec_array() RETURNS SETOF rec AS
+$$
+	return [
+		{ i: 10, t: 'ten' },
+		{ i: 20, t: 'twenty' }
+	];
+$$
+LANGUAGE pljs;
+SELECT * FROM set_of_rec_array();
+
 -- execute with an array of arguments
 CREATE FUNCTION execute_with_array() RETURNS VOID AS
 $$
