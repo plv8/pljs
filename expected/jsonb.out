@@ -23,3 +23,18 @@ SELECT get_key('ok', data) FROM jsonbonly;
  "{\"ok\":true}"
 (1 row)
 
+-- Verify that keys and values are working.
+CREATE FUNCTION pljs_test(keys TEXT[], vals TEXT[]) RETURNS JSONB AS $$
+    var o = {};
+    for(var i=0; i<keys.length; i++){
+        o[keys[i]] = vals[i];
+    }
+    return o;
+$$ LANGUAGE pljs IMMUTABLE STRICT;
+ERROR:  function "pljs_test" already exists with same argument types
+SELECT pljs_test(ARRAY['name', 'age'], ARRAY['Tom', '29']);
+         pljs_test         
+---------------------------
+ {"name":"Tom","age":"29"}
+(1 row)
+
