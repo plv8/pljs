@@ -443,6 +443,7 @@ static JSValue pljs_plan_execute(JSContext *ctx, JSValueConst this_val,
     values[i] = pljs_jsvalue_to_datum(
         plan->parstate ? plan->parstate->param_types[i] : 0, param, &is_null,
         ctx, NULL);
+    nulls[i] = is_null ? 'n' : ' ';
 
     JS_FreeValue(ctx, param);
   }
@@ -741,6 +742,7 @@ static JSValue pljs_plan_cursor(JSContext *ctx, JSValueConst this_val, int argc,
     values[i] = pljs_jsvalue_to_datum(
         plan->parstate ? plan->parstate->param_types[i] : 0, param, &is_null,
         ctx, NULL);
+    nulls[i] = is_null ? 'n' : ' ';
   }
 
   PG_TRY();
@@ -789,13 +791,13 @@ static JSValue pljs_plan_cursor_fetch(JSContext *ctx, JSValueConst this_val,
   JSValue name = JS_GetPropertyStr(ctx, this_val, "name");
   const char *plan_name = JS_ToCString(ctx, name);
 
-  JS_FreeCString(ctx, plan_name);
-  JS_FreeValue(ctx, name);
-
   int nfetch = 1;
   bool forward = true, wantarray = false;
 
   Portal cursor = SPI_cursor_find(plan_name);
+
+  JS_FreeCString(ctx, plan_name);
+  JS_FreeValue(ctx, name);
 
   if (cursor == NULL) {
     return js_throw("Unable to find cursor", ctx);
