@@ -44,3 +44,6 @@ Released _January 11, 2026_.
 - Fixed potential memory leak in `pljs_jsvalue_to_datums`
 
 ### 1.1.0
+
+- Added `pljs.import`
+- Added initial hook support

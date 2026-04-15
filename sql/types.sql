@@ -68,3 +68,48 @@ CREATE FUNCTION ltree_echo(l ltree) RETURNS ltree AS $$
 $$ LANGUAGE pljs;
 
 SELECT ltree_echo('1.2.3'::ltree);
+
+-- OID type
+CREATE FUNCTION oid_echo(o oid) RETURNS oid AS $$ return o; $$ LANGUAGE pljs;
+SELECT oid_echo(12345::oid);
+SELECT oid_echo('pg_class'::regclass::oid) > 0 AS valid_oid;
+DROP FUNCTION oid_echo(oid);
+
+-- FLOAT4 type
+CREATE FUNCTION float4_echo(f float4) RETURNS float4 AS $$ return f; $$ LANGUAGE pljs;
+SELECT float4_echo(3.14::float4);
+DROP FUNCTION float4_echo(float4);
+
+-- BOOL return
+CREATE FUNCTION bool_echo(b boolean) RETURNS boolean AS $$ return b; $$ LANGUAGE pljs;
+SELECT bool_echo(true);
+SELECT bool_echo(false);
+DROP FUNCTION bool_echo(boolean);
+
+-- BigInt to int2
+CREATE FUNCTION bigint_to_int2(v int8) RETURNS int2 AS $$ return v; $$ LANGUAGE pljs;
+SELECT bigint_to_int2(42::int8);
+DROP FUNCTION bigint_to_int2(int8);
+
+-- timestamptz round-trip (JS Date -> PG timestamptz)
+CREATE FUNCTION ts_add_hour(ts timestamptz) RETURNS timestamptz AS $$
+  var d = new Date(ts.getTime() + 3600000);
+  return d;
+$$ LANGUAGE pljs;
+SELECT ts_add_hour('2024-01-01 12:00:00 UTC') AT TIME ZONE 'UTC';
+DROP FUNCTION ts_add_hour(timestamptz);
+
+-- timestamp (without tz)
+CREATE FUNCTION ts_echo(ts timestamp) RETURNS timestamp AS $$ return ts; $$ LANGUAGE pljs;
+SELECT ts_echo('2024-06-15 10:30:00');
+DROP FUNCTION ts_echo(timestamp);
+
+-- date round-trip
+CREATE FUNCTION date_echo(d date) RETURNS date AS $$ return d; $$ LANGUAGE pljs;
+SELECT date_echo('2024-03-15');
+DROP FUNCTION date_echo(date);
+
+-- array with null elements
+CREATE FUNCTION array_with_nulls() RETURNS int[] AS $$ return [1, null, 3]; $$ LANGUAGE pljs;
+SELECT array_with_nulls();
+DROP FUNCTION array_with_nulls();

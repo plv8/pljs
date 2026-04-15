@@ -5,6 +5,7 @@
 #include "access/heapam.h"
 #include "access/htup.h"
 #include "access/tupdesc.h"
+#include "executor/executor.h"
 #include "executor/spi.h"
 #include "fmgr.h"
 #include "funcapi.h"
@@ -26,6 +27,24 @@ typedef struct pljs_configuration {
   size_t memory_limit;
   char *start_proc;
   int execution_timeout;
+  bool hooks_enabled;
+  int hooks_max_depth;
+
+  // Hook function name GUCs.
+  char *hook_executor_start;
+  char *hook_executor_run;
+  char *hook_executor_end;
+  char *hook_planner;
+  char *hook_create_upper_paths;
+  char *hook_set_rel_pathlist;
+  char *hook_set_join_pathlist;
+  char *hook_join_search;
+  char *hook_get_relation_info;
+  char *hook_needs_fmgr;
+  char *hook_fmgr;
+  char *hook_object_access;
+  char *hook_object_access_str;
+  char *hook_emit_log;
 } pljs_configuration;
 
 // Global #pljs_configuration configuration.
@@ -177,6 +196,7 @@ void pljs_context_to_function_cache(pljs_function_cache_value *function_entry,
                                     pljs_context *context);
 // Utility
 void pljs_cache_reset(void);
+void pljs_cache_free_all(void);
 
 // type.c
 
@@ -213,3 +233,19 @@ JSModuleDef *pljs_defaultjs_module_loader(JSContext *ctx,
                                           const char *module_name,
                                           void *opaque);
 JSValue pljs_module_load(JSContext *ctx, const char *module_name);
+
+// hooks.c
+extern JSClassID js_querydesc_id;
+extern JSClassID js_list_id;
+
+void pljs_hooks_init(JSRuntime *runtime);
+void pljs_hooks_install(void);
+JSValue pljs_querydesc_start_to_jsvalue(JSContext *ctx, QueryDesc *queryDesc,
+                                        int eflags);
+JSValue pljs_querydesc_run_to_jsvalue(JSContext *ctx, QueryDesc *queryDesc,
+                                      ScanDirection direction, uint64 count,
+                                      bool execute_once);
+JSValue pljs_querydesc_to_jsvalue(JSContext *ctx, QueryDesc *queryDesc);
+// Shared utilities (pljs.c)
+char *pljs_dump_error(JSContext *ctx);
+void pljs_setup_start_proc(JSContext *ctx);

@@ -99,3 +99,14 @@ DO $$
   }
 $$ language pljs;
 INFO:  OK
+-- bytea from Uint8Array
+CREATE FUNCTION bytea_from_uint8array() RETURNS bytea AS $$
+  return new Uint8Array([0xDE, 0xAD, 0xBE, 0xEF]);
+$$ LANGUAGE pljs;
+SELECT encode(bytea_from_uint8array(), 'hex');
+  encode  
+----------
+ deadbeef
+(1 row)
+
+DROP FUNCTION bytea_from_uint8array();

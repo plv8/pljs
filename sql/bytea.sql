@@ -80,3 +80,10 @@ DO $$
     pljs.elog(WARNING, 'FAIL');
   }
 $$ language pljs;
+
+-- bytea from Uint8Array
+CREATE FUNCTION bytea_from_uint8array() RETURNS bytea AS $$
+  return new Uint8Array([0xDE, 0xAD, 0xBE, 0xEF]);
+$$ LANGUAGE pljs;
+SELECT encode(bytea_from_uint8array(), 'hex');
+DROP FUNCTION bytea_from_uint8array();

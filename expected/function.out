@@ -360,3 +360,41 @@ SELECT * FROM subtrant;
 ---
 (0 rows)
 
+-- SETOF return with return_next
+CREATE FUNCTION gen_rows() RETURNS SETOF int AS $$
+  pljs.return_next(10);
+  pljs.return_next(20);
+  pljs.return_next(30);
+$$ LANGUAGE pljs;
+SELECT * FROM gen_rows();
+ gen_rows 
+----------
+       10
+       20
+       30
+(3 rows)
+
+DROP FUNCTION gen_rows();
+-- JS syntax error in function body
+CREATE FUNCTION bad_syntax() RETURNS void AS $$ {{{{ $$ LANGUAGE pljs;
+-- Runtime error
+CREATE FUNCTION runtime_err() RETURNS void AS $$
+  throw new Error('test error');
+$$ LANGUAGE pljs;
+SELECT runtime_err();
+ERROR:  execution error
+DETAIL:  Error: test error
+    at runtime_err (<function>:3:18)
+
+DROP FUNCTION runtime_err();
+-- Type mismatch: return string for int
+CREATE FUNCTION type_mismatch() RETURNS int AS $$
+  return 'not a number';
+$$ LANGUAGE pljs;
+SELECT type_mismatch();
+ type_mismatch 
+---------------
+             0
+(1 row)
+
+DROP FUNCTION type_mismatch();

@@ -378,3 +378,15 @@ ERROR:  execution error
 DETAIL:  Error: get_window_object called in wrong context
     at non_window (<function>:3:38)
 
+-- window object toString()
+CREATE FUNCTION win_tostring() RETURNS text AS $$
+  var winobj = pljs.get_window_object();
+  return winobj.toString();
+$$ LANGUAGE pljs WINDOW;
+SELECT win_tostring() OVER ();
+  win_tostring   
+-----------------
+ [object Window]
+(1 row)
+
+DROP FUNCTION win_tostring();

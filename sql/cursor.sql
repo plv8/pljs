@@ -79,3 +79,58 @@ CREATE FUNCTION prep1() RETURNS void AS $$
   }
 $$ LANGUAGE pljs STRICT;
 SELECT prep1();
+
+-- plan and cursor toString()
+DO $$
+  var plan = pljs.prepare('SELECT 1 AS x');
+  pljs.elog(NOTICE, 'plan: ' + plan.toString());
+  var cur = plan.cursor();
+  pljs.elog(NOTICE, 'cursor: ' + cur.toString());
+  cur.close();
+  plan.free();
+$$ LANGUAGE pljs;
+
+-- pljs.execute() with parameters
+DO $$
+  var r = pljs.execute('SELECT $1::text || $2::text AS val', ['hello', ' world']);
+  pljs.elog(NOTICE, 'concat: ' + r[0].val);
+$$ LANGUAGE pljs;
+
+DO $$
+  var r = pljs.execute('SELECT $1::int + $2::int AS val', [10, 32]);
+  pljs.elog(NOTICE, 'add: ' + r[0].val);
+$$ LANGUAGE pljs;
+
+DO $$
+  var r = pljs.execute('SELECT $1::boolean AS val', [true]);
+  pljs.elog(NOTICE, 'bool: ' + r[0].val);
+$$ LANGUAGE pljs;
+
+DO $$
+  var r = pljs.execute('SELECT $1::float8 AS val', [3.14159]);
+  pljs.elog(NOTICE, 'float: ' + r[0].val);
+$$ LANGUAGE pljs;
+
+-- SPI utility statements
+DO $$
+  pljs.execute('CREATE TEMP TABLE _coverage_tmp (id int)');
+  var r = pljs.execute('INSERT INTO _coverage_tmp VALUES (1)');
+  pljs.elog(NOTICE, 'insert result: ' + r);
+  pljs.execute('DROP TABLE _coverage_tmp');
+$$ LANGUAGE pljs;
+
+-- SPI error path
+DO $$
+  try {
+    pljs.subtransaction(function() {
+      pljs.execute('SELECT * FROM nonexistent_table_for_coverage');
+    });
+  } catch(e) {
+    pljs.elog(NOTICE, 'SPI error caught: ' + e.message.substring(0, 40));
+  }
+$$ LANGUAGE pljs;
+
+DO $$
+  var r = pljs.execute('SELECT 1 AS ok');
+  pljs.elog(NOTICE, 'after error: ' + r[0].ok);
+$$ LANGUAGE pljs;

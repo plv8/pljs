@@ -231,3 +231,11 @@ CREATE FUNCTION non_window() RETURNS void AS $$
 $$ LANGUAGE pljs;
 
 SELECT non_window();
+
+-- window object toString()
+CREATE FUNCTION win_tostring() RETURNS text AS $$
+  var winobj = pljs.get_window_object();
+  return winobj.toString();
+$$ LANGUAGE pljs WINDOW;
+SELECT win_tostring() OVER ();
+DROP FUNCTION win_tostring();

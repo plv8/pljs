@@ -9,8 +9,8 @@ INCLUDEDIR_SERVER := ${shell $(PG_CONFIG) --includedir-server}
 
 
 CP = cp
-SRCS = src/pljs.c src/cache.c src/functions.c src/types.c src/params.c src/modules.c
-OBJS = src/pljs.o src/cache.o src/functions.o src/types.o src/params.o src/modules.o
+SRCS = src/pljs.c src/cache.c src/functions.c src/types.c src/params.c src/modules.c src/hooks.c
+OBJS = src/pljs.o src/cache.o src/functions.o src/types.o src/params.o src/modules.o src/hooks.o
 MODULE_big = pljs
 EXTENSION = pljs
 DATA = pljs.control pljs--$(PLJS_VERSION).sql
@@ -38,7 +38,8 @@ endif
 
 REGRESS = init-extension function json jsonb json_conv types bytea context \
 	cursor array_spread plv8_regressions memory_limits inline composites \
-	trigger procedure find_function start_proc window modules regressions
+	trigger procedure find_function start_proc window modules regressions \
+	hooks
 
 all: deps/quickjs/quickjs.h deps/quickjs/libquickjs.a pljs--$(PLJS_VERSION).sql
 

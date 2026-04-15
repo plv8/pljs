@@ -23,3 +23,23 @@ SELECT a FROM test1;
 -- cleanup
 DROP TABLE test1;
 DROP PROCEDURE transaction_test1;
+
+-- subtransaction with rollback
+CREATE TABLE subtxn_test (id int);
+
+DO $$
+  pljs.subtransaction(function() {
+    pljs.execute('INSERT INTO subtxn_test VALUES (1)');
+  });
+  try {
+    pljs.subtransaction(function() {
+      pljs.execute('INSERT INTO subtxn_test VALUES (2)');
+      throw new Error('rollback this');
+    });
+  } catch(e) {
+    pljs.elog(NOTICE, 'caught: ' + e.message);
+  }
+$$ LANGUAGE pljs;
+
+SELECT * FROM subtxn_test;
+DROP TABLE subtxn_test;

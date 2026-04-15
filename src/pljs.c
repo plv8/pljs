@@ -86,6 +86,49 @@ void _PG_init(void) {
   if (configuration.memory_limit) {
     JS_SetMemoryLimit(rt, configuration.memory_limit * 1024 * 1024);
   }
+
+  // Initialize hook JS classes and install hook callbacks.
+  pljs_hooks_init(rt);
+  pljs_hooks_install();
+}
+
+/**
+ * GUC check callbacks for hook-related GUCs.
+ *
+ * Without shared_preload_libraries, PGC_SUSET is not enforced for GUC
+ * placeholders set before the library loads. These check callbacks reject
+ * non-superuser attempts from interactive sources (SET command), closing
+ * the security gap where a non-superuser could set hook GUCs as
+ * placeholders that later take effect for superuser queries.
+ */
+static bool pljs_hook_bool_check(bool *newval, void **extra,
+                                 GucSource source) {
+  if (*newval && source >= PGC_S_INTERACTIVE && !superuser()) {
+    GUC_check_errmsg("permission denied to set hook parameter");
+    GUC_check_errhint("Must be superuser to enable PLJS hooks.");
+    return false;
+  }
+  return true;
+}
+
+static bool pljs_hook_int_check(int *newval, void **extra, GucSource source) {
+  if (source >= PGC_S_INTERACTIVE && !superuser()) {
+    GUC_check_errmsg("permission denied to set hook parameter");
+    GUC_check_errhint("Must be superuser to configure PLJS hooks.");
+    return false;
+  }
+  return true;
+}
+
+static bool pljs_hook_string_check(char **newval, void **extra,
+                                   GucSource source) {
+  if (*newval && (*newval)[0] != '\0' && source >= PGC_S_INTERACTIVE &&
+      !superuser()) {
+    GUC_check_errmsg("permission denied to set hook parameter");
+    GUC_check_errhint("Must be superuser to configure PLJS hooks.");
+    return false;
+  }
+  return true;
 }
 
 /**
@@ -114,6 +157,110 @@ void pljs_guc_init(void) {
       "pljs.start_proc",
       gettext_noop("PLJS function to run once when PLJS is first used."), NULL,
       &configuration.start_proc, NULL, PGC_USERSET, 0, NULL, NULL, NULL);
+
+  DefineCustomBoolVariable(
+      "pljs.hooks_enabled",
+      gettext_noop("Enable PLJS executor hooks."),
+      gettext_noop("When enabled, PLJS will install executor hooks that allow "
+                   "JavaScript functions to intercept query execution. "
+                   "Requires superuser to enable."),
+      &configuration.hooks_enabled, false, PGC_SUSET, 0,
+      pljs_hook_bool_check, NULL, NULL);
+
+  DefineCustomIntVariable(
+      "pljs.hooks_max_depth",
+      gettext_noop("Maximum recursion depth for PLJS hooks."),
+      gettext_noop("Limits how deeply hooks can recurse when a hook "
+                   "function triggers the same hook via pljs.execute(). "
+                   "Requires superuser to change."),
+      &configuration.hooks_max_depth, 5, 1, 64, PGC_SUSET, 0,
+      pljs_hook_int_check, NULL, NULL);
+
+  // Hook GUCs - each names a PLJS function to call for the given hook.
+  // All require superuser and pljs.hooks_enabled = true at runtime.
+  DefineCustomStringVariable(
+      "pljs.executor_start_hook",
+      gettext_noop("PLJS function to call on ExecutorStart."), NULL,
+      &configuration.hook_executor_start, NULL, PGC_SUSET, 0,
+      pljs_hook_string_check, NULL, NULL);
+
+  DefineCustomStringVariable(
+      "pljs.executor_run_hook",
+      gettext_noop("PLJS function to call on ExecutorRun."), NULL,
+      &configuration.hook_executor_run, NULL, PGC_SUSET, 0,
+      pljs_hook_string_check, NULL, NULL);
+
+  DefineCustomStringVariable(
+      "pljs.executor_end_hook",
+      gettext_noop("PLJS function to call on ExecutorEnd."), NULL,
+      &configuration.hook_executor_end, NULL, PGC_SUSET, 0,
+      pljs_hook_string_check, NULL, NULL);
+
+  DefineCustomStringVariable(
+      "pljs.planner_hook",
+      gettext_noop("PLJS function to call on planner."), NULL,
+      &configuration.hook_planner, NULL, PGC_SUSET, 0,
+      pljs_hook_string_check, NULL, NULL);
+
+  DefineCustomStringVariable(
+      "pljs.create_upper_paths_hook",
+      gettext_noop("PLJS function to call on create_upper_paths."), NULL,
+      &configuration.hook_create_upper_paths, NULL, PGC_SUSET, 0,
+      pljs_hook_string_check, NULL, NULL);
+
+  DefineCustomStringVariable(
+      "pljs.set_rel_pathlist_hook",
+      gettext_noop("PLJS function to call on set_rel_pathlist."), NULL,
+      &configuration.hook_set_rel_pathlist, NULL, PGC_SUSET, 0,
+      pljs_hook_string_check, NULL, NULL);
+
+  DefineCustomStringVariable(
+      "pljs.set_join_pathlist_hook",
+      gettext_noop("PLJS function to call on set_join_pathlist."), NULL,
+      &configuration.hook_set_join_pathlist, NULL, PGC_SUSET, 0,
+      pljs_hook_string_check, NULL, NULL);
+
+  DefineCustomStringVariable(
+      "pljs.join_search_hook",
+      gettext_noop("PLJS function to call on join_search."), NULL,
+      &configuration.hook_join_search, NULL, PGC_SUSET, 0,
+      pljs_hook_string_check, NULL, NULL);
+
+  DefineCustomStringVariable(
+      "pljs.get_relation_info_hook",
+      gettext_noop("PLJS function to call on get_relation_info."), NULL,
+      &configuration.hook_get_relation_info, NULL, PGC_SUSET, 0,
+      pljs_hook_string_check, NULL, NULL);
+
+  DefineCustomStringVariable(
+      "pljs.needs_fmgr_hook",
+      gettext_noop("PLJS function to call on needs_fmgr."), NULL,
+      &configuration.hook_needs_fmgr, NULL, PGC_SUSET, 0,
+      pljs_hook_string_check, NULL, NULL);
+
+  DefineCustomStringVariable(
+      "pljs.fmgr_hook",
+      gettext_noop("PLJS function to call on fmgr."), NULL,
+      &configuration.hook_fmgr, NULL, PGC_SUSET, 0,
+      pljs_hook_string_check, NULL, NULL);
+
+  DefineCustomStringVariable(
+      "pljs.object_access_hook",
+      gettext_noop("PLJS function to call on object_access."), NULL,
+      &configuration.hook_object_access, NULL, PGC_SUSET, 0,
+      pljs_hook_string_check, NULL, NULL);
+
+  DefineCustomStringVariable(
+      "pljs.object_access_hook_str",
+      gettext_noop("PLJS function to call on object_access_hook_str."), NULL,
+      &configuration.hook_object_access_str, NULL, PGC_SUSET, 0,
+      pljs_hook_string_check, NULL, NULL);
+
+  DefineCustomStringVariable(
+      "pljs.emit_log_hook",
+      gettext_noop("PLJS function to call on emit_log."), NULL,
+      &configuration.hook_emit_log, NULL, PGC_SUSET, 0,
+      pljs_hook_string_check, NULL, NULL);
 }
 
 /**
@@ -125,7 +272,7 @@ void pljs_guc_init(void) {
  * @param ctx #JSContext - Javascript context with the error
  * @returns @c char * as an error message
  */
-static char *dump_error(JSContext *ctx) {
+char *pljs_dump_error(JSContext *ctx) {
   JSValue exception_val, val;
   const char *stack;
   const char *str;
@@ -350,7 +497,7 @@ bool pljs_has_permission_to_execute(const char *signature) {
  * Finds, verifies, and executes a `pljs.start_proc` if one is set.
  * This is executed whenever a new context is created.
  */
-static void setup_start_proc(JSContext *ctx) {
+void pljs_setup_start_proc(JSContext *ctx) {
   JSValue func = JS_UNDEFINED;
 
   // Get a copy of the current memory context, we will need to switch to it in
@@ -395,10 +542,15 @@ static void setup_start_proc(JSContext *ctx) {
          configuration.start_proc);
   } else {
     JSValue ret = JS_Call(ctx, func, JS_UNDEFINED, 0, NULL);
+    JS_FreeValue(ctx, func);
+
     if (JS_IsException(ret)) {
+      JS_FreeValue(ctx, ret);
       ereport(ERROR, (errmsg("start proc execution error"),
-                      errdetail("%s", dump_error(ctx))));
+                      errdetail("%s", pljs_dump_error(ctx))));
     }
+
+    JS_FreeValue(ctx, ret);
   }
 }
 
@@ -489,6 +641,9 @@ pljs_storage *pljs_storage_for_context(JSContext *ctx) {
 
   pljs_storage *storage = JS_GetOpaque(pljs, js_pljs_storage_id);
 
+  JS_FreeValue(ctx, pljs);
+  JS_FreeValue(ctx, global_obj);
+
   return storage;
 }
 
@@ -532,6 +687,9 @@ static void store_storage_in_context(pljs_context *context,
 
   // Attach storage to the pljs object.
   JS_SetOpaque(pljs, storage);
+
+  JS_FreeValue(context->ctx, pljs);
+  JS_FreeValue(context->ctx, global_obj);
 }
 
 /**
@@ -586,7 +744,7 @@ Datum pljs_call_handler(PG_FUNCTION_ARGS) {
       // it.
       if (configuration.start_proc != NULL &&
           strlen(configuration.start_proc) != 0) {
-        setup_start_proc(ctx);
+        pljs_setup_start_proc(ctx);
       }
 
       // Save the context in the cache for this user id.
@@ -610,8 +768,6 @@ Datum pljs_call_handler(PG_FUNCTION_ARGS) {
     pljs_cache_function_add(&context);
   }
 
-  ReleaseSysCache(proctuple);
-
   if (is_trigger) {
     // Call in the context of a trigger.
     Form_pg_proc procStruct;
@@ -619,11 +775,16 @@ Datum pljs_call_handler(PG_FUNCTION_ARGS) {
     procStruct = (Form_pg_proc)GETSTRUCT(proctuple);
 
     context.function->rettype = procStruct->prorettype;
+
+    ReleaseSysCache(proctuple);
+
     retval = call_trigger(fcinfo, &context);
   } else {
     // Call as a function.
     JSValueConst *argv =
         convert_arguments_to_javascript(fcinfo, proctuple, &context);
+
+    ReleaseSysCache(proctuple);
 
     // Get the old storage object.
     pljs_storage *old_storage = pljs_storage_for_context(context.ctx);
@@ -636,6 +797,12 @@ Datum pljs_call_handler(PG_FUNCTION_ARGS) {
     } else {
       retval = call_function(fcinfo, &context, argv);
     }
+
+    // Free the argument JSValues.
+    for (int i = 0; i < context.function->inargs; i++) {
+      JS_FreeValue(context.ctx, (JSValue)argv[i]);
+    }
+    pfree(argv);
 
     // Reset to the old storage now that the call is over.
     store_storage_in_context(&context, old_storage);
@@ -680,7 +847,7 @@ Datum pljs_inline_handler(PG_FUNCTION_ARGS) {
     // it.
     if (configuration.start_proc != NULL &&
         strlen(configuration.start_proc) != 0) {
-      setup_start_proc(ctx);
+      pljs_setup_start_proc(ctx);
     }
 
     // Save the context
@@ -740,8 +907,10 @@ Datum pljs_call_validator(PG_FUNCTION_ARGS) {
 
   if (JS_IsException(val)) {
     ereport(ERROR,
-            (errmsg("execution error"), errdetail("%s", dump_error(ctx))));
+            (errmsg("execution error"), errdetail("%s", pljs_dump_error(ctx))));
   }
+
+  JS_FreeValue(ctx, val);
 
   // call validator can release the context
   JS_FreeContext(ctx);
@@ -819,7 +988,7 @@ JSValue pljs_compile_function(pljs_context *context, bool is_trigger) {
     return val;
   } else {
     ereport(ERROR, (errmsg("execution error"),
-                    errdetail("%s", dump_error(context->ctx))));
+                    errdetail("%s", pljs_dump_error(context->ctx))));
 
     return JS_UNDEFINED;
   }
@@ -849,11 +1018,12 @@ static void call_anonymous_function(const char *source, JSContext *ctx) {
   JSValue val = JS_Eval(ctx, src.data, strlen(src.data), "<function>", 0);
 
   if (!JS_IsException(val)) {
+    JS_FreeValue(ctx, val);
     pfree(src.data);
   } else {
 
     ereport(ERROR,
-            (errmsg("execution error"), errdetail("%s", dump_error(ctx))));
+            (errmsg("execution error"), errdetail("%s", pljs_dump_error(ctx))));
   }
 }
 
@@ -965,11 +1135,16 @@ static Datum call_trigger(FunctionCallInfo fcinfo, pljs_context *context) {
   JSValue ret =
       JS_Call(context->ctx, context->js_function, JS_UNDEFINED, 10, argv);
 
-  if (JS_IsException(ret)) {
-    ereport(ERROR, (errmsg("execution error"),
-                    errdetail("%s", dump_error(context->ctx))));
+  // Free all trigger argument JSValues.
+  for (int i = 0; i < 10; i++) {
+    JS_FreeValue(context->ctx, (JSValue)argv[i]);
+  }
 
+  if (JS_IsException(ret)) {
     JS_FreeValue(context->ctx, ret);
+
+    ereport(ERROR, (errmsg("execution error"),
+                    errdetail("%s", pljs_dump_error(context->ctx))));
 
     MemoryContextSwitchTo(old_context);
     PG_RETURN_VOID();
@@ -1043,7 +1218,7 @@ static Datum call_function(FunctionCallInfo fcinfo, pljs_context *context,
   SPI_finish();
 
   if (JS_IsException(ret)) {
-    char *error_message = dump_error(context->ctx);
+    char *error_message = pljs_dump_error(context->ctx);
 
     JS_FreeValue(context->ctx, ret);
 
@@ -1168,7 +1343,7 @@ static Datum call_srf_function(FunctionCallInfo fcinfo, pljs_context *context,
   SPI_finish();
 
   if (JS_IsException(ret)) {
-    char *error_message = dump_error(context->ctx);
+    char *error_message = pljs_dump_error(context->ctx);
 
     JS_FreeValue(context->ctx, ret);
 

@@ -223,3 +223,29 @@ pljs.subtransaction(function(){
 $$ LANGUAGE pljs;
 SELECT test_subtransaction_throw();
 SELECT * FROM subtrant;
+
+-- SETOF return with return_next
+CREATE FUNCTION gen_rows() RETURNS SETOF int AS $$
+  pljs.return_next(10);
+  pljs.return_next(20);
+  pljs.return_next(30);
+$$ LANGUAGE pljs;
+SELECT * FROM gen_rows();
+DROP FUNCTION gen_rows();
+
+-- JS syntax error in function body
+CREATE FUNCTION bad_syntax() RETURNS void AS $$ {{{{ $$ LANGUAGE pljs;
+
+-- Runtime error
+CREATE FUNCTION runtime_err() RETURNS void AS $$
+  throw new Error('test error');
+$$ LANGUAGE pljs;
+SELECT runtime_err();
+DROP FUNCTION runtime_err();
+
+-- Type mismatch: return string for int
+CREATE FUNCTION type_mismatch() RETURNS int AS $$
+  return 'not a number';
+$$ LANGUAGE pljs;
+SELECT type_mismatch();
+DROP FUNCTION type_mismatch();

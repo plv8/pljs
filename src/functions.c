@@ -171,6 +171,8 @@ void pljs_setup_namespace(JSContext *ctx) {
   JS_SetPropertyStr(ctx, global_obj, "NOTICE", JS_NewInt32(ctx, NOTICE));
   JS_SetPropertyStr(ctx, global_obj, "WARNING", JS_NewInt32(ctx, WARNING));
   JS_SetPropertyStr(ctx, global_obj, "ERROR", JS_NewInt32(ctx, ERROR));
+
+  JS_FreeValue(ctx, global_obj);
 }
 
 /**
@@ -1608,9 +1610,13 @@ Datum pljs_info(PG_FUNCTION_ARGS) {
 }
 
 Datum pljs_reset(PG_FUNCTION_ARGS) {
+  pljs_cache_free_all();
   JS_FreeRuntime(rt);
+
   rt = JS_NewRuntime();
-  pljs_cache_reset();
+  if (configuration.memory_limit) {
+    JS_SetMemoryLimit(rt, configuration.memory_limit * 1024 * 1024);
+  }
 
   PG_RETURN_VOID();
 }
