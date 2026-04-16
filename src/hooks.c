@@ -231,9 +231,14 @@ JSValue pljs_querydesc_start_to_jsvalue(JSContext *ctx, QueryDesc *queryDesc,
   return obj;
 }
 
+#if PG_VERSION_NUM >= 180000
+JSValue pljs_querydesc_run_to_jsvalue(JSContext *ctx, QueryDesc *queryDesc,
+                                      ScanDirection direction, uint64 count) {
+#else
 JSValue pljs_querydesc_run_to_jsvalue(JSContext *ctx, QueryDesc *queryDesc,
                                       ScanDirection direction, uint64 count,
                                       bool execute_once) {
+#endif
   JSValue obj = JS_NewObjectClass(ctx, js_querydesc_id);
   JS_SetOpaque(obj, queryDesc);
 
@@ -246,7 +251,9 @@ JSValue pljs_querydesc_run_to_jsvalue(JSContext *ctx, QueryDesc *queryDesc,
   JS_SetPropertyStr(ctx, obj, "direction",
                     JS_NewString(ctx, scandirection_to_string(direction)));
   JS_SetPropertyStr(ctx, obj, "count", JS_NewFloat64(ctx, (double)count));
+#if PG_VERSION_NUM < 180000
   JS_SetPropertyStr(ctx, obj, "executeOnce", JS_NewBool(ctx, execute_once));
+#endif
 
   return obj;
 }
@@ -442,9 +449,14 @@ static void pljs_executor_start_hook(QueryDesc *queryDesc, int eflags) {
     standard_ExecutorStart(queryDesc, eflags);
 }
 
+#if PG_VERSION_NUM >= 180000
+static void pljs_executor_run_hook(QueryDesc *queryDesc,
+                                   ScanDirection direction, uint64 count) {
+#else
 static void pljs_executor_run_hook(QueryDesc *queryDesc,
                                    ScanDirection direction, uint64 count,
                                    bool execute_once) {
+#endif
   if (pljs_hook_is_active(configuration.hook_executor_run)) {
     if (depth_executor_run >= configuration.hooks_max_depth) {
       elog(WARNING, "pljs: executor_run exceeded max recursion depth");
@@ -460,8 +472,13 @@ static void pljs_executor_run_hook(QueryDesc *queryDesc,
 
       if (!JS_IsUndefined(func)) {
         JSValue args[1];
+#if PG_VERSION_NUM >= 180000
+        args[0] = pljs_querydesc_run_to_jsvalue(ctx, queryDesc, direction,
+                                                count);
+#else
         args[0] = pljs_querydesc_run_to_jsvalue(ctx, queryDesc, direction,
                                                 count, execute_once);
+#endif
 
         SPI_connect();
         JSValue ret = JS_Call(ctx, func, JS_UNDEFINED, 1, args);
@@ -488,10 +505,17 @@ static void pljs_executor_run_hook(QueryDesc *queryDesc,
     }
   }
 
+#if PG_VERSION_NUM >= 180000
+  if (prev_ExecutorRun)
+    prev_ExecutorRun(queryDesc, direction, count);
+  else
+    standard_ExecutorRun(queryDesc, direction, count);
+#else
   if (prev_ExecutorRun)
     prev_ExecutorRun(queryDesc, direction, count, execute_once);
   else
     standard_ExecutorRun(queryDesc, direction, count, execute_once);
+#endif
 }
 
 static void pljs_executor_end_hook(QueryDesc *queryDesc) {

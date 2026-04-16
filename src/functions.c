@@ -76,6 +76,7 @@ static JSValue pljs_gc(JSContext *, JSValueConst, int, JSValueConst *);
 #endif
 
 static JSValue pljs_import(JSContext *, JSValueConst, int, JSValueConst *);
+static JSValue pljs_require(JSContext *, JSValueConst, int, JSValueConst *);
 
 // Set up any stored procedures we export to Postgres.
 PGDLLEXPORT Datum pljs_version(PG_FUNCTION_ARGS);
@@ -157,6 +158,9 @@ void pljs_setup_namespace(JSContext *ctx) {
 
   JS_SetPropertyStr(ctx, pljs, "import",
                     JS_NewCFunction(ctx, pljs_import, "import", 1));
+
+  JS_SetPropertyStr(ctx, pljs, "require",
+                    JS_NewCFunction(ctx, pljs_require, "require", 1));
 
   JS_SetPropertyStr(ctx, global_obj, "pljs", pljs);
 
@@ -1571,15 +1575,32 @@ static JSValue pljs_gc(JSContext *ctx, JSValueConst this_val, int argc,
 static JSValue pljs_import(JSContext *ctx, JSValueConst this_val, int argc,
                            JSValueConst *argv) {
   if (argc != 1) {
-    return js_throw("import() expects exactly one argument", ctx);
+    return js_throw("pljs.import() expects exactly one argument", ctx);
   }
 
   if (!JS_IsString(argv[0])) {
-    return js_throw("import() expects a string", ctx);
+    return js_throw("pljs.import() expects a string", ctx);
   }
 
   const char *path = JS_ToCString(ctx, argv[0]);
-  JSValue ret = pljs_module_load(ctx, path);
+  JSValue ret = pljs_module_import(ctx, path);
+  JS_FreeCString(ctx, path);
+
+  return ret;
+}
+
+static JSValue pljs_require(JSContext *ctx, JSValueConst this_val, int argc,
+                            JSValueConst *argv) {
+  if (argc != 1) {
+    return js_throw("pljs.require() expects exactly one argument", ctx);
+  }
+
+  if (!JS_IsString(argv[0])) {
+    return js_throw("pljs.require() expects a string", ctx);
+  }
+
+  const char *path = JS_ToCString(ctx, argv[0]);
+  JSValue ret = pljs_module_require(ctx, path);
   JS_FreeCString(ctx, path);
 
   return ret;

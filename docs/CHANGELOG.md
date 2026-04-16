@@ -47,3 +47,4 @@ Released _January 11, 2026_.
 
 - Added `pljs.import`
 - Added initial hook support
+- Added `pljs.require` for commonjs modules

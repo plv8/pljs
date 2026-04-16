@@ -139,9 +139,117 @@ DO $$
   }
 $$ LANGUAGE pljs;
 INFO:  undefined
+-- ============================================================
+-- pljs.require() - CommonJS modules
+-- ============================================================
+-- Basic require with module.exports
+INSERT INTO pljs.modules (path, source) VALUES
+  ('cjs/math', 'function add(a, b) { return a + b; } function multiply(a, b) { return a * b; } module.exports = { add, multiply };');
+DO $$
+  var math = pljs.require('cjs/math');
+  pljs.elog(INFO, math.add(2, 3));
+  pljs.elog(INFO, math.multiply(4, 5));
+$$ LANGUAGE pljs;
+INFO:  5
+INFO:  20
+-- Require with exports.prop assignment
+INSERT INTO pljs.modules (path, source) VALUES
+  ('cjs/greeter', 'function greet(name) { return "Hello, " + name + "!"; } exports.greet = greet;');
+CREATE FUNCTION test_module_require() RETURNS text AS $$
+  var mod = pljs.require('cjs/greeter');
+  return mod.greet('world');
+$$ LANGUAGE pljs;
+SELECT test_module_require();
+ test_module_require 
+---------------------
+ Hello, world!
+(1 row)
+
+-- Require with path-like names
+INSERT INTO pljs.modules (path, source) VALUES
+  ('cjs/lib/strings', 'exports.upper = function(s) { return s.toUpperCase(); }; exports.lower = function(s) { return s.toLowerCase(); };');
+DO $$
+  var strings = pljs.require('cjs/lib/strings');
+  pljs.elog(INFO, strings.upper('hello'));
+  pljs.elog(INFO, strings.lower('WORLD'));
+$$ LANGUAGE pljs;
+INFO:  HELLO
+INFO:  world
+-- Require with module.exports replacing the whole object
+INSERT INTO pljs.modules (path, source) VALUES
+  ('cjs/constants', 'var PI = 3.14159; var E = 2.71828; function circumference(r) { return 2 * PI * r; } module.exports = { PI: PI, E: E, circumference: circumference };');
+CREATE FUNCTION circle_info_cjs(r float8) RETURNS text AS $$
+  var c = pljs.require('cjs/constants');
+  return 'r=' + r + ' C=' + c.circumference(r).toFixed(2) + ' PI=' + c.PI;
+$$ LANGUAGE pljs;
+SELECT circle_info_cjs(10);
+     circle_info_cjs     
+-------------------------
+ r=10 C=62.83 PI=3.14159
+(1 row)
+
+-- Require a module that does not exist
+DO $$
+  try {
+    pljs.require('nonexistent_cjs_module');
+    pljs.elog(ERROR, 'should not reach here');
+  } catch (e) {
+    pljs.elog(INFO, e.message);
+  }
+$$ LANGUAGE pljs;
+INFO:  could not load module 'nonexistent_cjs_module'
+-- Using require from a named function
+INSERT INTO pljs.modules (path, source) VALUES
+  ('cjs/validators', 'exports.isPositive = function(n) { return n > 0; }; exports.isEven = function(n) { return n % 2 === 0; };');
+CREATE FUNCTION check_number_cjs(n integer) RETURNS text AS $$
+  var v = pljs.require('cjs/validators');
+  var parts = [];
+  if (v.isPositive(n)) parts.push('positive');
+  if (v.isEven(n)) parts.push('even');
+  return parts.length > 0 ? parts.join(', ') : 'negative and odd';
+$$ LANGUAGE pljs;
+SELECT check_number_cjs(4);
+ check_number_cjs 
+------------------
+ positive, even
+(1 row)
+
+SELECT check_number_cjs(-3);
+ check_number_cjs 
+------------------
+ negative and odd
+(1 row)
+
+-- Multiple requires in one block
+DO $$
+  var math = pljs.require('cjs/math');
+  var v = pljs.require('cjs/validators');
+  var result = math.add(10, 20);
+  pljs.elog(INFO, 'sum=' + result + ' positive=' + v.isPositive(result));
+$$ LANGUAGE pljs;
+INFO:  sum=30 positive=true
+-- Module exporting a single function via module.exports
+INSERT INTO pljs.modules (path, source) VALUES
+  ('cjs/single', 'module.exports = function(x) { return x * x; };');
+DO $$
+  var square = pljs.require('cjs/single');
+  pljs.elog(INFO, 'square(7) = ' + square(7));
+$$ LANGUAGE pljs;
+INFO:  square(7) = 49
+-- Module exporting a single value
+INSERT INTO pljs.modules (path, source) VALUES
+  ('cjs/version', 'module.exports = "1.0.0";');
+DO $$
+  var ver = pljs.require('cjs/version');
+  pljs.elog(INFO, 'version = ' + ver);
+$$ LANGUAGE pljs;
+INFO:  version = 1.0.0
 -- Cleanup
 DROP FUNCTION circle_info_chained(float8);
 DROP FUNCTION test_module_import();
 DROP FUNCTION circle_info(float8);
 DROP FUNCTION check_number(integer);
+DROP FUNCTION test_module_require();
+DROP FUNCTION circle_info_cjs(float8);
+DROP FUNCTION check_number_cjs(integer);
 DELETE FROM pljs.modules;

@@ -100,7 +100,7 @@ static uint8_t *pljs_read_module(size_t *pbuf_len, const char *filename) {
  * @param module_name The name of the module to load.
  * @returns JSValue A copy of the compiled module.
  */
-JSValue pljs_module_load(JSContext *ctx, const char *module_name) {
+JSValue pljs_module_import(JSContext *ctx, const char *module_name) {
   size_t buf_len;
   char *buf;
 
@@ -114,7 +114,7 @@ JSValue pljs_module_load(JSContext *ctx, const char *module_name) {
   /* compile the module */
   JSValue res = JS_Eval(ctx, buf, buf_len, module_name,
                         JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY);
-  // pfree(buf);
+  pfree(buf);
 
   if (JS_IsException(res)) {
     JSValue ex = JS_GetException(ctx);
@@ -149,4 +149,90 @@ JSValue pljs_module_load(JSContext *ctx, const char *module_name) {
   JS_FreeValue(ctx, res);
   JSValue ns = JS_GetModuleNamespace(ctx, m);
   return ns;
+}
+
+/**
+ * @brief Require a JavaScript commonjs module from the database.
+ *
+ * @param ctx The JavaScript context to use for loading the module.
+ * @param module_name The name of the module to load.
+ * @returns JSValue A copy of the compiled module.
+ */
+JSValue pljs_module_require(JSContext *ctx, const char *module_name) {
+  size_t buf_len;
+  char *buf;
+
+  buf = (char *)pljs_read_module(&buf_len, module_name);
+  if (!buf) {
+    JS_ThrowReferenceError(ctx, "could not load module '%s'", module_name);
+
+    return JS_EXCEPTION;
+  }
+
+  JSValue global = JS_GetGlobalObject(ctx);
+
+  /* Set up CommonJS globals: module = { exports: {} }, exports = module.exports
+   */
+  JSValue module_obj = JS_NewObject(ctx);
+  JSValue exports_obj = JS_NewObject(ctx);
+  JS_SetPropertyStr(ctx, module_obj, "exports", JS_DupValue(ctx, exports_obj));
+  JS_SetPropertyStr(ctx, global, "module", JS_DupValue(ctx, module_obj));
+  JS_SetPropertyStr(ctx, global, "exports", JS_DupValue(ctx, exports_obj));
+  JS_FreeValue(ctx, exports_obj);
+  JS_FreeValue(ctx, module_obj);
+
+  /* compile the module */
+  JSValue res =
+      JS_Eval(ctx, buf, buf_len, module_name, JS_EVAL_FLAG_COMPILE_ONLY);
+  pfree(buf);
+
+  if (JS_IsException(res)) {
+    JSValue ex = JS_GetException(ctx);
+    const char *err = JS_ToCString(ctx, ex);
+    elog(WARNING, "could not compile commonjs module '%s': %s", module_name,
+         err);
+
+    JS_FreeCString(ctx, err);
+    JS_FreeValue(ctx, ex);
+    JS_FreeValue(ctx, global);
+
+    return JS_EXCEPTION;
+  }
+
+  /* execute the compiled bytecode */
+  JSValue eval_res = JS_EvalFunction(ctx, res);
+
+  if (JS_IsException(eval_res)) {
+    JSValue ex = JS_GetException(ctx);
+    const char *err = JS_ToCString(ctx, ex);
+    elog(WARNING, "could not execute commonjs module '%s': %s", module_name,
+         err);
+
+    JS_FreeCString(ctx, err);
+    JS_FreeValue(ctx, ex);
+    JS_FreeValue(ctx, global);
+
+    return JS_EXCEPTION;
+  }
+
+  JS_FreeValue(ctx, eval_res);
+
+  /* check module.exports first, then exports */
+  JSValue result = JS_UNDEFINED;
+  JSValue mod = JS_GetPropertyStr(ctx, global, "module");
+
+  if (!JS_IsUndefined(mod) && !JS_IsNull(mod)) {
+    result = JS_GetPropertyStr(ctx, mod, "exports");
+  }
+
+  JS_FreeValue(ctx, mod);
+
+  if (JS_IsUndefined(result) || JS_IsNull(result)) {
+    JS_FreeValue(ctx, result);
+    result = JS_GetPropertyStr(ctx, global, "exports");
+  }
+
+  JS_FreeValue(ctx, global);
+
+  return result;
 }

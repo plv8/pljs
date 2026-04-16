@@ -232,7 +232,8 @@ ParamListInfo pljs_setup_variable_paramlist(pljs_param_state *, Datum *,
 JSModuleDef *pljs_defaultjs_module_loader(JSContext *ctx,
                                           const char *module_name,
                                           void *opaque);
-JSValue pljs_module_load(JSContext *ctx, const char *module_name);
+JSValue pljs_module_import(JSContext *ctx, const char *module_name);
+JSValue pljs_module_require(JSContext *ctx, const char *module_name);
 
 // hooks.c
 extern JSClassID js_querydesc_id;
@@ -242,9 +243,14 @@ void pljs_hooks_init(JSRuntime *runtime);
 void pljs_hooks_install(void);
 JSValue pljs_querydesc_start_to_jsvalue(JSContext *ctx, QueryDesc *queryDesc,
                                         int eflags);
+#if PG_VERSION_NUM >= 180000
+JSValue pljs_querydesc_run_to_jsvalue(JSContext *ctx, QueryDesc *queryDesc,
+                                      ScanDirection direction, uint64 count);
+#else
 JSValue pljs_querydesc_run_to_jsvalue(JSContext *ctx, QueryDesc *queryDesc,
                                       ScanDirection direction, uint64 count,
                                       bool execute_once);
+#endif
 JSValue pljs_querydesc_to_jsvalue(JSContext *ctx, QueryDesc *queryDesc);
 // Shared utilities (pljs.c)
 char *pljs_dump_error(JSContext *ctx);
