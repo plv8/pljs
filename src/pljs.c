@@ -20,7 +20,11 @@
 
 #include "pljs.h"
 
+#if PG_VERSION_NUM >= 180000
+PG_MODULE_MAGIC_EXT(.name = "pljs", .version = PLJS_VERSION);
+#else
 PG_MODULE_MAGIC;
+#endif
 
 PG_FUNCTION_INFO_V1(pljs_call_handler);
 PG_FUNCTION_INFO_V1(pljs_call_validator);
