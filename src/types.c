@@ -924,7 +924,7 @@ Datum pljs_jsvalue_to_datum(Oid rettype, JSValue val, bool *is_null,
         *is_null = true;
       }
 
-      PG_RETURN_NULL();
+      PG_RETURN_VOID();
     }
   }
 
