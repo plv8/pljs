@@ -11,6 +11,7 @@
 #include "nodes/params.h"
 #include "parser/parse_node.h"
 #include "utils/palloc.h"
+#include "utils/tuplestore.h"
 #include "windowapi.h"
 
 #include "deps/quickjs/quickjs-libc.h"
