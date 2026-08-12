@@ -1501,12 +1501,27 @@ static JSValue convert_jsonb(JsonbContainer *in, JSContext *ctx) {
   return jsonb_iterate(&it, container, ctx);
 }
 
+#if PG_VERSION_NUM >= 190000
+typedef JsonbInState JsonbBuildState;
+static JsonbValue *jsonb_push(JsonbBuildState *pstate, JsonbIteratorToken seq,
+                              JsonbValue *jbval) {
+  pushJsonbValue(pstate, seq, jbval);
+  return pstate->result;
+}
+#else
+typedef JsonbParseState *JsonbBuildState;
+static JsonbValue *jsonb_push(JsonbBuildState *pstate, JsonbIteratorToken seq,
+                              JsonbValue *jbval) {
+  return pushJsonbValue(pstate, seq, jbval);
+}
+#endif
+
 // Forward declarations of the conversion functions.
 static JsonbValue *jsonb_object_from_object(JSValue object,
-                                            JsonbParseState **pstate,
+                                            JsonbBuildState *pstate,
                                             JSContext *ctx);
 static JsonbValue *
-jsonb_array_from_array(JSValue array, JsonbParseState **pstate, JSContext *ctx);
+jsonb_array_from_array(JSValue array, JsonbBuildState *pstate, JSContext *ctx);
 
 /**
  * @brief Converts a Postgres time in milliseconds to a 8601 datetime string.
@@ -1532,14 +1547,13 @@ static char *time_as_8601(double millis) {
 /**
  * @brief Converts a #JSValue into a `JSONB` value.
  *
- * @param parse_state #JsonbParseState - current state of the `JSONB` parsing
+ * @param pstate #JsonbBuildState - current state of the `JSONB` parsing
  * @param value #JSValue - the value to convert
  * @param type #JsonbIteratorToken
  * @param ctx #JSContext - Javascript context to execute in
  * @returns #JsonbValue `JSONB` result from the conversion
  */
-static JsonbValue *jsonb_from_value(JSValue value,
-                                    JsonbParseState **parse_state,
+static JsonbValue *jsonb_from_value(JSValue value, JsonbBuildState *pstate,
                                     JsonbIteratorToken type, JSContext *ctx,
                                     const char *key) {
   JsonbValue val;
@@ -1607,22 +1621,22 @@ static JsonbValue *jsonb_from_value(JSValue value,
   }
 
   // Push the result into the parse_state.
-  return pushJsonbValue(parse_state, type, &val);
+  return jsonb_push(pstate, type, &val);
 }
 
 /**
  * @brief Converts a #JSValue `Array` to a #JsonbValue array.
  *
  * @param array #JSValue - `Array` to convert
- * @param parse_state #JsonbParseState - the parse state of the `JSONB` object
+ * @param pstate #JsonbBuildState - the parse state of the `JSONB` object
  * @param ctx #JSContext - Javascript context to execute in
  * @returns #JsonbValue of the `JSONB` array
  */
 static JsonbValue *jsonb_array_from_array(JSValue array,
-                                          JsonbParseState **parse_state,
+                                          JsonbBuildState *pstate,
                                           JSContext *ctx) {
   // Push the beginning of the array into the parse state.
-  JsonbValue *value = pushJsonbValue(parse_state, WJB_BEGIN_ARRAY, NULL);
+  JsonbValue *value = jsonb_push(pstate, WJB_BEGIN_ARRAY, NULL);
 
   // Get the length of the `Array`.
   int32_t array_length = pljs_js_array_length(array, ctx);
@@ -1634,11 +1648,11 @@ static JsonbValue *jsonb_array_from_array(JSValue array,
 
     // For each type, set `value` to the result.
     if (JS_IsArray(ctx, elem)) {
-      value = jsonb_array_from_array(elem, parse_state, ctx);
+      value = jsonb_array_from_array(elem, pstate, ctx);
     } else if (JS_IsObject(elem)) {
-      value = jsonb_object_from_object(elem, parse_state, ctx);
+      value = jsonb_object_from_object(elem, pstate, ctx);
     } else {
-      value = jsonb_from_value(elem, parse_state, WJB_ELEM, ctx, NULL);
+      value = jsonb_from_value(elem, pstate, WJB_ELEM, ctx, NULL);
     }
 
     // Free up the element.
@@ -1646,7 +1660,7 @@ static JsonbValue *jsonb_array_from_array(JSValue array,
   }
 
   // Set the value to the end of the array.
-  value = pushJsonbValue(parse_state, WJB_END_ARRAY, NULL);
+  value = jsonb_push(pstate, WJB_END_ARRAY, NULL);
 
   return value;
 }
@@ -1655,15 +1669,15 @@ static JsonbValue *jsonb_array_from_array(JSValue array,
  * @brief Converts a #JSValue `Object` to a #JsonbValue object.
  *
  * @param object #JSValue - `Object` to convert
- * @param parse_state #JsonbParseState - the parse state of the `JSONB` object
+ * @param pstate #JsonbBuildState - the parse state of the `JSONB` object
  * @param ctx #JSContext - Javascript context to execute in
  * @returns #JsonbValue of the `JSONB` object
  */
 static JsonbValue *jsonb_object_from_object(JSValue object,
-                                            JsonbParseState **parse_state,
+                                            JsonbBuildState *pstate,
                                             JSContext *ctx) {
   // Push the beginning of the object intp the parse state.
-  JsonbValue *value = pushJsonbValue(parse_state, WJB_BEGIN_OBJECT, NULL);
+  JsonbValue *value = jsonb_push(pstate, WJB_BEGIN_OBJECT, NULL);
   uint32_t object_keys_length = 0;
   JSPropertyEnum *tab;
 
@@ -1681,17 +1695,17 @@ static JsonbValue *jsonb_object_from_object(JSValue object,
 
     const char *key = JS_AtomToCString(ctx, tab[object_key].atom);
 
-    value = jsonb_from_value(o, parse_state, WJB_KEY, ctx, key);
+    value = jsonb_from_value(o, pstate, WJB_KEY, ctx, key);
 
     // If the value is an `Array` the convert it.
     if (JS_IsArray(ctx, o)) {
-      value = jsonb_array_from_array(o, parse_state, ctx);
+      value = jsonb_array_from_array(o, pstate, ctx);
     } else if (JS_IsObject(o)) {
       // Or convert an `Object`.
-      value = jsonb_object_from_object(o, parse_state, ctx);
+      value = jsonb_object_from_object(o, pstate, ctx);
     } else {
       // Or anything else.
-      value = jsonb_from_value(o, parse_state, WJB_VALUE, ctx, NULL);
+      value = jsonb_from_value(o, pstate, WJB_VALUE, ctx, NULL);
     }
 
     // Free up the memory.
@@ -1699,7 +1713,7 @@ static JsonbValue *jsonb_object_from_object(JSValue object,
   }
 
   // Push that we are at the end of an object.
-  value = pushJsonbValue(parse_state, WJB_END_OBJECT, NULL);
+  value = jsonb_push(pstate, WJB_END_OBJECT, NULL);
 
   return value;
 }
@@ -1720,7 +1734,7 @@ static Jsonb *convert_object(JSValue object, JSContext *ctx) {
 
   MemoryContextSwitchTo(conversion_context);
 
-  JsonbParseState *parse_state = NULL;
+  JsonbBuildState parse_state = {0};
   JsonbValue *value;
 
   // Check the type and get its value.
@@ -1729,9 +1743,9 @@ static Jsonb *convert_object(JSValue object, JSContext *ctx) {
   } else if (JS_IsObject(object)) {
     value = jsonb_object_from_object(object, &parse_state, ctx);
   } else {
-    pushJsonbValue(&parse_state, WJB_BEGIN_ARRAY, NULL);
+    jsonb_push(&parse_state, WJB_BEGIN_ARRAY, NULL);
     jsonb_from_value(object, &parse_state, WJB_ELEM, ctx, NULL);
-    value = pushJsonbValue(&parse_state, WJB_END_ARRAY, NULL);
+    value = jsonb_push(&parse_state, WJB_END_ARRAY, NULL);
     value->val.array.rawScalar = true;
   }
 
