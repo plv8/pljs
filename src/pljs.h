@@ -167,7 +167,7 @@ Datum pljs_inline_handler(PG_FUNCTION_ARGS);
 void _PG_init(void);
 void pljs_guc_init(void);
 void pljs_cache_init(void);
-void pljs_setup_namespace(JSContext *ctx);
+extern PGDLLEXPORT void pljs_setup_namespace(JSContext *ctx);
 
 // Throw a Javascript error
 JSValue js_throw(const char *, JSContext *);
@@ -201,8 +201,10 @@ void pljs_cache_free_all(void);
 // type.c
 
 // To Javascript
-JSValue pljs_datum_to_jsvalue(Oid argtype, Datum arg, bool is_null,
-                              bool expand_composite, JSContext *ctx);
+extern PGDLLEXPORT JSValue pljs_datum_to_jsvalue(Oid argtype, Datum arg,
+                                                 bool is_null,
+                                                 bool expand_composite,
+                                                 JSContext *ctx);
 JSValue pljs_datum_to_array(pljs_type *type, Datum arg, JSContext *ctx);
 JSValue pljs_datum_to_object(pljs_type *type, Datum arg, JSContext *ctx);
 JSValue pljs_tuple_to_jsvalue(TupleDesc, HeapTuple, JSContext *ctx);
@@ -215,11 +217,13 @@ Datum pljs_jsvalue_to_datum(Oid rettype, JSValue val, bool *is_null,
                             JSContext *ctx, FunctionCallInfo fcinfo);
 Datum pljs_jsvalue_to_record(pljs_type *type, JSValue val, bool *is_null,
                              TupleDesc tupdesc, JSContext *ctx);
-Datum *pljs_jsvalue_to_datums(pljs_type *type, JSValue val, bool **is_null,
-                              TupleDesc tupdesc, JSContext *ctx);
+extern PGDLLEXPORT Datum *pljs_jsvalue_to_datums(pljs_type *type, JSValue val,
+                                                 bool **is_null,
+                                                 TupleDesc tupdesc,
+                                                 JSContext *ctx);
 
 // Utility
-uint32_t pljs_js_array_length(JSValue, JSContext *);
+extern PGDLLEXPORT uint32_t pljs_js_array_length(JSValue, JSContext *);
 void pljs_type_fill(pljs_type *, Oid);
 bool pljs_jsvalue_object_contains_all_column_names(JSValue val, JSContext *ctx,
                                                    TupleDesc tupdesc);
@@ -233,7 +237,8 @@ JSModuleDef *pljs_defaultjs_module_loader(JSContext *ctx,
                                           const char *module_name,
                                           void *opaque);
 JSValue pljs_module_import(JSContext *ctx, const char *module_name);
-JSValue pljs_module_require(JSContext *ctx, const char *module_name);
+extern PGDLLEXPORT JSValue pljs_module_require(JSContext *ctx,
+                                               const char *module_name);
 
 // hooks.c
 extern JSClassID js_querydesc_id;
@@ -253,5 +258,5 @@ JSValue pljs_querydesc_run_to_jsvalue(JSContext *ctx, QueryDesc *queryDesc,
 #endif
 JSValue pljs_querydesc_to_jsvalue(JSContext *ctx, QueryDesc *queryDesc);
 // Shared utilities (pljs.c)
-char *pljs_dump_error(JSContext *ctx);
+extern PGDLLEXPORT char *pljs_dump_error(JSContext *ctx);
 void pljs_setup_start_proc(JSContext *ctx);
