@@ -1064,7 +1064,7 @@ Datum pljs_jsvalue_to_datum(Oid rettype, JSValue val, bool *is_null,
 #if JSONB_DIRECT_CONVERSION
     {
       Jsonb *obj = convert_object(argv[0], ctx);
-      PG_RETURN_JSONB_P(DatumGetJsonbP((unsigned long)obj));
+      PG_RETURN_JSONB_P(obj);
     }
 #else // JSONB_DIRECT_CONVERSION
     JSValue js = JS_JSONStringify(ctx, argv[0], JS_UNDEFINED, JS_UNDEFINED);
