@@ -302,6 +302,8 @@ static JSValue pljs_execute(JSContext *ctx, JSValueConst this_val, int argc,
     RollbackAndReleaseCurrentSubTransaction();
     MemoryContextSwitchTo(m_mcontext);
     CurrentResourceOwner = m_resowner;
+    FlushErrorState();
+    FreeErrorData(edata);
 
     if (cleanup_params) {
       JS_FreeValue(ctx, params);
@@ -480,6 +482,8 @@ static JSValue pljs_plan_execute(JSContext *ctx, JSValueConst this_val,
 
     RollbackAndReleaseCurrentSubTransaction();
     CurrentResourceOwner = m_resowner;
+    FlushErrorState();
+    FreeErrorData(edata);
 
     if (values) {
       pfree(values);
