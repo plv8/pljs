@@ -1438,6 +1438,32 @@ static JSValue pljs_return_next_internal(JSContext *ctx, JSValueConst this_val, 
   }
 
   if (retstate->is_composite) {
+    /*
+     * null/undefined emits an all-NULL row rather than raising "argument must
+     * be an object".  A composite-returning set can legitimately contain a NULL
+     * row -- plpgsql writes exactly that with RETURN NEXT NULL -- and there was
+     * no way to express it, so a caller mapping a nullable source row had to
+     * skip it or invent a sentinel.  This also matches the rest of the
+     * conversion surface, where null and undefined are SQL NULL everywhere.
+     */
+    if (JS_IsNull(argv[0]) || JS_IsUndefined(argv[0])) {
+      bool *nulls = (bool *)palloc(sizeof(bool) * retstate->tuple_desc->natts);
+      Datum *values =
+          (Datum *)palloc0(sizeof(Datum) * retstate->tuple_desc->natts);
+
+      for (int i = 0; i < retstate->tuple_desc->natts; i++) {
+        nulls[i] = true;
+      }
+
+      tuplestore_putvalues(retstate->tuple_store_state, retstate->tuple_desc,
+                           values, nulls);
+
+      pfree(nulls);
+      pfree(values);
+
+      return JS_UNDEFINED;
+    }
+
     if (!JS_IsObject(argv[0])) {
       return js_throw("argument must be an object", ctx);
     }
