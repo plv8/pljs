@@ -52,6 +52,7 @@ REGRESS = init-extension function json jsonb json_conv types bytea context \
 	pg_error_envelope_fields \
 	pg_find_function_refcount \
 	pg_trigger_spi \
+	pg_composite_null_datum \
 	pg_error_sqlstate \
 	pg_error_sqlstate_reraise \
 	pg_execute_resource_release \
