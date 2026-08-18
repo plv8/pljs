@@ -542,9 +542,25 @@ static void setup_start_proc(JSContext *ctx) {
     if (JS_IsException(ret)) {
       char *message = NULL, *pg_detail = NULL, *sqlstate = NULL;
       char *detail = dump_error(ctx, &message, &pg_detail, &sqlstate);
+
+      /*
+       * Release the JavaScript side before reporting: the report does not
+       * return, so anything freed after it is never freed at all.
+       */
+      JS_FreeValue(ctx, ret);
+      JS_FreeValue(ctx, func);
+
       pljs_ereport_js_error(message, pg_detail, detail, sqlstate,
                             "start proc execution error");
     }
+
+    /*
+     * The function reference and the call's result both belong to this function.
+     * Neither was released, so every context creation with pljs.start_proc set
+     * leaked both.
+     */
+    JS_FreeValue(ctx, ret);
+    JS_FreeValue(ctx, func);
   }
 }
 
@@ -1664,7 +1680,16 @@ JSValue pljs_find_js_function(Oid fn_oid, JSContext *ctx) {
   if (function_entry != NULL) {
     pljs_function_cache_to_context(&context, function_entry);
 
-    func = context.js_function;
+    /*
+     * Hand out a reference we own.  pljs_function_cache_to_context() borrows the
+     * cache's, and the cache entry is that value's only owner -- but a JSValue
+     * returned from a C function belongs to its caller, so pljs.find_function()
+     * handed JavaScript a reference it had not counted.  The engine dropped it
+     * when the JS variable died, and after enough lookups the refcount reached
+     * zero while the entry was still cached, leaving the cache holding a freed
+     * object.  The next call through it terminated the backend.
+     */
+    func = JS_DupValue(context.ctx, context.js_function);
 
     /*
      * The pin was previously released only on the cache-miss branch below, so a
