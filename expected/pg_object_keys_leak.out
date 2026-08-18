@@ -1,0 +1,61 @@
+-- Regression: enumerating a JS object's keys must free the property table and
+-- the atom references that JS_GetOwnPropertyNames() hands back.
+--
+-- Two hot paths enumerate object keys and previously freed neither the
+-- js_malloc'd JSPropertyEnum table nor the per-property atom references:
+--   * jsonb_object_from_object()                 -- every JS object -> jsonb
+--     conversion, i.e. any function returning jsonb of an object;
+--   * pljs_jsvalue_object_contains_all_column_names() -- every composite /
+--     SETOF return_next() row.
+-- The leaked table counts against the QuickJS runtime memory limit and is never
+-- reclaimed until the backend exits, so a long-running backend slowly exhausts
+-- pljs.memory_limit and then fails every JS call with "out of memory".
+--
+-- Under a tight cap (64MB, the minimum) the loops below leaked ~128MB and OOM'd
+-- before the fix (~ one table per conversion / per row, sized by the object's
+-- key count); they must now complete.  Objects are deliberately given many keys
+-- so the pre-fix leak dwarfs the cap with a wide, platform-independent margin
+-- while the iteration counts stay small and fast.
+CREATE EXTENSION IF NOT EXISTS pljs;
+NOTICE:  extension "pljs" already exists, skipping
+SET pljs.memory_limit = 64;
+-- 1) JS object -> jsonb (jsonb_object_from_object), reached via return_next of a
+-- SETOF jsonb.  The fat object is built once and converted per row, so this is
+-- cheap to run but leaks one table per conversion.  20k rows of an ~800-key
+-- object is ~128MB of leaked tables vs the 64MB cap -> OOM pre-fix.
+CREATE FUNCTION jsonb_obj_leak(n int) RETURNS SETOF jsonb LANGUAGE pljs AS $$
+  var o = {};
+  for (var k = 0; k < 800; k++) o["c" + k] = k;
+  for (var i = 0; i < n; i++) pljs.return_next(o);
+$$;
+SELECT count(*) = 20000 AS jsonb_object_return_ok FROM jsonb_obj_leak(20000);
+ jsonb_object_return_ok 
+------------------------
+ t
+(1 row)
+
+-- 2) composite return_next (contains_all_column_names): the enumerated table is
+-- sized by *all* of the object's own keys, not just the target columns, so a
+-- one-column result fed a fat object leaks a big table per row.  20k rows of a
+-- ~800-key object is ~128MB of leaked tables vs the 64MB cap -> OOM pre-fix.
+CREATE FUNCTION composite_obj_leak(n int) RETURNS TABLE(a int) LANGUAGE pljs AS $$
+  var o = {a: 0};
+  for (var k = 0; k < 800; k++) o["x" + k] = k;
+  for (var i = 0; i < n; i++) { o.a = i; pljs.return_next(o); }
+$$;
+SELECT count(*) = 20000 AS composite_return_next_ok FROM composite_obj_leak(20000);
+ composite_return_next_ok 
+--------------------------
+ t
+(1 row)
+
+-- The backend survived both loops and is still usable.
+SELECT 1 AS alive;
+ alive 
+-------
+     1
+(1 row)
+
+RESET pljs.memory_limit;
+DROP FUNCTION jsonb_obj_leak(int);
+DROP FUNCTION composite_obj_leak(int);
