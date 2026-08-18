@@ -1,0 +1,102 @@
+-- Nested JS -> SQL -> JS re-entry must be bounded by PostgreSQL, not by a QuickJS
+-- budget measured from the wrong place.
+--
+-- JS_NewRuntime() records the C-stack top once, inside _PG_init, at whatever depth
+-- the first pljs call happened to be at.  JS_SetMaxStackSize() then sizes the budget
+-- relative to that anchor.  But JS can run far deeper than the anchor
+-- (SQL -> JS -> pljs.execute -> SQL -> JS -> ...), and each level of that nesting
+-- consumes C stack the anchor knows nothing about -- so the guard fires while there
+-- is plenty of stack left, rejecting legitimate work.
+--
+-- Measured before the fix: nest(250) failed with QuickJS's "stack overflow" while
+-- nest(150) succeeded.  After it, nest(300) succeeds and deep nesting is stopped by
+-- PostgreSQL's own check_stack_depth() instead.
+--
+-- Note the direction, which is the counter-intuitive part: the guard trips *earlier*
+-- than it should, not later.  _PG_init is the shallowest point in the backend, so at
+-- any nested depth QuickJS believes it is nearer the end of the stack than it is.  That
+-- is what makes this a functional bug and not merely a weakened guard: correct work is
+-- refused.
+--
+-- The fix is JS_UpdateStackTop(), which the vendored QuickJS exports, called at each
+-- entry into JS so the budget is measured from where that call actually begins.
+--
+-- This test asserts the *kind* of limit rather than a specific depth, because the
+-- depth at which either limit is reached depends on per-frame C stack usage and so
+-- varies by platform and build flags.
+CREATE EXTENSION IF NOT EXISTS pljs;
+NOTICE:  extension "pljs" already exists, skipping
+CREATE FUNCTION nest(n int) RETURNS int LANGUAGE pljs AS $$
+  if (n <= 0) { return 0; }
+  return 1 + pljs.execute("SELECT nest(" + (n - 1) + ") AS v")[0].v;
+$$;
+-- Shallow nesting, which worked before and after.
+SELECT nest(10) AS nest_10;
+ nest_10 
+---------
+      10
+(1 row)
+
+-- Moderate nesting.  This is the depth that failed before the fix.
+SELECT nest(250) AS nest_250;
+ nest_250 
+----------
+      250
+(1 row)
+
+-- Whatever finally stops unbounded nesting must be PostgreSQL's check_stack_depth,
+-- not QuickJS deciding it is out of stack.  Reported as a classification so the
+-- output does not depend on which exact depth trips it.
+CREATE FUNCTION nest_limit_kind() RETURNS text LANGUAGE plpgsql AS $$
+DECLARE d int := 100;
+BEGIN
+  WHILE d <= 100000 LOOP
+    BEGIN
+      PERFORM nest(d);
+    EXCEPTION WHEN OTHERS THEN
+      IF SQLERRM LIKE '%stack depth limit exceeded%' THEN
+        RETURN 'bounded by PostgreSQL check_stack_depth';
+      ELSIF SQLERRM LIKE '%stack overflow%' THEN
+        RETURN 'bounded by QuickJS stack overflow (anchor is wrong)';
+      ELSE
+        RETURN 'unexpected: ' || SQLERRM;
+      END IF;
+    END;
+    d := d * 2;
+  END LOOP;
+  RETURN 'no limit reached by depth 100000';
+END $$;
+SELECT nest_limit_kind() AS what_bounds_nesting;
+           what_bounds_nesting           
+-----------------------------------------
+ bounded by PostgreSQL check_stack_depth
+(1 row)
+
+-- And the backend is still usable afterwards.
+SELECT 'backend alive' AS status;
+    status     
+---------------
+ backend alive
+(1 row)
+
+-- Pure-JS recursion is still QuickJS's business, and must raise catchably rather
+-- than crash the backend.
+CREATE FUNCTION purejs_recursion() RETURNS int LANGUAGE pljs AS $$
+  function r(n) { return n <= 0 ? 0 : 1 + r(n - 1); }
+  try { r(10000000); return 0; } catch (e) { return 1; }
+$$;
+SELECT purejs_recursion() AS pure_js_recursion_caught;
+ pure_js_recursion_caught 
+--------------------------
+                        1
+(1 row)
+
+SELECT 'backend alive' AS status2;
+    status2    
+---------------
+ backend alive
+(1 row)
+
+DROP FUNCTION purejs_recursion();
+DROP FUNCTION nest_limit_kind();
+DROP FUNCTION nest(int);
