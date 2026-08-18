@@ -12,6 +12,7 @@
 #include "utils/elog.h"
 #include "utils/fmgrprotos.h"
 #include "utils/palloc.h"
+#include "utils/memutils.h"
 #include "utils/resowner.h"
 #include "windowapi.h"
 
@@ -627,8 +628,13 @@ static JSValue pljs_prepare(JSContext *ctx, JSValueConst this_val, int argc,
   PG_TRY();
   {
     if (argc > 1) {
-      parstate = palloc0(sizeof(pljs_param_state));
-      parstate->memory_context = CurrentMemoryContext;
+      /* Allocate parstate in CacheMemoryContext so it survives beyond the
+       * current call_function execution_context (which gets deleted on
+       * return).  param_types is palloc'd via parstate->memory_context so
+       * it must point to the same long-lived context. */
+      parstate = MemoryContextAllocZero(CacheMemoryContext,
+                                        sizeof(pljs_param_state));
+      parstate->memory_context = CacheMemoryContext;
       initial = SPI_prepare_params(sql, pljs_variable_param_setup, parstate, 0);
     } else {
       initial = SPI_prepare(sql, nparams, types);
@@ -660,7 +666,8 @@ static JSValue pljs_prepare(JSContext *ctx, JSValueConst this_val, int argc,
 
   JS_SetPropertyFunctionList(ctx, ret, js_plan_funcs, 4);
 
-  plan = palloc(sizeof(pljs_plan));
+  /* Allocate plan in CacheMemoryContext for the same reason as parstate. */
+  plan = MemoryContextAlloc(CacheMemoryContext, sizeof(pljs_plan));
 
   plan->parstate = parstate;
   plan->plan = saved;
