@@ -1,0 +1,72 @@
+-- Regression: a single pljs function that loops over a large batch must not grow
+-- the SPI procedure context by a whole plan / ParamListInfo per iteration.
+--
+-- pljs_execute_params() prepared an *unsaved* SPI plan (and pljs_variable_param_
+-- setup pallocated param_types) on every parameterised pljs.execute(), and the
+-- plan.execute() path built a ParamListInfo per call -- all in the SPI proc
+-- context, which is only released when the enclosing function returns.  A mirror
+-- procedure applying a large change batch in one call therefore grew by
+-- kilobytes (a full cached plan) per row: ~100MB over 20k parameterised
+-- executes.  The fix frees the plan, param_types and ParamListInfo after each
+-- SPI call.
+--
+-- Growth is measured inside a single call from pg_backend_memory_contexts, so it
+-- captures exactly the within-call accumulation that the fix targets. Thresholds
+-- are loose enough to be platform-stable but far below the pre-fix growth (a real
+-- regression grows proportionally to the iteration count).
+CREATE EXTENSION IF NOT EXISTS pljs;
+NOTICE:  extension "pljs" already exists, skipping
+-- Parameterised one-shot execute in a tight loop (the pljs_execute_params path).
+-- Pre-fix this grew ~100MB over 20000 iterations; post-fix it is a few MB at
+-- most (the residual is transient high-water reclaimed at return).
+CREATE FUNCTION exec_param_growth_mb(n int) RETURNS float8 LANGUAGE pljs AS $$
+  var q = "SELECT sum(total_bytes)::float8 AS b FROM pg_backend_memory_contexts";
+  var before = pljs.execute(q)[0].b;
+  for (var i = 0; i < n; i++) {
+    pljs.execute("SELECT $1::int AS v", [i & 255]);
+  }
+  pljs.gc();
+  return (pljs.execute(q)[0].b - before) / (1024 * 1024);
+$$;
+SELECT exec_param_growth_mb(20000) < 15 AS param_execute_bounded;
+ param_execute_bounded 
+-----------------------
+ t
+(1 row)
+
+-- Prepared plan.execute() reuse in a tight loop (the plan.execute path).
+-- Pre-fix this grew ~1 ParamListInfo per call (~8MB over 40000); post-fix ~0.
+CREATE FUNCTION plan_exec_growth_mb(n int) RETURNS float8 LANGUAGE pljs AS $$
+  var q = "SELECT sum(total_bytes)::float8 AS b FROM pg_backend_memory_contexts";
+  var plan = pljs.prepare("SELECT $1::int AS v", ["int4"]);
+  var before = pljs.execute(q)[0].b;
+  for (var i = 0; i < n; i++) {
+    plan.execute([i & 255]);
+  }
+  plan.free();
+  pljs.gc();
+  return (pljs.execute(q)[0].b - before) / (1024 * 1024);
+$$;
+SELECT plan_exec_growth_mb(40000) < 5 AS plan_execute_bounded;
+ plan_execute_bounded 
+----------------------
+ t
+(1 row)
+
+-- The results are still correct after all that freeing (no use-after-free).
+CREATE FUNCTION param_still_correct() RETURNS boolean LANGUAGE pljs AS $$
+  var plan = pljs.prepare("SELECT $1::int + $2::int AS s", ["int4", "int4"]);
+  var a = pljs.execute("SELECT $1::int AS v", [41])[0].v;
+  var b = plan.execute([40, 2])[0].s;
+  plan.free();
+  return a === 41 && b === 42;
+$$;
+SELECT param_still_correct() AS results_correct;
+ results_correct 
+-----------------
+ t
+(1 row)
+
+DROP FUNCTION exec_param_growth_mb(int);
+DROP FUNCTION plan_exec_growth_mb(int);
+DROP FUNCTION param_still_correct();

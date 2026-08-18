@@ -999,6 +999,8 @@ static JSValue pljs_plan_cursor(JSContext *ctx, JSValueConst this_val, int argc,
           pljs_setup_variable_paramlist(plan->parstate, values, nulls);
       cursor =
           SPI_cursor_open_with_paramlist(NULL, plan->plan, param_li, false);
+      /* the portal copies the params into its own context; free ours */
+      pfree(param_li);
     } else {
       cursor = SPI_cursor_open(NULL, plan->plan, values, nulls, false);
     }
