@@ -52,6 +52,40 @@ void pljs_cache_init(void) {
  * @brief Clears all caches and recreates them.
  */
 void pljs_cache_reset(void) {
+  HASH_SEQ_STATUS status;
+  pljs_context_cache_value *ctx_hvalue;
+
+  /*
+   * Free the QuickJS side before dropping the Postgres memory that points at
+   * it.  hash_destroy() and MemoryContextDelete() below reclaim only the
+   * palloc'd entries; the JSContexts and compiled functions they reference live
+   * on the libc heap and would otherwise be orphaned inside the runtime with no
+   * owner left to free them.
+   */
+  if (pljs_context_HashTable != NULL) {
+    hash_seq_init(&status, pljs_context_HashTable);
+
+    while ((ctx_hvalue = (pljs_context_cache_value *)hash_seq_search(&status)) !=
+           NULL) {
+      if (ctx_hvalue->function_hash_table != NULL) {
+        HASH_SEQ_STATUS fstatus;
+        pljs_function_cache_value *value;
+
+        hash_seq_init(&fstatus, ctx_hvalue->function_hash_table);
+
+        while ((value = (pljs_function_cache_value *)hash_seq_search(
+                    &fstatus)) != NULL) {
+          JS_FreeValue(value->ctx, value->fn);
+        }
+      }
+
+      if (ctx_hvalue->ctx != NULL) {
+        JS_FreeContext(ctx_hvalue->ctx);
+        ctx_hvalue->ctx = NULL;
+      }
+    }
+  }
+
   hash_destroy(pljs_context_HashTable);
   MemoryContextDelete(cache_memory_context);
   pljs_cache_init();
