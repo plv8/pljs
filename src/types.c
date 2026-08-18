@@ -702,12 +702,29 @@ bool pljs_jsvalue_object_contains_all_column_names(JSValue val, JSContext *ctx,
 
       if (provided_keys != NULL) {
         StringInfoData keys;
+        uint32_t listed = 0;
+
+        /*
+         * Cap the list.  An object with ten thousand properties would otherwise
+         * produce a ten-thousand-name error message, which goes to the server
+         * log as well as to the client.  Ten names plus the total is enough to
+         * diagnose a typo, which is what this message is for.
+         */
+        const uint32_t max_listed = 10;
 
         initStringInfo(&keys);
 
         for (uint32_t object_key = 0; object_key < object_keys_length;
              object_key++) {
-          const char *atom = JS_AtomToCString(ctx, tab[object_key].atom);
+          const char *atom;
+
+          if (listed >= max_listed) {
+            appendStringInfo(&keys, ", ... (%u properties in total)",
+                             object_keys_length);
+            break;
+          }
+
+          atom = JS_AtomToCString(ctx, tab[object_key].atom);
 
           if (atom == NULL) {
             continue;
@@ -719,6 +736,7 @@ bool pljs_jsvalue_object_contains_all_column_names(JSValue val, JSContext *ctx,
 
           appendStringInfoString(&keys, atom);
           JS_FreeCString(ctx, atom);
+          listed++;
         }
 
         *provided_keys = keys.data;

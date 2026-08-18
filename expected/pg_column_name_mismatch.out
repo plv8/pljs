@@ -76,3 +76,17 @@ SELECT a, b FROM cnm_ok();
 (1 row)
 
 DROP FUNCTION cnm_missing, cnm_case, cnm_empty, cnm_several, cnm_ok;
+-- The provided-key list is capped.  An object with thousands of properties would
+-- otherwise put every name into the message, which lands in the server log as
+-- well as the client; ten names plus the total is enough to spot a typo.
+CREATE FUNCTION cnm_many() RETURNS TABLE(a int, b text) LANGUAGE pljs AS $$
+  const row = {};
+  for (let i = 0; i < 500; i++) row['prop' + i] = i;
+  pljs.return_next(row);
+$$;
+SELECT * FROM cnm_many();
+ERROR:  return_next: result column "a" has no matching property (object has: prop0, prop1, prop2, prop3, prop4, prop5, prop6, prop7, prop8, prop9, ... (500 properties in total); property names are case sensitive)
+DETAIL:  Error: return_next: result column "a" has no matching property (object has: prop0, prop1, prop2, prop3, prop4, prop5, prop6, prop7, prop8, prop9, ... (500 properties in total); property names are case sensitive)
+    at cnm_many (<function>:5:19)
+
+DROP FUNCTION cnm_many();
