@@ -813,8 +813,19 @@ Datum *pljs_jsvalue_to_datums(pljs_type *type, JSValue val, bool **is_null,
 
     JSValue o = JS_GetPropertyStr(ctx, val, colname);
 
+    /*
+     * JS_GetPropertyStr() returns an owned reference, so it has to be released
+     * on every path out of this iteration -- including the null/undefined
+     * short-circuit below.  Leaking it costs one QuickJS reference per column
+     * per row, on every composite return and every return_next() of a row
+     * object, which is the hottest allocation path in the extension.  Because
+     * QuickJS runs on the libc allocator the loss is invisible to
+     * pg_backend_memory_contexts; it counts against pljs.memory_limit and is
+     * not returned until the backend exits.
+     */
     if (JS_IsNull(o) || JS_IsUndefined(o)) {
       (*is_null)[c] = true;
+      JS_FreeValue(ctx, o);
       continue;
     }
 
@@ -822,6 +833,8 @@ Datum *pljs_jsvalue_to_datums(pljs_type *type, JSValue val, bool **is_null,
     // considered `NULL`.
     values[c] = pljs_jsvalue_to_datum(TupleDescAttr(tupdesc, c)->atttypid, o,
                                       &(*is_null)[c], ctx, NULL);
+
+    JS_FreeValue(ctx, o);
   }
 
   if (cleanup_tupdesc) {
@@ -872,13 +885,17 @@ Datum pljs_jsvalue_to_record(pljs_type *type, JSValue val, bool *is_null,
 
     JSValue o = JS_GetPropertyStr(ctx, val, colname);
 
+    /* Owned reference: release it on both paths.  See pljs_jsvalue_to_datums(). */
     if (JS_IsNull(o) || JS_IsUndefined(o)) {
       nulls[c] = true;
+      JS_FreeValue(ctx, o);
       continue;
     }
 
     values[c] = pljs_jsvalue_to_datum(TupleDescAttr(tupdesc, c)->atttypid, o,
                                       &nulls[c], ctx, NULL);
+
+    JS_FreeValue(ctx, o);
   }
 
   // Form a Tuple from the values and nulls using the tuple descriptor
