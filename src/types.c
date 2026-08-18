@@ -19,6 +19,7 @@
 #include "pljs.h"
 
 #include <string.h>
+#include <time.h>
 
 /*
  * Error handling helper macros for consistent error patterns.
@@ -418,9 +419,11 @@ static JSValue pljs_datum_to_jsvalue_fallback(Datum arg, pljs_type type,
   } else {
     // If this is a variable length type, make a copy of it.
     if (type.length == -1) {
-      ret = JS_NewStringLen(ctx, (char *)VARDATA(arg), VARSIZE_ANY_EXHDR(arg));
+      struct varlena *vl = (struct varlena *)DatumGetPointer(arg);
+
+      ret = JS_NewStringLen(ctx, VARDATA(vl), VARSIZE_ANY_EXHDR(vl));
       JS_SetPropertyStr(ctx, ret, "length",
-                        JS_NewInt32(ctx, VARSIZE_ANY_EXHDR(arg)));
+                        JS_NewInt32(ctx, VARSIZE_ANY_EXHDR(vl)));
     } else {
       ret = JS_NewStringLen(ctx, (char *)arg, type.length);
       JS_SetPropertyStr(ctx, ret, "length", JS_NewInt32(ctx, type.length));
