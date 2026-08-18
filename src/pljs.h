@@ -159,6 +159,10 @@ void _PG_init(void);
 void pljs_guc_init(void);
 void pljs_cache_init(void);
 void pljs_setup_namespace(JSContext *ctx);
+// Registers runtime JS classes (e.g. the prepared-statement handle whose GC
+// finalizer reclaims the SPI plan).  Must run once, after the runtime exists
+// and before any JSContext is created.
+void pljs_register_js_classes(JSRuntime *rt);
 
 // Throw a Javascript error
 JSValue js_throw(const char *, JSContext *);
