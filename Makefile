@@ -72,7 +72,8 @@ REGRESS = init-extension function json jsonb json_conv types bytea context \
 	pg_execute_resource_release \
 	pg_plan_argcount_sqlstate \
 	pg_targeted_invalidation \
-	pg_jsonb_array_return
+	pg_jsonb_array_return \
+	pg_array_shape
 
 all: deps/quickjs/quickjs.h deps/quickjs/libquickjs.a pljs--$(PLJS_VERSION).sql
 
