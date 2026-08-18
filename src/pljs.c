@@ -707,8 +707,20 @@ Datum pljs_call_handler(PG_FUNCTION_ARGS) {
     pljs_cache_function_add(&context);
   }
 
-  ReleaseSysCache(proctuple);
-
+  /*
+   * NB: `proctuple` must stay pinned until we have finished reading from it,
+   * but it MUST be released before we enter JavaScript, because a PROCEDURE
+   * can run COMMIT/ROLLBACK internally and it is illegal to hold a syscache
+   * pin across a transaction boundary (it trips "resource was not closed").
+   *
+   * The original code released the pin up front, before either branch, which
+   * was a use-after-free: the trigger branch still read GETSTRUCT(proctuple)
+   * and the function branch still passed the tuple to
+   * convert_arguments_to_javascript() -> get_func_arg_info().  That only bit
+   * once the entry was actually evicted (cache pressure / concurrent DDL in a
+   * long-running backend).  Release it in each branch at the last safe point
+   * instead: right after the final read, before any JS is executed.
+   */
   if (is_trigger) {
     // Call in the context of a trigger.
     Form_pg_proc procStruct;
@@ -716,11 +728,16 @@ Datum pljs_call_handler(PG_FUNCTION_ARGS) {
     procStruct = (Form_pg_proc)GETSTRUCT(proctuple);
 
     context.function->rettype = procStruct->prorettype;
+
+    ReleaseSysCache(proctuple);
+
     retval = call_trigger(fcinfo, &context);
   } else {
     // Call as a function.
     JSValueConst *argv =
         convert_arguments_to_javascript(fcinfo, proctuple, &context);
+
+    ReleaseSysCache(proctuple);
 
     // Get the old storage object.
     pljs_storage *old_storage = pljs_storage_for_context(context.ctx);
