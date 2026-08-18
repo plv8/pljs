@@ -153,6 +153,8 @@ void pljs_setup_namespace(JSContext *ctx);
 
 // Throw a Javascript error
 JSValue js_throw(const char *, JSContext *);
+// Throw a Javascript error carrying a Postgres ErrorData's detail/hint/sqlstate
+JSValue js_throw_error_data(ErrorData *, JSContext *);
 
 // Functions
 JSValue pljs_compile_function(pljs_context *context, bool is_trigger);
