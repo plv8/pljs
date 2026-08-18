@@ -1506,12 +1506,113 @@ static JSValue pljs_return_next_internal(JSContext *ctx, JSValueConst this_val, 
     pfree(nulls);
     pfree(values);
   } else {
+    Oid coltype = TupleDescAttr(retstate->tuple_desc, 0)->atttypid;
+    JSValue value = JS_DupValue(ctx, argv[0]);
+
+    /*
+     * A single-column set is not "composite", so this branch converts the
+     * argument directly as the column value.  That silently mangled the
+     * `{column: value}` row object a multi-column set requires: the whole
+     * object went through the scalar conversion, yielding "[object Object]" for
+     * a text column and 0 for an int/bigint one, with no error.  Code that
+     * builds a row object in a loop and calls return_next(row) -- the natural
+     * shape, and the only one that works for 2+ columns -- broke as soon as the
+     * set happened to have exactly one column.
+     *
+     * Accept both forms.  The row-object reading applies only to a *plain*
+     * object (a brand check, so a Date for a timestamp, a typed array for a
+     * bytea and an Array for an array type are still values, not row objects)
+     * and only when the column type is not itself object-shaped: a json/jsonb
+     * or composite column takes an object as its legitimate value.
+     */
+    if (pljs_jsvalue_is_plain_object(argv[0]) && coltype != JSONOID &&
+        coltype != JSONBOID) {
+      pljs_type coltype_info;
+
+      pljs_type_fill(&coltype_info, coltype);
+
+      if (!coltype_info.is_composite) {
+        const char *colname =
+            NameStr(TupleDescAttr(retstate->tuple_desc, 0)->attname);
+        JSPropertyEnum *props = NULL;
+        uint32_t nprops = 0;
+        bool resolved = false;
+
+        if (JS_GetOwnPropertyNames(ctx, &props, &nprops, argv[0],
+                                   JS_GPN_STRING_MASK | JS_GPN_ENUM_ONLY) ==
+            0) {
+          /* Prefer the column's own name whenever the descriptor carries one. */
+          if (colname != NULL && colname[0] != '\0') {
+            for (uint32_t i = 0; i < nprops; i++) {
+              const char *name = JS_AtomToCString(ctx, props[i].atom);
+              bool match = (name != NULL && strcmp(name, colname) == 0);
+
+              if (name != NULL) {
+                JS_FreeCString(ctx, name);
+              }
+
+              if (match) {
+                JS_FreeValue(ctx, value);
+                value = JS_GetProperty(ctx, argv[0], props[i].atom);
+                resolved = true;
+                break;
+              }
+            }
+          }
+
+          /*
+           * A single-column RETURNS TABLE collapses to a scalar return type in
+           * the catalog, so the descriptor frequently carries no column name at
+           * all.  A row object with exactly one property is unambiguous either
+           * way, so accept it.
+           */
+          if (!resolved && nprops == 1) {
+            JS_FreeValue(ctx, value);
+            value = JS_GetProperty(ctx, argv[0], props[0].atom);
+            resolved = true;
+          }
+
+          /* Free the table and its owned atoms (see the 0038 fix). */
+          for (uint32_t i = 0; i < nprops; i++) {
+            JS_FreeAtom(ctx, props[i].atom);
+          }
+
+          js_free(ctx, props);
+        }
+
+        /*
+         * Neither the column name nor a sole property identified a value.  That
+         * is a mistake -- raise instead of converting the object itself and
+         * storing "[object Object]" or 0.
+         */
+        if (!resolved) {
+          JS_FreeValue(ctx, value);
+
+          if (colname != NULL && colname[0] != '\0') {
+            return js_throw(
+                psprintf("return_next: object does not identify a value for "
+                         "the result column \"%s\" (property names are case "
+                         "sensitive; a single-column set also accepts the "
+                         "bare value)",
+                         colname),
+                ctx);
+          }
+
+          return js_throw("return_next: object does not identify a value for "
+                          "the single result column (give an object with one "
+                          "property, or the bare value)",
+                          ctx);
+        }
+      }
+    }
+
     bool is_null = false;
-    Datum result =
-        pljs_jsvalue_to_datum(TupleDescAttr(retstate->tuple_desc, 0)->atttypid,
-                              argv[0], &is_null, ctx, NULL);
+    Datum result = pljs_jsvalue_to_datum(coltype, value, &is_null, ctx, NULL);
+
     tuplestore_putvalues(retstate->tuple_store_state, retstate->tuple_desc,
                          &result, &is_null);
+
+    JS_FreeValue(ctx, value);
   }
   return JS_UNDEFINED;
 }

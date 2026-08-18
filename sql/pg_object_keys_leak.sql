@@ -34,10 +34,14 @@ SELECT count(*) = 20000 AS jsonb_object_return_ok FROM jsonb_obj_leak(20000);
 -- sized by *all* of the object's own keys, not just the target columns, so a
 -- one-column result fed a fat object leaks a big table per row.  20k rows of a
 -- ~800-key object is ~128MB of leaked tables vs the 64MB cap -> OOM pre-fix.
-CREATE FUNCTION composite_obj_leak(n int) RETURNS TABLE(a int) LANGUAGE pljs AS $$
-  var o = {a: 0};
+-- Two columns, so this goes through the composite path that enumerates the
+-- object's property names -- which is what is being measured. A single-column set
+-- resolves a row object by arity instead, and an 801-property object is not
+-- resolvable that way.
+CREATE FUNCTION composite_obj_leak(n int) RETURNS TABLE(a int, b int) LANGUAGE pljs AS $$
+  var o = {a: 0, b: 0};
   for (var k = 0; k < 800; k++) o["x" + k] = k;
-  for (var i = 0; i < n; i++) { o.a = i; pljs.return_next(o); }
+  for (var i = 0; i < n; i++) { o.a = i; o.b = i; pljs.return_next(o); }
 $$;
 SELECT count(*) = 20000 AS composite_return_next_ok FROM composite_obj_leak(20000);
 

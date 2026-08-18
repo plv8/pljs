@@ -75,6 +75,20 @@ inline static bool Is_Date(JSValueConst obj) {
   return NULL != JS_GetOpaque(obj, JS_CLASS_DATE);
 }
 
+/**
+ * @brief Whether a value is a plain JavaScript object -- `{...}` -- as opposed
+ * to an Array, Date, ArrayBuffer, typed array or any other branded builtin.
+ *
+ * This is a real brand check (see the Is_Date note above): every builtin has
+ * its own class id, so only a bare object literal / `new Object` matches.
+ * Callers use it to tell a `{column: value}` row object apart from a value that
+ * legitimately *is* object-like (a Date for a timestamp, a typed array for a
+ * bytea, an Array for an array type).
+ */
+bool pljs_jsvalue_is_plain_object(JSValueConst obj) {
+  return JS_GetClassID(obj) == JS_CLASS_OBJECT;
+}
+
 #if JSONB_DIRECT_CONVERSION
 static JSValue convert_jsonb(JsonbContainer *in, JSContext *ctx);
 static JSValue get_jsonb_value(JsonbValue *scalarVal, JSContext *ctx);
