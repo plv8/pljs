@@ -96,6 +96,23 @@ void _PG_init(void) {
 }
 
 /**
+ * @brief Assign hook for pljs.memory_limit.
+ *
+ * Re-applies the limit to the live QuickJS runtime when the GUC is changed at
+ * runtime (SET pljs.memory_limit = ...).  Without this the GUC value changed
+ * but the interpreter kept whatever limit was installed in _PG_init (the value
+ * present when pljs was first loaded), so a runtime SET silently had no effect
+ * and could not be used to contain a misbehaving function in a running backend.
+ * At initial GUC definition (boot value) rt is still NULL, so this is a no-op
+ * then and _PG_init installs the load-time value explicitly.
+ */
+static void pljs_assign_memory_limit(int newval, void *extra) {
+  if (rt != NULL && newval > 0) {
+    JS_SetMemoryLimit(rt, (size_t)newval * 1024 * 1024);
+  }
+}
+
+/**
  * @brief Set up the GUCs.
  *
  * Sets up the GUCs that help define the behavior of the interpreter.
@@ -115,7 +132,7 @@ void pljs_guc_init(void) {
                           gettext_noop("Runtime limit in MBytes"),
                           gettext_noop("The default value is 512 MB"),
                           (int *)&configuration.memory_limit, 512, 64, 3096,
-                          PGC_SUSET, 0, NULL, NULL, NULL);
+                          PGC_SUSET, 0, NULL, pljs_assign_memory_limit, NULL);
 
   DefineCustomStringVariable(
       "pljs.start_proc",
