@@ -921,6 +921,32 @@ static JSValue pljs_plan_cursor(JSContext *ctx, JSValueConst this_val, int argc,
   JS_SetPropertyStr(ctx, ret, "name", str);
   JS_SetPropertyFunctionList(ctx, ret, js_cursor_funcs, 4);
 
+  /*
+   * Keep the plan handle reachable from the cursor.
+   *
+   * pljs_plan_handle_finalizer() calls SPI_freeplan(), and it runs as soon as
+   * the plan handle becomes unreachable -- which the natural idiom makes
+   * immediate:
+   *
+   *   var c = pljs.prepare('select ... where id = $1', ['int']).cursor([1]);
+   *   while (c.fetch()) { ... }
+   *
+   * The plan object is unreachable from that second line on, but the portal
+   * opened from it is still live and is re-entered by fetch/move/close.
+   * SPI_freeplan -> DropCachedPlan sets plansource->magic = 0 and deletes the
+   * plansource's context, and SPI_freeplan's own contract says a plan in use
+   * must not be freed.  The portal holds a refcount on the CachedPlan, not on
+   * the CachedPlanSource, so whether that crashes or merely reads freed memory
+   * depends on plancache internals that are not part of any contract.
+   *
+   * Holding an owned reference here means the plan cannot be collected before
+   * the cursor is, so the finalizer cannot run underneath an open portal.
+   * JS_GetPropertyStr returns a new owned reference and JS_SetPropertyStr
+   * consumes it, so this transfers cleanly without touching the error paths
+   * above.
+   */
+  JS_SetPropertyStr(ctx, ret, "plan", JS_GetPropertyStr(ctx, this_val, "plan"));
+
   if (cleanup_params) {
     JS_FreeValue(ctx, params);
   }
