@@ -8,6 +8,7 @@
 #include "funcapi.h"
 #include "miscadmin.h"
 #include "nodes/parsenodes.h"
+#include "tcop/tcopprot.h"
 #include "utils/builtins.h"
 #include "utils/guc.h"
 #include "utils/lsyscache.h"
@@ -83,6 +84,27 @@ void _PG_init(void) {
 
   // Set up the quickjs runtime.
   rt = JS_NewRuntime();
+
+  /*
+   * Bound the JS call-stack budget explicitly instead of trusting the vendored
+   * JS_DEFAULT_STACK_SIZE.  Without an active limit, unbounded/deep JS
+   * recursion runs the backend's C stack into the ground and crashes the whole
+   * process (SIGSEGV) rather than raising a catchable "stack overflow".  We
+   * size the JS budget to half of the DBA's max_stack_depth so pure-JS
+   * recursion trips QuickJS's guard well before PostgreSQL's own C-stack limit
+   * (and long before the kernel stack limit) is reached, with a floor so a
+   * small max_stack_depth still leaves JS usable.  PostgreSQL's own
+   * check_stack_depth() bounds any cumulative C stack consumed across nested
+   * JS<->SQL re-entries, so anchoring the measurement once here is safe.
+   */
+  {
+    long depth_bytes = (long)max_stack_depth * 1024L;
+    size_t js_stack_size = (size_t)(depth_bytes / 2);
+    if (js_stack_size < 256 * 1024) {
+      js_stack_size = 256 * 1024;
+    }
+    JS_SetMaxStackSize(rt, js_stack_size);
+  }
 
   // Register runtime JS classes (must happen before any JSContext is created,
   // so every context sees the class; e.g. the prepared-statement handle whose
