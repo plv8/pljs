@@ -253,6 +253,25 @@ static char *dump_error(JSContext *ctx, char **message_out, char **detail_out) {
   return ret;
 }
 
+/*
+ * Report a JavaScript exception as a PostgreSQL error.
+ *
+ * `message` and `detail` are dump_error()'s out-parameters; `fallback` is used when
+ * the exception carried no message of its own, which is why the empty-string check
+ * matters and why it lives in one place rather than at every report site.
+ *
+ * Does not return.
+ */
+pg_noreturn static void pljs_ereport_js_error(const char *message,
+                                             const char *pg_detail,
+                                             const char *detail,
+                                             const char *fallback) {
+  ereport(ERROR, (errmsg("%s", (message && message[0]) ? message : fallback),
+                  errdetail("%s", (pg_detail && pg_detail[0]) ? pg_detail : detail)));
+  pg_unreachable();
+}
+
+
 static void signal_handler(int sig_num) {
   os_pending_signals |= ((uint64_t)1 << sig_num);
 }
@@ -475,10 +494,7 @@ static void setup_start_proc(JSContext *ctx) {
     if (JS_IsException(ret)) {
       char *message = NULL, *pg_detail = NULL;
       char *detail = dump_error(ctx, &message, &pg_detail);
-      ereport(ERROR,
-              (errmsg("%s", (message && message[0]) ? message
-                                                     : "start proc execution error"),
-               errdetail("%s", (pg_detail && pg_detail[0]) ? pg_detail : detail)));
+      pljs_ereport_js_error(message, pg_detail, detail, "start proc execution error");
     }
   }
 }
@@ -822,9 +838,7 @@ Datum pljs_call_validator(PG_FUNCTION_ARGS) {
   if (JS_IsException(val)) {
     char *message = NULL, *pg_detail = NULL;
     char *detail = dump_error(ctx, &message, &pg_detail);
-    ereport(ERROR,
-            (errmsg("%s", (message && message[0]) ? message : "execution error"),
-             errdetail("%s", (pg_detail && pg_detail[0]) ? pg_detail : detail)));
+    pljs_ereport_js_error(message, pg_detail, detail, "execution error");
   }
 
   // call validator can release the context
@@ -904,9 +918,7 @@ JSValue pljs_compile_function(pljs_context *context, bool is_trigger) {
   } else {
     char *message = NULL, *pg_detail = NULL;
     char *detail = dump_error(context->ctx, &message, &pg_detail);
-    ereport(ERROR,
-            (errmsg("%s", (message && message[0]) ? message : "execution error"),
-             errdetail("%s", (pg_detail && pg_detail[0]) ? pg_detail : detail)));
+    pljs_ereport_js_error(message, pg_detail, detail, "execution error");
 
     return JS_UNDEFINED;
   }
@@ -941,9 +953,7 @@ static void call_anonymous_function(const char *source, JSContext *ctx) {
   } else {
     char *message = NULL, *pg_detail = NULL;
     char *detail = dump_error(ctx, &message, &pg_detail);
-    ereport(ERROR,
-            (errmsg("%s", (message && message[0]) ? message : "execution error"),
-             errdetail("%s", (pg_detail && pg_detail[0]) ? pg_detail : detail)));
+    pljs_ereport_js_error(message, pg_detail, detail, "execution error");
   }
 }
 
@@ -1058,9 +1068,7 @@ static Datum call_trigger(FunctionCallInfo fcinfo, pljs_context *context) {
   if (JS_IsException(ret)) {
     char *message = NULL, *pg_detail = NULL;
     char *detail = dump_error(context->ctx, &message, &pg_detail);
-    ereport(ERROR,
-            (errmsg("%s", (message && message[0]) ? message : "execution error"),
-             errdetail("%s", (pg_detail && pg_detail[0]) ? pg_detail : detail)));
+    pljs_ereport_js_error(message, pg_detail, detail, "execution error");
 
     JS_FreeValue(context->ctx, ret);
 
@@ -1141,9 +1149,7 @@ static Datum call_function(FunctionCallInfo fcinfo, pljs_context *context,
 
     JS_FreeValue(context->ctx, ret);
 
-    ereport(ERROR,
-            (errmsg("%s", (message && message[0]) ? message : "execution error"),
-             errdetail("%s", (pg_detail && pg_detail[0]) ? pg_detail : error_message)));
+    pljs_ereport_js_error(message, pg_detail, error_message, "execution error");
 
     /* Shuts up the compiler, since ereports of ERROR stop execution. */
     return (Datum)0;
@@ -1269,9 +1275,7 @@ static Datum call_srf_function(FunctionCallInfo fcinfo, pljs_context *context,
 
     JS_FreeValue(context->ctx, ret);
 
-    ereport(ERROR,
-            (errmsg("%s", (message && message[0]) ? message : "execution error"),
-             errdetail("%s", (pg_detail && pg_detail[0]) ? pg_detail : error_message)));
+    pljs_ereport_js_error(message, pg_detail, error_message, "execution error");
 
     /* Shuts up the compiler, since ereports of ERROR stop execution. */
     return (Datum)0;
