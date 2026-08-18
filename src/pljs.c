@@ -391,7 +391,19 @@ static int interrupt_handler(JSRuntime *rt, void *opaque) {
    * CHECK_FOR_INTERRUPTS() once control is back in C to raise the real error
    * (see the JS_IsException paths below).
    */
-  return (QueryCancelPending || ProcDiePending) ? 1 : 0;
+  /*
+   * QueryCancelPending and ProcDiePending are the two that matter most, and are
+   * kept as an explicit fast path.  InterruptPending then catches everything else
+   * PostgreSQL considers worth interrupting for -- ClientConnectionLost, recovery
+   * conflicts, IdleInTransactionSessionTimeoutPending -- so a runaway script
+   * unwinds for those too rather than spinning until one of the first two happens
+   * to be set.
+   *
+   * A spurious wake-up is harmless: the caller runs CHECK_FOR_INTERRUPTS() once
+   * control is back in C, and if nothing is actually pending that is a no-op and
+   * the JavaScript exception is reported normally.
+   */
+  return (QueryCancelPending || ProcDiePending || InterruptPending) ? 1 : 0;
 }
 
 /**
@@ -1216,11 +1228,26 @@ static void call_anonymous_function(const char *source, JSContext *ctx) {
   if (!JS_IsException(val)) {
     pfree(src.data);
   } else {
-    /* Surface a pending cancel/terminate as the real PostgreSQL error. */
-    CHECK_FOR_INTERRUPTS();
-
+    /*
+     * Extract the error, release everything, then report.  The report never
+     * returns, so anything freed after it is dead code -- and `val` was never
+     * released on this path at all, leaking a QuickJS reference for every failed
+     * DO block.
+     */
     char *message = NULL, *pg_detail = NULL, *sqlstate = NULL;
     char *detail = dump_error(ctx, &message, &pg_detail, &sqlstate);
+
+    JS_FreeValue(ctx, val);
+    pfree(src.data);
+
+    /*
+     * If QuickJS aborted because a cancel/terminate is pending, raise the real
+     * PostgreSQL error (canceling statement / terminating connection) now that
+     * we are safely back in C, instead of the generic JS interrupt message.
+     * After the cleanup above, so a cancel cannot skip it.
+     */
+    CHECK_FOR_INTERRUPTS();
+
     pljs_ereport_js_error(message, pg_detail, detail, sqlstate,
                           "execution error");
   }
@@ -1365,18 +1392,23 @@ static Datum call_trigger(FunctionCallInfo fcinfo, pljs_context *context) {
   SPI_finish();
 
   if (JS_IsException(ret)) {
+    /*
+     * Same order as call_function(): extract, release, then report.  The
+     * JS_FreeValue() below used to sit *after* the report, which never returns,
+     * so it was dead code -- `ret` leaked a QuickJS reference on every trigger
+     * exception, not merely on a cancel.
+     */
+    char *message = NULL, *pg_detail = NULL, *sqlstate = NULL;
+    char *detail = dump_error(context->ctx, &message, &pg_detail, &sqlstate);
+
+    JS_FreeValue(context->ctx, ret);
+    MemoryContextSwitchTo(old_context);
+
     /* Surface a pending cancel/terminate as the real PostgreSQL error. */
     CHECK_FOR_INTERRUPTS();
 
-    char *message = NULL, *pg_detail = NULL, *sqlstate = NULL;
-    char *detail = dump_error(context->ctx, &message, &pg_detail, &sqlstate);
     pljs_ereport_js_error(message, pg_detail, detail, sqlstate,
                           "execution error");
-
-    JS_FreeValue(context->ctx, ret);
-
-    MemoryContextSwitchTo(old_context);
-    PG_RETURN_VOID();
   }
 
   if (JS_IsNull(ret) || !TRIGGER_FIRED_FOR_ROW(event)) {
