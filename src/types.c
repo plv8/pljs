@@ -18,6 +18,7 @@
 
 #include "pljs.h"
 
+#include <math.h>
 #include <string.h>
 #include <time.h>
 
@@ -1486,17 +1487,31 @@ Datum pljs_jsvalue_to_datum(Oid rettype, JSValue val, bool *is_null,
   }
 
   case DATEOID:
-    if (Is_Date(val)) {
-      double in;
-      JS_ToFloat64(ctx, &in, val);
-      return pljs_convert_epoch_to_date(in);
-    }
-    break;
   case TIMESTAMPOID:
   case TIMESTAMPTZOID:
     if (Is_Date(val)) {
       double in;
       JS_ToFloat64(ctx, &in, val);
+
+      /*
+       * An invalid Date -- one whose getTime() is NaN -- has no epoch to
+       * convert. It is not an exotic thing to hold: reading
+       * 'infinity'::timestamptz back into JavaScript produces exactly that, so a
+       * read-modify-write of a row with an infinite timestamp reaches here.
+       *
+       * The arithmetic below turns NaN into a finite number, and the value
+       * stored was 2000-01-01 -- the PostgreSQL epoch, i.e. an offset of zero.
+       * A real date, silently, where the caller had no date at all. Bind SQL
+       * NULL instead.
+       */
+      if (isnan(in)) {
+        return pljs_null_datum(is_null, fcinfo);
+      }
+
+      if (rettype == DATEOID) {
+        return pljs_convert_epoch_to_date(in);
+      }
+
       return pljs_convert_epoch_to_timestamptz(in);
     }
     break;
