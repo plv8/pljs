@@ -1,6 +1,6 @@
 #include "postgres.h"
 
-#include "catalog/pg_database.h"
+#include "catalog/pg_language.h"
 #include "catalog/pg_proc.h"
 #include "catalog/pg_type_d.h"
 #include "commands/trigger.h"
@@ -700,6 +700,12 @@ Datum pljs_call_handler(PG_FUNCTION_ARGS) {
 
     // If there was a problem creating the function, we'll just return VOID.
     if (JS_IsUndefined(context.js_function)) {
+      /*
+       * This early return bypassed the per-branch ReleaseSysCache() below, so a
+       * function whose body failed to compile leaked the pg_proc pin for the
+       * rest of the transaction.
+       */
+      ReleaseSysCache(proctuple);
       PG_RETURN_VOID();
     }
 
@@ -1539,6 +1545,7 @@ JSValue pljs_find_js_function(Oid fn_oid, JSContext *ctx) {
 
   /* Should not happen? */
   if (!OidIsValid(prolang)) { // NOLINT
+    ReleaseSysCache(functuple);
     return func;
   }
 
@@ -1546,12 +1553,20 @@ JSValue pljs_find_js_function(Oid fn_oid, JSContext *ctx) {
   HeapTuple langtuple =
       SearchSysCache(LANGNAME, NameGetDatum(&langname), 0, 0, 0);
   if (HeapTupleIsValid(langtuple)) {
-    Form_pg_database datForm = (Form_pg_database)GETSTRUCT(langtuple);
-    Oid langtupoid = datForm->oid;
+    /*
+     * This is a pg_language tuple, so it must be read through
+     * Form_pg_language.  It was previously cast to Form_pg_database, which
+     * happened to yield the right answer only because both catalogs begin with
+     * an `Oid oid` at the same offset -- any future field access, or a change to
+     * either catalog's layout, would have read the wrong bytes.
+     */
+    Form_pg_language langForm = (Form_pg_language)GETSTRUCT(langtuple);
+    Oid langtupoid = langForm->oid;
 
     ReleaseSysCache(langtuple);
 
     if (langtupoid != prolang) {
+      ReleaseSysCache(functuple);
       return func;
     }
   }
@@ -1565,6 +1580,16 @@ JSValue pljs_find_js_function(Oid fn_oid, JSContext *ctx) {
     pljs_function_cache_to_context(&context, function_entry);
 
     func = context.js_function;
+
+    /*
+     * The pin was previously released only on the cache-miss branch below, so a
+     * pljs.find_function() that hit the cache -- the common case once a function
+     * has been called once -- held a syscache pin on pg_proc for the rest of the
+     * transaction.  Repeated lookups in one transaction accumulated them, which
+     * is what produces "WARNING: resource was not closed: cache pg_proc ... has
+     * count N" under USE_ASSERT_CHECKING.
+     */
+    ReleaseSysCache(functuple);
   } else {
     pljs_context_cache_value *context_entry =
         pljs_cache_context_find(GetUserId());
