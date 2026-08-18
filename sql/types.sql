@@ -21,7 +21,12 @@ CREATE FUNCTION int4_to_text(x int4) RETURNS text AS $$ return x; $$ LANGUAGE pl
 SELECT int4_to_text(123);
 CREATE FUNCTION text_to_int4(x text) RETURNS int4 AS $$ return x; $$ LANGUAGE pljs;
 SELECT text_to_int4('123');
+-- A string is parsed by int4's input function, so text that is not an integer
+-- raises instead of silently becoming 0, which is what routing it through a
+-- double produced.
 SELECT text_to_int4('abc');
+-- Out of range likewise raises rather than wrapping.
+SELECT text_to_int4('2147483648');
 
 -- ARRAYS
 CREATE FUNCTION return_array() RETURNS TEXT[] AS $$ return ["foo", "bar"]; $$LANGUAGE pljs;
