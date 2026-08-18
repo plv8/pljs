@@ -822,6 +822,29 @@ Datum pljs_inline_handler(PG_FUNCTION_ARGS) {
  * @returns #Datum of type `VOID`
  */
 Datum pljs_call_validator(PG_FUNCTION_ARGS) {
+  /*
+   * XXX This validator does not actually validate anything, and fixing that is
+   * deliberately left out of this change.
+   *
+   * A language validator is called as validator(oid_of_function_being_created),
+   * so the function to check is the ARGUMENT; fcinfo->flinfo->fn_oid below is
+   * the validator's *own* OID.  Reading prosrc from it fetches the validator's
+   * own pg_proc row, whose prosrc is the C symbol name "pljs_call_validator" --
+   * which happens to parse as a bare JavaScript identifier.  So validation
+   * always succeeds and an invalid body is accepted silently:
+   *
+   *   CREATE FUNCTION f() RETURNS int AS $$ this is ( not js $$ LANGUAGE pljs;
+   *   CREATE FUNCTION
+   *
+   * with the syntax error only surfacing on the first call.
+   *
+   * Simply switching to PG_GETARG_OID(0) is NOT the fix: a pljs body is a
+   * function *body*, not a standalone program -- `return 42;` is a syntax error
+   * at top level -- so the validator has to wrap it the way
+   * pljs_compile_function() does, with the function's argument names, before
+   * compiling.  Without that, correcting the OID rejects almost every valid
+   * function in the suite.  That belongs in its own change with its own tests.
+   */
   Oid fn_oid = fcinfo->flinfo->fn_oid;
   HeapTuple proctuple;
   const char *sourcecode;
@@ -855,16 +878,49 @@ Datum pljs_call_validator(PG_FUNCTION_ARGS) {
   if (JS_IsException(val)) {
     char *message = NULL, *pg_detail = NULL;
     char *detail = dump_error(ctx, &message, &pg_detail);
+
+    /*
+     * dump_error() has copied everything we need into palloc'd memory, so the
+     * JavaScript side can go now.  Without this the whole context leaks on
+     * every rejected function body.
+     */
+    JS_FreeValue(ctx, val);
+    JS_FreeContext(ctx);
+    ReleaseSysCache(proctuple);
+
     pljs_ereport_js_error(message, pg_detail, detail, "execution error");
   }
 
-  // call validator can release the context
+  /*
+   * Drop the compiled function before releasing the context.  JS_FreeContext()
+   * does not free a context that still has live references into it, so leaving
+   * this JSValue alone leaked the entire JSContext -- including all of QuickJS's
+   * intrinsic objects, roughly 68KB measured -- on every single CREATE OR
+   * REPLACE FUNCTION.  A backend doing repeated DDL grew past 500MB and died
+   * with SIGSEGV in seconds.  QuickJS allocates on the libc heap, so none of it
+   * was visible in pg_backend_memory_contexts.
+   */
+  JS_FreeValue(ctx, val);
   JS_FreeContext(ctx);
 
   ReleaseSysCache(proctuple);
 
-  // We also clear the caches.  It is safest to just clear up any instances of
-  // the function or procedure.
+  /*
+   * Clear the caches: the function being created or replaced may already have a
+   * compiled copy cached, and it is now stale.
+   *
+   * This is deliberately still the blanket reset rather than a targeted removal
+   * of this one function.  A cached entry also carries the result-type
+   * information resolved at its first call, and for a RECORD-returning function
+   * that comes from the *call site*, not the function -- so a targeted
+   * invalidation leaves the entry from an earlier call site in place and the
+   * next call converts against the wrong tuple descriptor.  Until the cache key
+   * covers that, the reset is what keeps it correct.
+   *
+   * pljs_cache_reset() now frees the QuickJS side before dropping the Postgres
+   * memory that references it; it previously orphaned every cached JSContext on
+   * the libc heap.
+   */
   pljs_cache_reset();
 
   PG_RETURN_VOID();
