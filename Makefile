@@ -44,6 +44,7 @@ REGRESS = init-extension function json jsonb json_conv types bytea context \
 	pg_typedarray_views \
 	pg_find_function_no_perm \
 	pg_caught_error_stack \
+	pg_cursor_error_recovery \
 	pg_column_name_mismatch \
 	pg_record_no_column_list \
 	pg_error_envelope_fields \
