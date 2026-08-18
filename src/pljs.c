@@ -1,5 +1,6 @@
 #include "postgres.h"
 
+#include "access/htup_details.h"
 #include "catalog/pg_language.h"
 #include "catalog/pg_proc.h"
 #include "catalog/pg_type_d.h"
@@ -400,6 +401,16 @@ static bool setup_function(FunctionCallInfo fcinfo, HeapTuple proctuple,
   pljs_function->prosrc =
       DatumGetCString(DirectFunctionCall1(textout, prosrcdatum));
 
+  /*
+   * Record which pg_proc tuple this was compiled from.  CREATE OR REPLACE
+   * writes a new tuple version, so a cached entry whose xmin/tid no longer
+   * match the current tuple was compiled from a body that no longer exists.
+   * These two fields were already declared in pljs_func but never written or
+   * read.
+   */
+  pljs_function->fn_xmin = HeapTupleHeaderGetRawXmin(proctuple->t_data);
+  pljs_function->fn_tid = proctuple->t_self;
+
   pg_proc_entry = (Form_pg_proc)GETSTRUCT(proctuple);
 
   // Get the actual name of the procedure.
@@ -772,7 +783,7 @@ Datum pljs_call_handler(PG_FUNCTION_ARGS) {
 
   // First search for a cached copy of the context.
   pljs_function_cache_value *function_entry =
-      pljs_cache_function_find(GetUserId(), fn_oid);
+      pljs_cache_function_find(GetUserId(), fn_oid, proctuple);
 
   if (function_entry) {
     // Make a copy of the function entry to the pljs context.
@@ -1829,7 +1840,7 @@ JSValue pljs_find_js_function(Oid fn_oid, JSContext *ctx) {
   pljs_context context = {0};
 
   pljs_function_cache_value *function_entry =
-      pljs_cache_function_find(GetUserId(), fn_oid);
+      pljs_cache_function_find(GetUserId(), fn_oid, functuple);
 
   if (function_entry != NULL) {
     pljs_function_cache_to_context(&context, function_entry);
