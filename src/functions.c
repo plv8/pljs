@@ -45,6 +45,8 @@ static JSValue pljs_rollback(JSContext *, JSValueConst, int, JSValueConst *);
 static JSValue pljs_find_function(JSContext *, JSValueConst, int,
                                   JSValueConst *);
 static JSValue pljs_return_next(JSContext *, JSValueConst, int, JSValueConst *);
+static JSValue pljs_return_next_internal(JSContext *, JSValueConst, int,
+                                         JSValueConst *);
 
 static JSValue pljs_get_window_object(JSContext *, JSValueConst, int,
                                       JSValueConst *);
@@ -1216,7 +1218,7 @@ static JSValue pljs_find_function(JSContext *ctx, JSValueConst this_val,
  *
  * @returns #JSValue containing `undefined`
  */
-static JSValue pljs_return_next(JSContext *ctx, JSValueConst this_val, int argc,
+static JSValue pljs_return_next_internal(JSContext *ctx, JSValueConst this_val, int argc,
                                 JSValueConst *argv) {
   pljs_storage *storage = pljs_storage_for_context(ctx);
 
@@ -1279,6 +1281,63 @@ static JSValue pljs_return_next(JSContext *ctx, JSValueConst this_val, int argc,
   }
   return JS_UNDEFINED;
 }
+
+/**
+ * @brief Javascript function `pljs.return_next`.
+ *
+ * Wraps pljs_return_next_internal() so that a PostgreSQL error raised while
+ * converting the row -- an out-of-range integer, an unparseable numeric string,
+ * a NUL byte in a text value -- becomes a JavaScript exception instead of a
+ * longjmp.
+ *
+ * This is not defensive tidying.  return_next is a C function that QuickJS
+ * called, so QuickJS has live JSStackFrame structures on the C stack between us
+ * and the interpreter, linked from the runtime.  An ereport(ERROR) here
+ * siglongjmps straight past them, leaving rt->current_stack_frame pointing at
+ * frames that no longer exist.  The session then looks fine until anything walks
+ * that list -- which is what constructing an Error does, via build_backtrace --
+ * so a later, completely unrelated `throw new Error(...)`, typically in a
+ * trigger, segfaults the backend:
+ *
+ *     build_backtrace <- js_error_constructor <- JS_Call <- call_trigger
+ *
+ * A failing SETOF call followed by any trigger reproduces it in two statements.
+ * pljs_execute() has always converted PostgreSQL errors to JavaScript
+ * exceptions for the same reason; return_next did not, and became able to raise
+ * once the conversion paths started rejecting bad values instead of silently
+ * mangling them.
+ */
+static JSValue pljs_return_next(JSContext *ctx, JSValueConst this_val, int argc,
+                                JSValueConst *argv) {
+  MemoryContext m_mcontext = CurrentMemoryContext;
+  JSValue result = JS_UNDEFINED;
+
+  PG_TRY();
+  {
+    /*
+     * NB: assign, do not return, from inside PG_TRY -- a return here would leave
+     * PG_exception_stack pointing at this frame's dead sigjmp_buf.
+     */
+    result = pljs_return_next_internal(ctx, this_val, argc, argv);
+  }
+  PG_CATCH();
+  {
+    MemoryContextSwitchTo(m_mcontext);
+
+    ErrorData *edata = CopyErrorData();
+    JSValue error = js_throw_error_data(edata, ctx);
+
+    FlushErrorState();
+    FreeErrorData(edata);
+    MemoryContextSwitchTo(m_mcontext);
+
+    return error;
+  }
+  PG_END_TRY();
+
+  return result;
+}
+
 
 /**
  * @brief Javascript function `window.get_partition_local`.

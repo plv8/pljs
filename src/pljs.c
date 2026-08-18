@@ -751,11 +751,38 @@ Datum pljs_call_handler(PG_FUNCTION_ARGS) {
     // Set up a new storage object for this call.
     setup_storage_for_context(&context, fcinfo);
 
-    if (context.function->is_srf) {
-      retval = call_srf_function(fcinfo, &context, argv);
-    } else {
-      retval = call_function(fcinfo, &context, argv);
+    /*
+     * The storage MUST be restored even when the call raises.
+     *
+     * JSContexts are cached per user id and reused for the rest of the session,
+     * and the storage is attached to the context, so a call that raised used to
+     * leave its own storage installed permanently -- pointing at this call's
+     * fcinfo, its return_state and its execution memory context, all of which
+     * are gone once the error has unwound.  The next call of *any* kind that
+     * reads pljs_storage_for_context() -- a trigger, a window function,
+     * return_next() -- then dereferenced that stale pointer and segfaulted the
+     * backend.
+     *
+     * This was latent until a conversion error became reachable from inside a
+     * set-returning function: before that, returning an out-of-range integer
+     * wrapped silently instead of raising, so nothing escaped this block.  A
+     * failing SETOF call followed by any trigger reproduces it within a couple
+     * of dozen iterations.
+     */
+    PG_TRY();
+    {
+      if (context.function->is_srf) {
+        retval = call_srf_function(fcinfo, &context, argv);
+      } else {
+        retval = call_function(fcinfo, &context, argv);
+      }
     }
+    PG_CATCH();
+    {
+      store_storage_in_context(&context, old_storage);
+      PG_RE_THROW();
+    }
+    PG_END_TRY();
 
     // Reset to the old storage now that the call is over.
     store_storage_in_context(&context, old_storage);
