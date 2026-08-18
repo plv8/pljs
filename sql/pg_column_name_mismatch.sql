@@ -59,3 +59,17 @@ $$;
 SELECT a, b FROM cnm_ok();
 
 DROP FUNCTION cnm_missing, cnm_case, cnm_empty, cnm_several, cnm_ok;
+
+-- The provided-key list is capped.  An object with thousands of properties would
+-- otherwise put every name into the message, which lands in the server log as
+-- well as the client; ten names plus the total is enough to spot a typo.
+CREATE FUNCTION cnm_many() RETURNS TABLE(a int, b text) LANGUAGE pljs AS $$
+  const row = {};
+  for (let i = 0; i < 500; i++) row['prop' + i] = i;
+  pljs.return_next(row);
+$$;
+
+SELECT * FROM cnm_many();
+
+DROP FUNCTION cnm_many();
+
