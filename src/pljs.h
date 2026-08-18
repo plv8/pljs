@@ -66,6 +66,14 @@ typedef struct pljs_function_cache_value {
   char argmodes[FUNC_MAX_ARGS];
   char *prosrc;
   TypeFuncClass typeclass;
+
+  /*
+   * Identity of the pg_proc tuple this entry was compiled from, so a stale
+   * entry can be recognised.  Same mechanism plpgsql uses (see
+   * plpgsql_compile()).
+   */
+  TransactionId fn_xmin;
+  ItemPointerData fn_tid;
 } pljs_function_cache_value;
 
 typedef struct pljs_param_state {
@@ -183,7 +191,8 @@ void pljs_cache_context_remove(Oid);
 pljs_context_cache_value *pljs_cache_context_find(Oid user_id);
 
 // Functions
-pljs_function_cache_value *pljs_cache_function_find(Oid user_id, Oid fn_oid);
+pljs_function_cache_value *pljs_cache_function_find(Oid user_id, Oid fn_oid,
+                                                    HeapTuple proctuple);
 void pljs_cache_function_add(pljs_context *context);
 void pljs_cache_function_remove(Oid fn_oid);
 

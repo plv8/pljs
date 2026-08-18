@@ -1,5 +1,6 @@
 #include "postgres.h"
 
+#include "access/htup_details.h"
 #include "utils/memutils.h"
 
 #include "pljs.h"
@@ -282,7 +283,8 @@ void pljs_cache_function_add(pljs_context *context) {
  * @param fn_oid #Oid
  * @returns #pljs_function_cache_value that is found, or `NULL` if not found
  */
-pljs_function_cache_value *pljs_cache_function_find(Oid user_id, Oid fn_oid) {
+pljs_function_cache_value *pljs_cache_function_find(Oid user_id, Oid fn_oid,
+                                                    HeapTuple proctuple) {
   bool found;
 
   // Search for the context.
@@ -298,6 +300,33 @@ pljs_function_cache_value *pljs_cache_function_find(Oid user_id, Oid fn_oid) {
   // Search for the function inside of the context.
   pljs_function_cache_value *value = (pljs_function_cache_value *)hash_search(
       ctx_hvalue->function_hash_table, &fn_oid, HASH_FIND, &found);
+
+  if (!found || value == NULL) {
+    return NULL;
+  }
+
+  /*
+   * A hit is only usable if it was compiled from the pg_proc tuple that is
+   * current now.  CREATE OR REPLACE writes a new tuple version, and the OID is
+   * unchanged, so the entry would otherwise still match and the backend would
+   * go on running the previous body.
+   *
+   * The validator drops the entry directly, which covers the backend issuing
+   * the DDL.  It cannot cover any other backend: pljs registers no syscache
+   * invalidation callback, so nothing else tells them.  Before this check, a
+   * session that had already called a function kept running the old body for
+   * the rest of its life, however many times the function was replaced.
+   *
+   * This also settles DROP FUNCTION followed by OID reuse, where a new function
+   * inherits the OID of the old one: the tuple is a different tuple, so the
+   * mismatch is detected rather than the old body being run under the new name.
+   */
+  if (HeapTupleIsValid(proctuple) &&
+      (value->fn_xmin != HeapTupleHeaderGetRawXmin(proctuple->t_data) ||
+       !ItemPointerEquals(&value->fn_tid, &proctuple->t_self))) {
+    pljs_cache_function_remove(fn_oid);
+    return NULL;
+  }
 
   return value;
 }
@@ -360,6 +389,9 @@ void pljs_context_to_function_cache(pljs_function_cache_value *function_entry,
   function_entry->trigger = context->function->trigger;
   function_entry->is_srf = context->function->is_srf;
   function_entry->typeclass = context->function->typeclass;
+
+  function_entry->fn_xmin = context->function->fn_xmin;
+  function_entry->fn_tid = context->function->fn_tid;
 
   function_entry->fn = context->js_function;
   function_entry->nargs = context->function->inargs;
