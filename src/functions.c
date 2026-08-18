@@ -402,55 +402,77 @@ static int pljs_execute_params(const char *sql, JSValue params,
                                JSContext *ctx) {
   int nparams = pljs_js_array_length(params, ctx);
   int status;
+
+  /*
+   * Everything this function allocates is scoped to a child context that is
+   * deleted on both the success and the error path.
+   *
+   * The frees used to sit after SPI_execute_plan_with_paramlist(), so any query
+   * that raised -- the common case in real code, and the whole point of a retry
+   * loop -- leaked all of it.  None of it is reclaimed by subtransaction
+   * rollback: the plan lives in the SPI procedure context and the rest in the
+   * caller's, both of which outlive the failed statement.
+   *
+   * The SPI plan is the exception that still needs explicit handling, because
+   * SPI_freeplan() is not memory-context based, hence the PG_CATCH below rather
+   * than a context delete alone.
+   */
+  MemoryContext parm_cxt = AllocSetContextCreate(
+      CurrentMemoryContext, "PLJS execute params", ALLOCSET_SMALL_SIZES);
+  MemoryContext old_cxt = MemoryContextSwitchTo(parm_cxt);
+
   Datum *values = palloc(sizeof(Datum) * nparams);
   char *nulls = palloc(sizeof(char) * nparams);
 
-  SPIPlanPtr plan;
-  pljs_param_state parstate = {.memory_context = CurrentMemoryContext,
-                               .param_types = 0};
-  ParamListInfo param_li;
-
-  plan = SPI_prepare_params(sql, pljs_variable_param_setup, &parstate, 0);
-
-  if (parstate.nparams != nparams) {
-    elog(ERROR, "parameter count mismatch: %d != %d", parstate.nparams,
-         nparams);
-  }
-  for (int i = 0; i < nparams; i++) {
-    JSValue param = JS_GetPropertyUint32(ctx, params, i);
-    bool is_null;
-
-    values[i] = pljs_jsvalue_to_datum(parstate.param_types[i], param, &is_null,
-                                      ctx, NULL);
-
-    JS_FreeValue(ctx, param);
-  }
-
-  param_li = pljs_setup_variable_paramlist(&parstate, values, nulls);
-  status = SPI_execute_plan_with_paramlist(plan, param_li, false, 0);
-
   /*
-   * This plan was prepared for this one call and is not saved, so it belongs
-   * to the SPI procedure context and would otherwise last until SPI_finish().
-   * The result rows are in SPI_tuptable and do not depend on it.
+   * NB: SPI_prepare_params() stores the address of this *stack-local* parstate
+   * in the plan's parserSetupArg, so the plan must not outlive this frame.  The
+   * SPI_freeplan() calls below are what guarantee that -- they are not an
+   * optimisation to be removed.
    */
+  pljs_param_state parstate = {.memory_context = parm_cxt, .param_types = 0};
+  SPIPlanPtr volatile plan = NULL;
+
+  PG_TRY();
+  {
+    plan = SPI_prepare_params(sql, pljs_variable_param_setup, &parstate, 0);
+
+    if (parstate.nparams != nparams) {
+      ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                      errmsg("parameter count mismatch: %d != %d",
+                             parstate.nparams, nparams)));
+    }
+
+    for (int i = 0; i < nparams; i++) {
+      JSValue param = JS_GetPropertyUint32(ctx, params, i);
+      bool is_null;
+
+      values[i] = pljs_jsvalue_to_datum(parstate.param_types[i], param,
+                                        &is_null, ctx, NULL);
+      nulls[i] = is_null ? 'n' : ' ';
+
+      JS_FreeValue(ctx, param);
+    }
+
+    ParamListInfo param_li =
+        pljs_setup_variable_paramlist(&parstate, values, nulls);
+
+    status = SPI_execute_plan_with_paramlist(plan, param_li, false, 0);
+  }
+  PG_CATCH();
+  {
+    if (plan) {
+      SPI_freeplan(plan);
+    }
+    MemoryContextSwitchTo(old_cxt);
+    MemoryContextDelete(parm_cxt);
+    PG_RE_THROW();
+  }
+  PG_END_TRY();
+
   SPI_freeplan(plan);
-
-  pljs_free_param_datums(values, nulls, parstate.param_types, nparams);
-
-  /*
-   * Same for the per-call parameter machinery: the parameter list was only
-   * needed for the execution above, and the type array only for building it.
-   * Both were palloc'd per call and outlived it.
-   */
-  pfree(param_li);
-
-  if (parstate.param_types) {
-    pfree(parstate.param_types);
-  }
-
-  pfree(values);
-  pfree(nulls);
+  MemoryContextSwitchTo(old_cxt);
+  MemoryContextDelete(parm_cxt);
 
   return status;
 }
