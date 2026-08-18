@@ -776,7 +776,14 @@ static JSValue pljs_plan_cursor(JSContext *ctx, JSValueConst this_val, int argc,
   char *nulls = NULL;
   int nparams = 0;
   int argcount;
-  Portal cursor;
+  /*
+   * Assigned inside the PG_TRY below and read after PG_END_TRY, which is the
+   * pattern PostgreSQL's coding conventions require volatile for: without it a
+   * compiler is free to keep it in a register that the longjmp clobbers.  Safe
+   * in practice today because the read only happens on the non-longjmp path,
+   * but that is a property of the current control flow rather than of the code.
+   */
+  Portal volatile cursor = NULL;
   bool cleanup_params = false;
 
   JSValue ptr = JS_GetPropertyStr(ctx, this_val, "plan");
@@ -889,6 +896,18 @@ static JSValue pljs_plan_cursor(JSContext *ctx, JSValueConst this_val, int argc,
       JS_FreeValue(ctx, params);
     }
 
+    /*
+     * This path rolls back only an internal subtransaction and then returns a
+     * JavaScript error, so the enclosing transaction -- and therefore
+     * CurrentMemoryContext -- lives on.  Nothing else will reclaim these.
+     */
+    if (values) {
+      pfree(values);
+    }
+    if (nulls) {
+      pfree(nulls);
+    }
+
     return error;
   }
 
@@ -904,6 +923,14 @@ static JSValue pljs_plan_cursor(JSContext *ctx, JSValueConst this_val, int argc,
 
   if (cleanup_params) {
     JS_FreeValue(ctx, params);
+  }
+
+  /* The portal holds its own copies; these were only needed for the open. */
+  if (values) {
+    pfree(values);
+  }
+  if (nulls) {
+    pfree(nulls);
   }
 
   return ret;
