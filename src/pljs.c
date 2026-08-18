@@ -1181,11 +1181,32 @@ static Datum call_trigger(FunctionCallInfo fcinfo, pljs_context *context) {
 
   argv[9] = tgargv;
 
+  /*
+   * Connect to SPI, which call_trigger() never did -- so pljs.execute(),
+   * pljs.prepare() and every other SPI entry point failed inside a trigger. Not
+   * just DDL: a bare pljs.execute("SELECT 1") in a BEFORE INSERT trigger failed
+   * too.  Upstream reports it as "execution error"; the error-surfacing work in
+   * this series turns it into the underlying "current transaction is aborted",
+   * which is what made it findable.
+   *
+   * Atomic unconditionally: a trigger has no CallContext, so there is no
+   * nonatomic case to honour, and a trigger must not be able to commit.
+   */
+  if (SPI_connect_ext(0) != SPI_OK_CONNECT) {
+    elog(ERROR, "could not connect to spi manager");
+  }
+
   JS_SetInterruptHandler(JS_GetRuntime(context->ctx), interrupt_handler, NULL);
   os_pending_signals &= ~((uint64_t)1 << SIGINT);
 
   JSValue ret =
       JS_Call(context->ctx, context->js_function, JS_UNDEFINED, 10, argv);
+
+  /*
+   * Before the exception check, as in call_function(): the report below does
+   * not return, so an SPI_finish() after it would never run.
+   */
+  SPI_finish();
 
   if (JS_IsException(ret)) {
     char *message = NULL, *pg_detail = NULL;
