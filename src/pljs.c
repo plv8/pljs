@@ -37,7 +37,6 @@ static Datum call_srf_function(PG_FUNCTION_ARGS, pljs_context *context,
 
 static void call_anonymous_function(const char *, JSContext *);
 static Datum call_trigger(FunctionCallInfo fcinfo, pljs_context *context);
-static void signal_handler(int sig_num);
 static int interrupt_handler(JSRuntime *rt, void *opaque);
 static void setup_storage_for_context(pljs_context *context,
                                       FunctionCallInfo fcinfo);
@@ -62,8 +61,6 @@ JSClassID js_pljs_storage_id;
 // class id for pljs window object
 JSClassID js_window_id;
 
-static uint64_t os_pending_signals = 0;
-
 /**
  * @brief PostgreSQL extension initialization function.
  *
@@ -71,9 +68,12 @@ static uint64_t os_pending_signals = 0;
  * runtime.
  */
 void _PG_init(void) {
-  signal(SIGINT, signal_handler);
-  signal(SIGTERM, signal_handler);
-  signal(SIGABRT, signal_handler);
+  // NB: do NOT install our own signal() handlers here.  This runs inside a
+  // backend that has already set up PostgreSQL's own SIGINT/SIGTERM handlers
+  // (query cancel, fast shutdown); overwriting them process-wide broke
+  // statement_timeout / pg_cancel_backend / pg_terminate_backend for the whole
+  // backend for the rest of its life.  Instead, interrupt_handler() consults
+  // PostgreSQL's interrupt flags directly (see below).
 
   // Initialize cache.
   pljs_cache_init();
@@ -293,13 +293,21 @@ pg_noreturn static void pljs_ereport_js_error(const char *message,
   pg_unreachable();
 }
 
-
-static void signal_handler(int sig_num) {
-  os_pending_signals |= ((uint64_t)1 << sig_num);
-}
-
 static int interrupt_handler(JSRuntime *rt, void *opaque) {
-  return (os_pending_signals >> SIGINT) & 1;
+  /*
+   * Return non-zero to make QuickJS abort the running script.  We interrupt on
+   * a pending query cancel (statement_timeout, pg_cancel_backend) or backend
+   * termination (pg_terminate_backend, fast shutdown), read straight from
+   * PostgreSQL's own interrupt flags.
+   *
+   * We deliberately do NOT call CHECK_FOR_INTERRUPTS() here: that would
+   * ereport(ERROR) / siglongjmp out of the middle of the QuickJS interpreter
+   * and leave the runtime in an inconsistent state.  Instead we let QuickJS
+   * unwind cleanly to a JS exception, and each caller runs
+   * CHECK_FOR_INTERRUPTS() once control is back in C to raise the real error
+   * (see the JS_IsException paths below).
+   */
+  return (QueryCancelPending || ProcDiePending) ? 1 : 0;
 }
 
 /**
@@ -1105,13 +1113,19 @@ static void call_anonymous_function(const char *source, JSContext *ctx) {
   appendStringInfo(&src, "(function () {%s})();", source);
 
   JS_SetInterruptHandler(JS_GetRuntime(ctx), interrupt_handler, NULL);
-  os_pending_signals &= ~((uint64_t)1 << SIGINT);
 
   JSValue val = JS_Eval(ctx, src.data, strlen(src.data), "<function>", 0);
 
   if (!JS_IsException(val)) {
     pfree(src.data);
   } else {
+    /*
+     * If QuickJS aborted because a cancel/terminate is pending, raise the real
+     * PostgreSQL error (canceling statement / terminating connection) now that
+     * we are safely back in C, instead of the generic JS interrupt message.
+     */
+    CHECK_FOR_INTERRUPTS();
+
     char *message = NULL, *pg_detail = NULL;
     char *detail = dump_error(ctx, &message, &pg_detail);
     pljs_ereport_js_error(message, pg_detail, detail, "execution error");
@@ -1236,7 +1250,6 @@ static Datum call_trigger(FunctionCallInfo fcinfo, pljs_context *context) {
   }
 
   JS_SetInterruptHandler(JS_GetRuntime(context->ctx), interrupt_handler, NULL);
-  os_pending_signals &= ~((uint64_t)1 << SIGINT);
 
   JSValue ret =
       JS_Call(context->ctx, context->js_function, JS_UNDEFINED, 10, argv);
@@ -1248,6 +1261,9 @@ static Datum call_trigger(FunctionCallInfo fcinfo, pljs_context *context) {
   SPI_finish();
 
   if (JS_IsException(ret)) {
+    // Surface a pending cancel/terminate as the real PostgreSQL error.
+    CHECK_FOR_INTERRUPTS();
+
     char *message = NULL, *pg_detail = NULL;
     char *detail = dump_error(context->ctx, &message, &pg_detail);
     pljs_ereport_js_error(message, pg_detail, detail, "execution error");
@@ -1318,7 +1334,6 @@ static Datum call_function(FunctionCallInfo fcinfo, pljs_context *context,
   }
 
   JS_SetInterruptHandler(JS_GetRuntime(context->ctx), interrupt_handler, NULL);
-  os_pending_signals &= ~((uint64_t)1 << SIGINT);
 
   JSValue ret = JS_Call(context->ctx, context->js_function, JS_UNDEFINED,
                         context->function->inargs, argv);
@@ -1330,6 +1345,12 @@ static Datum call_function(FunctionCallInfo fcinfo, pljs_context *context,
     char *error_message = dump_error(context->ctx, &message, &pg_detail);
 
     JS_FreeValue(context->ctx, ret);
+
+    /*
+     * If the exception is really a pending cancel or terminate, raise the proper
+     * PostgreSQL error rather than reporting it as a JavaScript failure.
+     */
+    CHECK_FOR_INTERRUPTS();
 
     pljs_ereport_js_error(message, pg_detail, error_message, "execution error");
 
@@ -1459,7 +1480,6 @@ static Datum call_srf_function(FunctionCallInfo fcinfo, pljs_context *context,
   storage->return_state = state;
 
   JS_SetInterruptHandler(JS_GetRuntime(context->ctx), interrupt_handler, NULL);
-  os_pending_signals &= ~((uint64_t)1 << SIGINT);
 
   JSValue ret = JS_Call(context->ctx, context->js_function, JS_UNDEFINED,
                         context->function->inargs, argv);
@@ -1467,6 +1487,9 @@ static Datum call_srf_function(FunctionCallInfo fcinfo, pljs_context *context,
   SPI_finish();
 
   if (JS_IsException(ret)) {
+    // Surface a pending cancel/terminate as the real PostgreSQL error.
+    CHECK_FOR_INTERRUPTS();
+
     char *message = NULL, *pg_detail = NULL;
     char *error_message = dump_error(context->ctx, &message, &pg_detail);
 
