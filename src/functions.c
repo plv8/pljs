@@ -384,6 +384,62 @@ static int pljs_execute_params(const char *sql, JSValue params,
 }
 
 /**
+ * @brief Frees a #pljs_plan and everything it owns.
+ *
+ * Shared by the explicit `plan.free()` path and the GC finalizer.  All of the
+ * members live in long-lived contexts (the SPI plan is a saved plan, parstate
+ * and its param_types are in CacheMemoryContext), so this is safe to call at
+ * any time, including from a finalizer that may run outside a transaction.
+ * Note the previous free path leaked parstate->param_types; it is reclaimed
+ * here.
+ */
+static void pljs_free_plan_struct(pljs_plan *plan) {
+  if (plan == NULL) {
+    return;
+  }
+
+  if (plan->plan) {
+    SPI_freeplan(plan->plan);
+  }
+
+  if (plan->parstate) {
+    if (plan->parstate->param_types) {
+      pfree(plan->parstate->param_types);
+    }
+    pfree(plan->parstate);
+  }
+
+  pfree(plan);
+}
+
+/**
+ * @brief GC finalizer for the prepared-statement handle class.
+ *
+ * Without this, a plan object that JavaScript prepares but never explicitly
+ * `.free()`s leaks its saved SPI plan and CacheMemoryContext parstate for the
+ * life of the backend -- e.g. preparing 20k plans in a loop grew
+ * CacheMemoryContext from ~1MB to ~64MB with no way to reclaim it.  The
+ * finalizer runs when the handle becomes unreachable so the leak is bounded by
+ * the GC interval instead of being permanent.  plan.free() clears the opaque,
+ * so this is a no-op after an explicit free (no double free).
+ */
+static void pljs_plan_handle_finalizer(JSRuntime *rt, JSValue val) {
+  pljs_plan *plan = JS_GetOpaque(val, js_prepared_statement_handle_id);
+
+  pljs_free_plan_struct(plan);
+}
+
+static const JSClassDef pljs_plan_handle_class = {
+    "PljsPreparedStatement",
+    .finalizer = pljs_plan_handle_finalizer,
+};
+
+void pljs_register_js_classes(JSRuntime *runtime) {
+  JS_NewClassID(&js_prepared_statement_handle_id);
+  JS_NewClass(runtime, js_prepared_statement_handle_id, &pljs_plan_handle_class);
+}
+
+/**
  * @brief Javascript function `plan.execute`.
  *
  * Javascript function that executes a Postgres plan and returns
@@ -546,17 +602,13 @@ static JSValue pljs_plan_free(JSContext *ctx, JSValueConst this_val, int argc,
 
   plan = JS_GetOpaque(ptr, js_prepared_statement_handle_id);
 
-  if (plan) {
-    if (plan->plan) {
-      SPI_freeplan(plan->plan);
-    }
+  pljs_free_plan_struct(plan);
 
-    if (plan->parstate) {
-      pfree(plan->parstate);
-    }
-
-    pfree(plan);
-  }
+  /*
+   * Clear the opaque so the handle's GC finalizer does not free the same plan
+   * again once this handle object is collected.
+   */
+  JS_SetOpaque(ptr, NULL);
 
   JS_SetPropertyStr(ctx, this_val, "plan", JS_NULL);
 

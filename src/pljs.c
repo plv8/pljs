@@ -84,6 +84,11 @@ void _PG_init(void) {
   // Set up the quickjs runtime.
   rt = JS_NewRuntime();
 
+  // Register runtime JS classes (must happen before any JSContext is created,
+  // so every context sees the class; e.g. the prepared-statement handle whose
+  // finalizer reclaims otherwise-leaked SPI plans).
+  pljs_register_js_classes(rt);
+
   // Set up a memory limit if it exists.
   if (configuration.memory_limit) {
     JS_SetMemoryLimit(rt, configuration.memory_limit * 1024 * 1024);
