@@ -1226,10 +1226,43 @@ Datum pljs_jsvalue_to_datum(Oid rettype, JSValue val, bool *is_null,
     break;
   }
 
+  case NAMEOID: {
+    /*
+     * `name` is a fixed-length NameData -- NAMEDATALEN bytes, no varlena header
+     * -- so it cannot be built the way text/varchar/bpchar are below. Doing that
+     * writes a varlena length word into the first bytes of the name, and every
+     * comparison against a real name then reads that as characters: a catalog
+     * lookup by nspname, relname or typname matches nothing at all, silently.
+     * namein() lays the value out correctly and applies the truncation rule for
+     * anything longer than NAMEDATALEN - 1.
+     */
+    const char *str = JS_ToCString(ctx, val);
+    Datum ret;
+
+    if (str == NULL) {
+      elog(ERROR, "could not convert JavaScript value to a string");
+    }
+
+    PG_TRY();
+    {
+      ret = DirectFunctionCall1(namein, CStringGetDatum(str));
+    }
+    PG_CATCH();
+    {
+      /* Do not leak the QuickJS C-string if namein() rejects the value. */
+      JS_FreeCString(ctx, str);
+      PG_RE_THROW();
+    }
+    PG_END_TRY();
+
+    JS_FreeCString(ctx, str);
+
+    return ret;
+  }
+
   case TEXTOID:
   case VARCHAROID:
   case BPCHAROID:
-  case NAMEOID:
   case XMLOID: {
     size_t plen;
     const char *str = JS_ToCStringLen(ctx, &plen, val);
