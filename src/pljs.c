@@ -95,7 +95,20 @@ void _PG_init(void) {
    * (and long before the kernel stack limit) is reached, with a floor so a
    * small max_stack_depth still leaves JS usable.  PostgreSQL's own
    * check_stack_depth() bounds any cumulative C stack consumed across nested
-   * JS<->SQL re-entries, so anchoring the measurement once here is safe.
+   * JS<->SQL re-entries.
+   *
+   * The budget set here is a size, not an anchor: JS_NewRuntime() records the
+   * stack top at this point in _PG_init, which is not where any real JS call
+   * begins.  Each entry into JS therefore calls JS_UpdateStackTop() to
+   * re-anchor the measurement at its own depth -- see the call sites around
+   * each JS_Call().
+   *
+   * Note an asymmetry with pljs.memory_limit below, which does install an
+   * assign hook: max_stack_depth is read once, here, so a later SET
+   * max_stack_depth does not change the JS budget for the life of the backend.
+   * It is a core GUC with no hook available to us, and re-reading it per call
+   * would let one session's SET silently resize a runtime shared with every
+   * other function in the backend.
    */
   {
     long depth_bytes = (long)max_stack_depth * 1024L;
@@ -1134,6 +1147,16 @@ static void call_anonymous_function(const char *source, JSContext *ctx) {
   // generate the function as javascript with all of its arguments
   appendStringInfo(&src, "(function () {%s})();", source);
 
+  /*
+   * Re-anchor QuickJS's stack measurement here, at the C-stack depth this call
+   * actually starts from.  JS_NewRuntime() records the stack top once, inside
+   * _PG_init, at whatever depth the first pljs call happened to be -- but JS
+   * can run far deeper than that (SQL -> JS -> pljs.execute -> SQL -> JS ->
+   * ...), so a budget measured from the original anchor does not describe the
+   * stack this call has left.  The vendored QuickJS exports JS_UpdateStackTop()
+   * for exactly this.
+   */
+  JS_UpdateStackTop(JS_GetRuntime(ctx));
   JS_SetInterruptHandler(JS_GetRuntime(ctx), interrupt_handler, NULL);
 
   JSValue val = JS_Eval(ctx, src.data, strlen(src.data), "<function>", 0);
@@ -1271,6 +1294,16 @@ static Datum call_trigger(FunctionCallInfo fcinfo, pljs_context *context) {
     elog(ERROR, "could not connect to spi manager");
   }
 
+  /*
+   * Re-anchor QuickJS's stack measurement here, at the C-stack depth this call
+   * actually starts from.  JS_NewRuntime() records the stack top once, inside
+   * _PG_init, at whatever depth the first pljs call happened to be -- but JS
+   * can run far deeper than that (SQL -> JS -> pljs.execute -> SQL -> JS ->
+   * ...), so a budget measured from the original anchor does not describe the
+   * stack this call has left.  The vendored QuickJS exports JS_UpdateStackTop()
+   * for exactly this.
+   */
+  JS_UpdateStackTop(JS_GetRuntime(context->ctx));
   JS_SetInterruptHandler(JS_GetRuntime(context->ctx), interrupt_handler, NULL);
 
   JSValue ret =
@@ -1355,6 +1388,16 @@ static Datum call_function(FunctionCallInfo fcinfo, pljs_context *context,
     elog(ERROR, "could not connect to spi manager");
   }
 
+  /*
+   * Re-anchor QuickJS's stack measurement here, at the C-stack depth this call
+   * actually starts from.  JS_NewRuntime() records the stack top once, inside
+   * _PG_init, at whatever depth the first pljs call happened to be -- but JS
+   * can run far deeper than that (SQL -> JS -> pljs.execute -> SQL -> JS ->
+   * ...), so a budget measured from the original anchor does not describe the
+   * stack this call has left.  The vendored QuickJS exports JS_UpdateStackTop()
+   * for exactly this.
+   */
+  JS_UpdateStackTop(JS_GetRuntime(context->ctx));
   JS_SetInterruptHandler(JS_GetRuntime(context->ctx), interrupt_handler, NULL);
 
   JSValue ret = JS_Call(context->ctx, context->js_function, JS_UNDEFINED,
@@ -1501,6 +1544,16 @@ static Datum call_srf_function(FunctionCallInfo fcinfo, pljs_context *context,
   // Set the current return context.
   storage->return_state = state;
 
+  /*
+   * Re-anchor QuickJS's stack measurement here, at the C-stack depth this call
+   * actually starts from.  JS_NewRuntime() records the stack top once, inside
+   * _PG_init, at whatever depth the first pljs call happened to be -- but JS
+   * can run far deeper than that (SQL -> JS -> pljs.execute -> SQL -> JS ->
+   * ...), so a budget measured from the original anchor does not describe the
+   * stack this call has left.  The vendored QuickJS exports JS_UpdateStackTop()
+   * for exactly this.
+   */
+  JS_UpdateStackTop(JS_GetRuntime(context->ctx));
   JS_SetInterruptHandler(JS_GetRuntime(context->ctx), interrupt_handler, NULL);
 
   JSValue ret = JS_Call(context->ctx, context->js_function, JS_UNDEFINED,
