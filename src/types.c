@@ -1147,7 +1147,7 @@ Datum pljs_jsvalue_to_datum(Oid rettype, JSValue val, bool *is_null,
 
       uint32_t *array_copy = palloc(pbytes_per_element * length);
 
-      for (size_t i = 0; i < pbytes_per_element * length; i++) {
+      for (size_t i = 0; i < length; i++) {
         int32_t in;
 
         JSValue jsval = JS_GetPropertyUint32(ctx, val, i);
