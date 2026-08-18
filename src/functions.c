@@ -377,6 +377,18 @@ static int pljs_execute_params(const char *sql, JSValue params,
   param_li = pljs_setup_variable_paramlist(&parstate, values, nulls);
   status = SPI_execute_plan_with_paramlist(plan, param_li, false, 0);
 
+  /*
+   * SPI_prepare_params builds an *unsaved* plan in the current SPI procedure
+   * context, and pljs_variable_param_setup pallocs param_types there too.
+   * Neither is reclaimed until the enclosing pljs function returns, so a loop
+   * of parameterised pljs.execute() calls grew the SPI Proc context by a whole
+   * cached plan (~kilobytes) per iteration.  Free them now.
+   */
+  SPI_freeplan(plan);
+  if (parstate.param_types) {
+    pfree(parstate.param_types);
+  }
+  pfree(param_li);
   pfree(values);
   pfree(nulls);
 
@@ -531,6 +543,14 @@ static JSValue pljs_plan_execute(JSContext *ctx, JSValueConst this_val,
       paramLI = pljs_setup_variable_paramlist(plan->parstate, values, nulls);
       status = SPI_execute_plan_with_paramlist(plan->plan, paramLI, false, 0);
 
+      /*
+       * paramLI lives in the caller's (SPI Proc) context, which is not
+       * released until the enclosing function returns; SPI copies what it
+       * needs, so free it now.  Without this, a function that loops
+       * plan.execute() over a large batch grows the SPI Proc context by one
+       * ParamListInfo per iteration.
+       */
+      pfree(paramLI);
     } else {
       status = SPI_execute_plan(plan->plan, values, nulls, false, 0);
     }
@@ -892,6 +912,8 @@ static JSValue pljs_plan_cursor(JSContext *ctx, JSValueConst this_val, int argc,
           pljs_setup_variable_paramlist(plan->parstate, values, nulls);
       cursor =
           SPI_cursor_open_with_paramlist(NULL, plan->plan, param_li, false);
+      /* the portal copies the params into its own context; free ours */
+      pfree(param_li);
     } else {
       cursor = SPI_cursor_open(NULL, plan->plan, values, nulls, false);
     }
