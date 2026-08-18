@@ -1158,7 +1158,22 @@ static Datum call_function(FunctionCallInfo fcinfo, pljs_context *context,
 
     if (rettype == RECORDOID) {
       TupleDesc tupdesc;
-      get_call_result_type(fcinfo, &rettype, &tupdesc);
+
+      /*
+       * Check the status rather than discarding it.  TYPEFUNC_RECORD means the
+       * caller did not supply a column definition list, and tupdesc comes back
+       * NULL; pljs_jsvalue_to_record() then reached
+       * lookup_rowtype_tupdesc(RECORDOID, -1) and raised "record type has not
+       * been registered", which is an unhelpful way to say "you forgot
+       * AS (a int, b text)".
+       */
+      if (get_call_result_type(fcinfo, &rettype, &tupdesc) != TYPEFUNC_COMPOSITE) {
+        ereport(ERROR,
+                (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                 errmsg("a function returning \"record\" needs a column "
+                        "definition list"),
+                 errhint("Call it as ... AS (column_name data_type, ...).")));
+      }
 
       pljs_type type;
       pljs_type_fill(&type, rettype);
