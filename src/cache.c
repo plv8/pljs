@@ -49,6 +49,63 @@ void pljs_cache_init(void) {
 }
 
 /**
+ * @brief Drops the cached compiled form of one function, in every user's cache.
+ *
+ * Used when a function is created or replaced, so the next call recompiles it.
+ *
+ * The alternative -- pljs_cache_reset() -- destroys every per-user JSContext and
+ * rebuilds it on the next call.  JS_FreeContext() will not free a context that
+ * still has live references into it, so the old one is not necessarily reclaimed,
+ * and a backend doing repeated DDL grows without bound.  Removing a single entry
+ * keeps every JSContext alive and owned, so nothing is orphaned and nothing
+ * dangles -- including when the DDL is executed from inside a running pljs
+ * function via pljs.execute(), where freeing the context we are executing in
+ * would be fatal.
+ *
+ * @param fn_oid #Oid - the function whose compiled form is now stale
+ */
+void pljs_cache_function_remove(Oid fn_oid) {
+  HASH_SEQ_STATUS status;
+  pljs_context_cache_value *ctx_hvalue;
+
+  if (pljs_context_HashTable == NULL) {
+    return;
+  }
+
+  hash_seq_init(&status, pljs_context_HashTable);
+
+  while ((ctx_hvalue =
+              (pljs_context_cache_value *)hash_seq_search(&status)) != NULL) {
+    bool found = false;
+    pljs_function_cache_value *value;
+
+    if (ctx_hvalue->function_hash_table == NULL) {
+      continue;
+    }
+
+    value = (pljs_function_cache_value *)hash_search(
+        ctx_hvalue->function_hash_table, &fn_oid, HASH_FIND, &found);
+
+    if (!found || value == NULL) {
+      continue;
+    }
+
+    /*
+     * Drop our reference to the compiled function before the entry goes away;
+     * this is its only owner, so otherwise it leaks on the QuickJS heap.
+     */
+    JS_FreeValue(value->ctx, value->fn);
+
+    if (value->prosrc != NULL) {
+      pfree(value->prosrc);
+      value->prosrc = NULL;
+    }
+
+    hash_search(ctx_hvalue->function_hash_table, &fn_oid, HASH_REMOVE, NULL);
+  }
+}
+
+/**
  * @brief Clears all caches and recreates them.
  */
 void pljs_cache_reset(void) {

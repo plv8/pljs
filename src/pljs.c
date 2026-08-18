@@ -1060,8 +1060,17 @@ Datum pljs_call_validator(PG_FUNCTION_ARGS) {
   JS_FreeValue(ctx, val);
   JS_FreeContext(ctx);
 
-  /* The function is being created or replaced: drop any compiled copy. */
-  pljs_cache_reset();
+  /*
+   * The function is being created or replaced, so drop the compiled copy cached
+   * for it -- just that entry, in every user's cache.
+   *
+   * This was previously a blanket pljs_cache_reset(), which destroys every
+   * per-user JSContext and rebuilds it on the next call.  JS_FreeContext() will
+   * not free a context that still has live references into it, so the old one was
+   * not necessarily reclaimed and a backend doing repeated DDL grew without
+   * bound.
+   */
+  pljs_cache_function_remove(fn_oid);
 
   PG_RETURN_VOID();
 }
