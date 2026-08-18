@@ -328,6 +328,7 @@ static JSValue pljs_execute(JSContext *ctx, JSValueConst this_val, int argc,
   CurrentResourceOwner = m_resowner;
 
   JSValue ret = pljs_spi_result_to_jsvalue(status, ctx);
+  SPI_freetuptable(SPI_tuptable);
 
   return ret;
 }

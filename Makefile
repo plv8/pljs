@@ -39,7 +39,7 @@ endif
 REGRESS = init-extension function json jsonb json_conv types bytea context \
 	cursor array_spread plv8_regressions memory_limits inline composites \
 	trigger procedure find_function start_proc window regressions \
-	pg_flush_error_state \
+	pg_flush_error_state pg_spi_freetuptable \
 	currentresource \
 	pg_typedarray_views \
 	pg_find_function_no_perm \
