@@ -242,9 +242,13 @@ void pljs_function_cache_to_context(pljs_context *context,
 
   memcpy(context->function->proname, function_entry->proname, NAMEDATALEN);
 
-  context->function->prosrc = (char *)palloc(NAMEDATALEN);
-
-  memcpy(context->function->prosrc, function_entry->prosrc, NAMEDATALEN);
+  /*
+   * prosrc is the (variable-length) function body, not a NAMEDATALEN name.
+   * Copying a fixed NAMEDATALEN bytes truncated bodies longer than 63 chars
+   * and over-read the source allocation for shorter ones.  pstrdup copies
+   * exactly the right length now that the cached copy is NUL-terminated.
+   */
+  context->function->prosrc = pstrdup(function_entry->prosrc);
 }
 
 /**
@@ -275,11 +279,14 @@ void pljs_context_to_function_cache(pljs_function_cache_value *function_entry,
 
   memcpy(function_entry->proname, context->function->proname, NAMEDATALEN);
 
-  function_entry->prosrc =
-      (char *)palloc(strlen(context->function->prosrc) + 1);
-
-  memcpy(function_entry->prosrc, context->function->prosrc,
-         strlen(context->function->prosrc));
+  /*
+   * Copy the full body including its NUL terminator.  The previous code
+   * allocated strlen+1 but memcpy'd only strlen bytes, leaving the final byte
+   * uninitialized (palloc does not zero), so the cached string was not
+   * NUL-terminated and any later read walked off the end.  We are in
+   * cache_memory_context here, so pstrdup allocates in the right place.
+   */
+  function_entry->prosrc = pstrdup(context->function->prosrc);
 
   MemoryContextSwitchTo(old_context);
 }
