@@ -1091,6 +1091,92 @@ static Datum pljs_string_to_datum_via_input(Oid typid, JSValueConst val,
 }
 
 /**
+ * @brief Raises the standard out-of-range error for an integer target type.
+ */
+static void pljs_int_out_of_range(Oid typid) {
+  ereport(ERROR, (errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+                  errmsg("value is out of range for type %s",
+                         format_type_be(typid))));
+}
+
+/**
+ * @brief Converts a JavaScript number to an integer, rejecting values the target
+ * type cannot represent.
+ *
+ * QuickJS's JS_ToInt32/JS_ToInt64 wrap modulo the word size, so 2147483648
+ * silently became -2147483648, 40000 became -25536 for a smallint, and NaN and
+ * Infinity both became 0.  PostgreSQL raises "integer out of range" for the
+ * equivalent cast, and silently storing a different number is the worst outcome
+ * for a data pipeline, so range-check instead.
+ *
+ * Fractions keep truncating toward zero, which is the established JavaScript
+ * conversion behaviour; only the range is newly enforced.
+ *
+ * @param min @c double - lowest representable value
+ * @param max_exclusive @c double - one past the highest.  Taken as a double
+ *   because (double) INT64_MAX rounds *up* to 2^63, so an integer comparison
+ *   would wrongly accept 2^63 itself.
+ */
+static int64 pljs_number_to_int_checked(JSContext *ctx, JSValueConst val,
+                                        double min, double max_exclusive,
+                                        Oid typid) {
+  double d;
+
+  if (JS_ToFloat64(ctx, &d, val) < 0) {
+    elog(ERROR, "could not convert JavaScript value to a number");
+  }
+
+  if (isnan(d)) {
+    ereport(ERROR, (errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+                    errmsg("cannot convert NaN to type %s",
+                           format_type_be(typid))));
+  }
+
+  if (isinf(d)) {
+    ereport(ERROR, (errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+                    errmsg("cannot convert Infinity to type %s",
+                           format_type_be(typid))));
+  }
+
+  d = trunc(d);
+
+  if (d < min || d >= max_exclusive) {
+    pljs_int_out_of_range(typid);
+  }
+
+  return (int64)d;
+}
+
+/**
+ * @brief Converts a JavaScript BigInt to an int64, rejecting values that do not
+ * fit.
+ *
+ * JS_ToBigInt64() truncates to the low 64 bits without reporting anything, so
+ * 2n**70n arrived as 0.  Round-tripping the result through JS_NewBigInt64()
+ * detects that silently discarded magnitude.
+ */
+static int64 pljs_bigint_to_int64_checked(JSContext *ctx, JSValueConst val,
+                                          Oid typid) {
+  int64_t v;
+  JSValue back;
+  bool same;
+
+  if (JS_ToBigInt64(ctx, &v, val) < 0) {
+    elog(ERROR, "could not convert JavaScript BigInt to an integer");
+  }
+
+  back = JS_NewBigInt64(ctx, v);
+  same = JS_StrictEq(ctx, back, val);
+  JS_FreeValue(ctx, back);
+
+  if (!same) {
+    pljs_int_out_of_range(typid);
+  }
+
+  return v;
+}
+
+/**
  * @brief Converts a Javascript value to a Postgres #Datum.
  *
  * Takes a Javascript value and converts it into a Postgres #Datum,
@@ -1195,7 +1281,7 @@ Datum pljs_jsvalue_to_datum(Oid rettype, JSValue val, bool *is_null,
   }
 
   case INT2OID: {
-    int32_t in;
+    int64 v;
 
     /* A string carries exact decimal text; parse it, do not go via a double. */
     if (JS_IsString(val)) {
@@ -1203,54 +1289,62 @@ Datum pljs_jsvalue_to_datum(Oid rettype, JSValue val, bool *is_null,
     }
 
     if (JS_IsBigInt(ctx, val)) {
-      int64_t big_in;
-
-      JS_ToBigInt64(ctx, &big_in, val);
-
-      in = (int32_t)big_in;
+      v = pljs_bigint_to_int64_checked(ctx, val, INT2OID);
     } else {
-      JS_ToInt32(ctx, &in, val);
+      v = pljs_number_to_int_checked(ctx, val, (double)PG_INT16_MIN,
+                                     -(double)PG_INT16_MIN, INT2OID);
     }
 
-    PG_RETURN_INT16((int16_t)in);
+    if (v < PG_INT16_MIN || v > PG_INT16_MAX) {
+      pljs_int_out_of_range(INT2OID);
+    }
+
+    PG_RETURN_INT16((int16)v);
     break;
   }
 
   case INT4OID: {
-    int32_t in;
+    int64 v;
 
     if (JS_IsString(val)) {
       return pljs_string_to_datum_via_input(INT4OID, val, ctx);
     }
 
     if (JS_IsBigInt(ctx, val)) {
-      int64_t big_in;
-
-      JS_ToBigInt64(ctx, &big_in, val);
-
-      in = (int32_t)big_in;
+      v = pljs_bigint_to_int64_checked(ctx, val, INT4OID);
     } else {
-      JS_ToInt32(ctx, &in, val);
+      v = pljs_number_to_int_checked(ctx, val, (double)PG_INT32_MIN,
+                                     -(double)PG_INT32_MIN, INT4OID);
     }
 
-    PG_RETURN_INT32(in);
+    if (v < PG_INT32_MIN || v > PG_INT32_MAX) {
+      pljs_int_out_of_range(INT4OID);
+    }
+
+    PG_RETURN_INT32((int32)v);
     break;
   }
 
   case INT8OID: {
-    int64_t in;
+    int64 v;
 
     if (JS_IsString(val)) {
       return pljs_string_to_datum_via_input(INT8OID, val, ctx);
     }
 
     if (JS_IsBigInt(ctx, val)) {
-      JS_ToBigInt64(ctx, &in, val);
+      v = pljs_bigint_to_int64_checked(ctx, val, INT8OID);
     } else {
-      JS_ToInt64(ctx, &in, val);
+      /*
+       * -(double) PG_INT64_MIN is exactly 2^63, one past INT64_MAX, and is the
+       * correct exclusive bound: (double) PG_INT64_MAX rounds up to the same
+       * value, so comparing against it would accept 2^63 itself.
+       */
+      v = pljs_number_to_int_checked(ctx, val, (double)PG_INT64_MIN,
+                                     -(double)PG_INT64_MIN, INT8OID);
     }
 
-    PG_RETURN_INT64(in);
+    PG_RETURN_INT64(v);
     break;
   }
 
