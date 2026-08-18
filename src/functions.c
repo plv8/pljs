@@ -602,13 +602,37 @@ static JSValue pljs_plan_free(JSContext *ctx, JSValueConst this_val, int argc,
 
   plan = JS_GetOpaque(ptr, js_prepared_statement_handle_id);
 
-  pljs_free_plan_struct(plan);
-
   /*
-   * Clear the opaque so the handle's GC finalizer does not free the same plan
-   * again once this handle object is collected.
+   * Clear the opaque *before* freeing, and free under PG_TRY.
+   *
+   * SPI_freeplan() raises on an invalid plan pointer, and this is a C function
+   * QuickJS called, so letting that error out siglongjmps past QuickJS's live
+   * stack frames -- see pljs_return_next() for what that costs.  Clearing the
+   * opaque first also means a failed free cannot leave the handle pointing at a
+   * plan the GC finalizer would then try to free again.
    */
   JS_SetOpaque(ptr, NULL);
+
+  PG_TRY();
+  {
+    pljs_free_plan_struct(plan);
+  }
+  PG_CATCH();
+  {
+    MemoryContext m_mcontext = CurrentMemoryContext;
+    ErrorData *edata = CopyErrorData();
+    JSValue error = js_throw_error_data(edata, ctx);
+
+    FlushErrorState();
+    FreeErrorData(edata);
+    MemoryContextSwitchTo(m_mcontext);
+
+    JS_SetPropertyStr(ctx, this_val, "plan", JS_NULL);
+    JS_FreeValue(ctx, ptr);
+
+    return error;
+  }
+  PG_END_TRY();
 
   JS_SetPropertyStr(ctx, this_val, "plan", JS_NULL);
 
@@ -1904,8 +1928,6 @@ static JSValue pljs_get_window_object(JSContext *ctx, JSValueConst this_val,
 
 static JSValue pljs_subtransaction(JSContext *ctx, JSValueConst this_val,
                                    int argc, JSValueConst *argv) {
-  JSValue result = JS_UNDEFINED;
-
   if (argc < 1) {
     return JS_UNDEFINED;
   }
@@ -1921,21 +1943,81 @@ static JSValue pljs_subtransaction(JSContext *ctx, JSValueConst this_val,
   ResourceOwner m_resowner = CurrentResourceOwner;
   MemoryContext m_mcontext = CurrentMemoryContext;
 
-  BeginInternalSubTransaction(NULL);
-  MemoryContextSwitchTo(m_mcontext);
+  /*
+   * How far we got, so the PG_CATCH knows what it is cleaning up.  Assigned in
+   * the PG_TRY and read in the PG_CATCH, hence volatile.
+   *
+   *   0 - no subtransaction started
+   *   1 - subtransaction open, running the callback
+   *   2 - committing or rolling it back
+   */
+  volatile int stage = 0;
+  volatile JSValue result = JS_UNDEFINED;
 
-  result = JS_Call(ctx, argv[0], JS_UNDEFINED, 0, NULL);
+  /*
+   * A PostgreSQL error must not escape this function.  pljs.subtransaction() is
+   * a C function that QuickJS called, so an ereport(ERROR) here siglongjmps past
+   * QuickJS's live stack frames and leaves the runtime's frame list pointing at
+   * dead ones; the session then crashes later, in whatever next builds an
+   * Error's backtrace.  See pljs_return_next() for the full mechanism.
+   *
+   * BeginInternalSubTransaction() and ReleaseCurrentSubTransaction() both raise
+   * in ordinary operation, so this needs no bad input to reach.
+   */
+  PG_TRY();
+  {
+    BeginInternalSubTransaction(NULL);
+    stage = 1;
+    MemoryContextSwitchTo(m_mcontext);
 
-  bool success = !JS_IsException(result);
+    result = JS_Call(ctx, argv[0], JS_UNDEFINED, 0, NULL);
 
-  if (success) {
-    ReleaseCurrentSubTransaction();
-  } else {
-    RollbackAndReleaseCurrentSubTransaction();
+    bool success = !JS_IsException(result);
+
+    stage = 2;
+
+    if (success) {
+      ReleaseCurrentSubTransaction();
+    } else {
+      RollbackAndReleaseCurrentSubTransaction();
+    }
+
+    MemoryContextSwitchTo(m_mcontext);
+    CurrentResourceOwner = m_resowner;
   }
+  PG_CATCH();
+  {
+    MemoryContextSwitchTo(m_mcontext);
 
-  MemoryContextSwitchTo(m_mcontext);
-  CurrentResourceOwner = m_resowner;
+    /*
+     * A failure while committing or rolling the subtransaction back leaves no
+     * valid state to resume into, exactly as for pljs.commit(): re-throw rather
+     * than handing back a catchable exception and letting the function continue.
+     */
+    if (stage == 2) {
+      CurrentResourceOwner = m_resowner;
+      PG_RE_THROW();
+    }
+
+    if (stage == 1) {
+      RollbackAndReleaseCurrentSubTransaction();
+      MemoryContextSwitchTo(m_mcontext);
+    }
+
+    CurrentResourceOwner = m_resowner;
+
+    JS_FreeValue(ctx, result);
+
+    ErrorData *edata = CopyErrorData();
+    JSValue error = js_throw_error_data(edata, ctx);
+
+    FlushErrorState();
+    FreeErrorData(edata);
+    MemoryContextSwitchTo(m_mcontext);
+
+    return error;
+  }
+  PG_END_TRY();
 
   return result;
 }
