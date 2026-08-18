@@ -36,6 +36,8 @@ static Datum call_function(PG_FUNCTION_ARGS, pljs_context *context,
 static Datum call_srf_function(PG_FUNCTION_ARGS, pljs_context *context,
                                JSValueConst *argv);
 
+static void pljs_build_function_source(StringInfoData *src,
+                                       pljs_context *context, bool is_trigger);
 static void call_anonymous_function(const char *, JSContext *);
 static Datum call_trigger(FunctionCallInfo fcinfo, pljs_context *context);
 static int interrupt_handler(JSRuntime *rt, void *opaque);
@@ -966,104 +968,99 @@ Datum pljs_inline_handler(PG_FUNCTION_ARGS) {
  */
 Datum pljs_call_validator(PG_FUNCTION_ARGS) {
   /*
-   * XXX This validator does not actually validate anything, and fixing that is
-   * deliberately left out of this change.
-   *
    * A language validator is called as validator(oid_of_function_being_created),
-   * so the function to check is the ARGUMENT; fcinfo->flinfo->fn_oid below is
-   * the validator's *own* OID.  Reading prosrc from it fetches the validator's
-   * own pg_proc row, whose prosrc is the C symbol name "pljs_call_validator" --
-   * which happens to parse as a bare JavaScript identifier.  So validation
-   * always succeeds and an invalid body is accepted silently:
+   * so the function to check is the ARGUMENT.  This used to read
+   * fcinfo->flinfo->fn_oid, which is the validator's *own* OID: it fetched the
+   * validator's pg_proc row, whose prosrc is the C symbol name
+   * "pljs_call_validator".  That happens to parse as a bare JavaScript
+   * identifier, so validation always succeeded and an invalid body was accepted
+   * silently --
    *
    *   CREATE FUNCTION f() RETURNS int AS $$ this is ( not js $$ LANGUAGE pljs;
    *   CREATE FUNCTION
    *
-   * with the syntax error only surfacing on the first call.
+   * -- with the syntax error surfacing only on the first call.
    *
-   * Simply switching to PG_GETARG_OID(0) is NOT the fix: a pljs body is a
-   * function *body*, not a standalone program -- `return 42;` is a syntax error
-   * at top level -- so the validator has to wrap it the way
-   * pljs_compile_function() does, with the function's argument names, before
-   * compiling.  Without that, correcting the OID rejects almost every valid
-   * function in the suite.  That belongs in its own change with its own tests.
+   * Correcting the OID is necessary but not sufficient: a pljs body is a function
+   * *body*, not a program, so `return 42;` is a syntax error at top level and
+   * validating the raw prosrc rejects almost every valid function.  It has to be
+   * wrapped the way compilation wraps it, which is why the source builder is
+   * shared with pljs_compile_function().
    */
-  Oid fn_oid = fcinfo->flinfo->fn_oid;
+  Oid fn_oid = PG_GETARG_OID(0);
   HeapTuple proctuple;
-  const char *sourcecode;
-  Datum prosrcdatum;
-  bool isnull;
   JSContext *ctx;
+  pljs_context context = {0};
+  StringInfoData src;
+  bool is_trigger;
 
-  if (fcinfo->flinfo->fn_extra) {
-    elog(DEBUG3, "fn_extra on validate");
+  if (!CheckFunctionValidatorAccess(fcinfo->flinfo->fn_oid, fn_oid)) {
+    PG_RETURN_VOID();
   }
+
+  /* check_function_bodies = off means "create it, do not compile it". */
+  if (!check_function_bodies) {
+    PG_RETURN_VOID();
+  }
+
   proctuple = SearchSysCache(PROCOID, ObjectIdGetDatum(fn_oid), 0, 0, 0);
 
   if (!HeapTupleIsValid(proctuple)) {
     elog(ERROR, "cache lookup failed for function %u", fn_oid);
   }
 
-  prosrcdatum =
-      SysCacheGetAttr(PROCOID, proctuple, Anum_pg_proc_prosrc, &isnull);
-
-  if (isnull) {
-    elog(ERROR, "null prosrc");
-  }
-
-  sourcecode = TextDatumGetCString(prosrcdatum);
+  is_trigger =
+      ((Form_pg_proc)GETSTRUCT(proctuple))->prorettype == TRIGGEROID;
 
   ctx = JS_NewContext(rt);
 
-  JSValue val = JS_Eval(ctx, sourcecode, strlen(sourcecode), "<function>",
+  if (ctx == NULL) {
+    ReleaseSysCache(proctuple);
+    elog(ERROR, "could not create a JavaScript context");
+  }
+
+  context.ctx = ctx;
+
+  /*
+   * Fills in proname, prosrc and the argument names, which the wrapper needs.
+   * Passing NULL fcinfo is the same thing pljs_find_js_function() does.
+   */
+  if (!setup_function(NULL, proctuple, &context)) {
+    JS_FreeContext(ctx);
+    ReleaseSysCache(proctuple);
+    PG_RETURN_VOID();
+  }
+
+  pljs_build_function_source(&src, &context, is_trigger);
+
+  ReleaseSysCache(proctuple);
+
+  JSValue val = JS_Eval(ctx, src.data, strlen(src.data), "<function>",
                         JS_EVAL_FLAG_COMPILE_ONLY);
+
+  pfree(src.data);
 
   if (JS_IsException(val)) {
     char *message = NULL, *pg_detail = NULL;
     char *detail = dump_error(ctx, &message, &pg_detail);
 
     /*
-     * dump_error() has copied everything we need into palloc'd memory, so the
-     * JavaScript side can go now.  Without this the whole context leaks on
-     * every rejected function body.
+     * dump_error() has copied what we need into palloc'd memory, so release the
+     * JavaScript side before reporting.  Without this a rejected body leaked the
+     * whole context: JS_FreeContext() will not free one that still has live
+     * references into it.
      */
     JS_FreeValue(ctx, val);
     JS_FreeContext(ctx);
-    ReleaseSysCache(proctuple);
 
-    pljs_ereport_js_error(message, pg_detail, detail, "execution error");
+    pljs_ereport_js_error(message, pg_detail, detail,
+                          "invalid pljs function body");
   }
 
-  /*
-   * Drop the compiled function before releasing the context.  JS_FreeContext()
-   * does not free a context that still has live references into it, so leaving
-   * this JSValue alone leaked the entire JSContext -- including all of QuickJS's
-   * intrinsic objects, roughly 68KB measured -- on every single CREATE OR
-   * REPLACE FUNCTION.  A backend doing repeated DDL grew past 500MB and died
-   * with SIGSEGV in seconds.  QuickJS allocates on the libc heap, so none of it
-   * was visible in pg_backend_memory_contexts.
-   */
   JS_FreeValue(ctx, val);
   JS_FreeContext(ctx);
 
-  ReleaseSysCache(proctuple);
-
-  /*
-   * Clear the caches: the function being created or replaced may already have a
-   * compiled copy cached, and it is now stale.
-   *
-   * This is deliberately still the blanket reset rather than a targeted removal
-   * of this one function.  A cached entry also carries the result-type
-   * information resolved at its first call, and for a RECORD-returning function
-   * that comes from the *call site*, not the function -- so a targeted
-   * invalidation leaves the entry from an earlier call site in place and the
-   * next call converts against the wrong tuple descriptor.  Until the cache key
-   * covers that, the reset is what keeps it correct.
-   *
-   * pljs_cache_reset() now frees the QuickJS side before dropping the Postgres
-   * memory that references it; it previously orphaned every cached JSContext on
-   * the libc heap.
-   */
+  /* The function is being created or replaced: drop any compiled copy. */
   pljs_cache_reset();
 
   PG_RETURN_VOID();
@@ -1081,14 +1078,27 @@ Datum pljs_call_validator(PG_FUNCTION_ARGS) {
  * or not, this determines arguments
  * @returns #JSValue of the compiled function
  */
-JSValue pljs_compile_function(pljs_context *context, bool is_trigger) {
-  StringInfoData src;
+/*
+ * Build the JavaScript source for a pljs function: its body wrapped in a named
+ * function with the declared argument names, followed by a reference to it so the
+ * evaluation yields the function object.
+ *
+ * Extracted so that pljs_call_validator() can check exactly what
+ * pljs_compile_function() will later compile.  A pljs body is a function *body*,
+ * not a program -- `return 42;` is a syntax error at top level -- so validating
+ * the raw prosrc rejects almost every valid function.  Sharing this makes the two
+ * agree by construction rather than by two copies staying in step.
+ *
+ * The returned StringInfo's data is palloc'd; the caller frees it.
+ */
+static void pljs_build_function_source(StringInfoData *src, pljs_context *context,
+                                       bool is_trigger) {
   int i;
 
-  initStringInfo(&src);
+  initStringInfo(src);
 
   // generate the function as javascript with all of its arguments
-  appendStringInfo(&src, "function %s (", context->function->proname);
+  appendStringInfo(src, "function %s (", context->function->proname);
 
   int inarg = 0;
   for (i = 0; i < context->function->nargs; i++) {
@@ -1097,15 +1107,15 @@ JSValue pljs_compile_function(pljs_context *context, bool is_trigger) {
     }
     // commas between arguments
     if (inarg > 0) {
-      appendStringInfoChar(&src, ',');
+      appendStringInfoChar(src, ',');
     }
 
     // if this is a named argument, append it
     if (context->arguments[i]) {
-      appendStringInfoString(&src, context->arguments[i]);
+      appendStringInfoString(src, context->arguments[i]);
     } else {
       // otherwise append it as an unnamed argument with a number
-      appendStringInfo(&src, "$%d", inarg + 1);
+      appendStringInfo(src, "$%d", inarg + 1);
     }
 
     inarg++;
@@ -1113,33 +1123,40 @@ JSValue pljs_compile_function(pljs_context *context, bool is_trigger) {
 
   // append the other postgres-specific variables as well
   if (context->function->inargs && is_trigger) {
-    appendStringInfo(&src, ", ");
+    appendStringInfo(src, ", ");
   }
 
   if (is_trigger) {
-    appendStringInfo(&src, "NEW, OLD, TG_NAME, TG_WHEN, TG_LEVEL, TG_OP, "
+    appendStringInfo(src, "NEW, OLD, TG_NAME, TG_WHEN, TG_LEVEL, TG_OP, "
                            "TG_RELID, TG_TABLE_NAME, TG_TABLE_SCHEMA, TG_ARGV");
   }
 
-  appendStringInfo(&src, ") {\n%s\n}\n %s;\n", context->function->prosrc,
+  appendStringInfo(src, ") {\n%s\n}\n %s;\n", context->function->prosrc,
                    context->function->proname);
+}
+
+JSValue pljs_compile_function(pljs_context *context, bool is_trigger) {
+  StringInfoData src;
+
+  pljs_build_function_source(&src, context, is_trigger);
 
   JSValue val =
       JS_Eval(context->ctx, src.data, strlen(src.data), "<function>", 0);
 
+  pfree(src.data);
+
   if (!JS_IsException(val)) {
-    pfree(src.data);
-
     return val;
-  } else {
-    char *message = NULL, *pg_detail = NULL;
-    char *detail = dump_error(context->ctx, &message, &pg_detail);
-    pljs_ereport_js_error(message, pg_detail, detail, "execution error");
-
-    return JS_UNDEFINED;
   }
 
-  return val;
+  char *message = NULL, *pg_detail = NULL;
+  char *detail = dump_error(context->ctx, &message, &pg_detail);
+
+  JS_FreeValue(context->ctx, val);
+
+  pljs_ereport_js_error(message, pg_detail, detail, "execution error");
+
+  return JS_UNDEFINED;
 }
 
 /**
