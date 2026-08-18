@@ -1007,9 +1007,14 @@ static JSValue pljs_find_function(JSContext *ctx, JSValueConst this_val,
   {
     Oid funcoid;
 
-    if (!pljs_has_permission_to_execute(signature)) {
-      return func;
-    } else {
+    /*
+     * NB: never `return` from inside a PG_TRY block.  Doing so leaves
+     * PG_exception_stack pointing at this frame's (now dead) sigjmp_buf, so
+     * the next ereport(ERROR) siglongjmp()s into a freed stack frame and the
+     * backend crashes.  When permission is denied we leave `func` as
+     * JS_UNDEFINED and fall through to the shared cleanup/return below.
+     */
+    if (pljs_has_permission_to_execute(signature)) {
       if (strchr(signature, '(') == NULL) {
         funcoid = DatumGetObjectId(
             DirectFunctionCall1(regprocin, CStringGetDatum(signature)));

@@ -1,0 +1,48 @@
+-- Regression for a backend crash: pljs.find_function() on a function the
+-- caller lacks EXECUTE permission on used to `return` from *inside* a PG_TRY
+-- block.  That left PG_exception_stack pointing at a dead stack frame, so the
+-- next ereport(ERROR) siglongjmp()'d into freed memory and the whole backend
+-- segfaulted (signal 11).  This test drives that exact sequence and must
+-- complete with a clean error instead of crashing.
+CREATE EXTENSION IF NOT EXISTS pljs;
+NOTICE:  extension "pljs" already exists, skipping
+CREATE FUNCTION ff_secret() RETURNS int LANGUAGE sql AS 'SELECT 42';
+REVOKE ALL ON FUNCTION ff_secret() FROM PUBLIC;
+CREATE ROLE ff_limited;
+-- Call find_function on a function we lack EXECUTE on (the permission-denied
+-- path), then force an *unwrapped* elog(ERROR) via an int[] return of a
+-- non-array value.  Pre-fix this crashed the backend.
+CREATE FUNCTION ff_probe() RETURNS int[] LANGUAGE pljs AS $$
+  try { pljs.find_function('ff_secret()'); } catch (e) { }
+  return 5;
+$$;
+GRANT EXECUTE ON FUNCTION ff_probe() TO ff_limited;
+SET ROLE ff_limited;
+-- Expect a clean "value is not an Array" error, NOT a crash.
+SELECT ff_probe();
+WARNING:  failed to find or no permission for js function ff_secret()
+ERROR:  value is not an Array
+RESET ROLE;
+-- The backend is still alive and usable.
+SELECT 1 AS alive;
+ alive 
+-------
+     1
+(1 row)
+
+-- The permission-denied fall-through path on its own (find_function returns
+-- undefined) followed by more work must also not crash.
+SET ROLE ff_limited;
+DO $$ pljs.find_function('ff_secret()'); pljs.elog(NOTICE, 'survived'); $$ LANGUAGE pljs;
+WARNING:  failed to find or no permission for js function ff_secret()
+NOTICE:  survived
+RESET ROLE;
+SELECT 1 AS still_alive;
+ still_alive 
+-------------
+           1
+(1 row)
+
+DROP FUNCTION ff_probe();
+DROP FUNCTION ff_secret();
+DROP ROLE ff_limited;
