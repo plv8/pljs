@@ -318,7 +318,7 @@ JSValue pljs_datum_to_object(pljs_type *type, Datum arg, JSContext *ctx) {
   PG_CATCH();
   {
     ErrorData *edata = CopyErrorData();
-    JSValue error = js_throw(edata->message, ctx);
+    JSValue error = js_throw_error_data(edata, ctx);
     FlushErrorState();
     FreeErrorData(edata);
 

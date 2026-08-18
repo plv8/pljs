@@ -166,7 +166,7 @@ $$
 $$
 LANGUAGE pljs;
 SELECT * FROM set_of_record_but_non_obj();
-ERROR:  execution error
+ERROR:  argument must be an object
 DETAIL:  Error: argument must be an object
     at set_of_record_but_non_obj (<function>:3:18)
 
@@ -228,7 +228,7 @@ SELECT * FROM set_of_unnamed_records() AS x(a int);
 
 -- field names mismatch
 SELECT * FROM set_of_unnamed_records() AS x(a int, c int);
-ERROR:  execution error
+ERROR:  field name / property name mismatch
 DETAIL:  Error: field name / property name mismatch
     at set_of_unnamed_records (<function>:3:21)
 
@@ -311,7 +311,7 @@ SELECT * FROM execute_without_array();
 
 CREATE FUNCTION test_sql_error() RETURNS void AS $$ pljs.execute("ERROR") $$ LANGUAGE pljs;
 SELECT test_sql_error();
-ERROR:  execution error
+ERROR:  syntax error at or near "ERROR"
 DETAIL:  Error: syntax error at or near "ERROR"
     at test_sql_error (<function>:2:14)
 
@@ -349,7 +349,7 @@ pljs.subtransaction(function(){
 });
 $$ LANGUAGE pljs;
 SELECT test_subtransaction_throw();
-ERROR:  execution error
+ERROR:  division by zero
 DETAIL:  Error: division by zero
     at <anonymous> (<function>:5:14)
     at subtransaction (native)
