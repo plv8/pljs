@@ -1396,7 +1396,22 @@ JSValue js_throw_error_data(ErrorData *edata, JSContext *ctx) {
     JS_SetPropertyStr(ctx, error, "hint", JS_NewString(ctx, edata->hint));
   }
 
+  /*
+   * Expose the SQLSTATE under both names.
+   *
+   * The value has always been the five-character string rather than the packed
+   * integer -- unpack_sql_state() is applied here -- but the property was named
+   * `sqlerrcode`, which is PostgreSQL's internal name for the *packed* form.
+   * Every other PL calls it `sqlstate`, and that is the name a JavaScript author
+   * reaches for:
+   *
+   *     catch (e) { if (e.sqlstate === '23505') ... }
+   *
+   * `sqlerrcode` is kept so that existing code keeps working.
+   */
   JS_SetPropertyStr(ctx, error, "sqlerrcode",
+                    JS_NewString(ctx, unpack_sql_state(edata->sqlerrcode)));
+  JS_SetPropertyStr(ctx, error, "sqlstate",
                     JS_NewString(ctx, unpack_sql_state(edata->sqlerrcode)));
 
   return JS_Throw(ctx, error);
