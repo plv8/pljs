@@ -1079,8 +1079,31 @@ static JSValue pljs_return_next(JSContext *ctx, JSValueConst this_val, int argc,
       return js_throw("argument must be an object", ctx);
     }
 
-    if (!pljs_jsvalue_object_contains_all_column_names(argv[0], ctx,
-                                                       retstate->tuple_desc)) {
+    char *missing_colname = NULL;
+    char *provided_keys = NULL;
+
+    if (!pljs_jsvalue_object_contains_all_column_names(
+            argv[0], ctx, retstate->tuple_desc, &missing_colname,
+            &provided_keys)) {
+      /*
+       * Name the column that is missing and list what the object did offer.
+       * The bare "field name / property name mismatch" gave the author nothing
+       * to act on, and the usual cause is a case difference -- JavaScript
+       * property names are case sensitive while PostgreSQL folds unquoted
+       * identifiers to lower case, so a `MixedCol` key never matches a
+       * `mixedcol` column.
+       */
+      if (missing_colname != NULL) {
+        return js_throw(psprintf("return_next: result column \"%s\" has no "
+                                 "matching property (object has: %s; property "
+                                 "names are case sensitive)",
+                                 missing_colname,
+                                 (provided_keys != NULL && *provided_keys)
+                                     ? provided_keys
+                                     : "no properties"),
+                        ctx);
+      }
+
       return js_throw("field name / property name mismatch", ctx);
     }
 

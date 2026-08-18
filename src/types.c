@@ -647,9 +647,19 @@ Datum pljs_jsvalue_to_array(pljs_type *type, JSValue val, JSContext *ctx,
  * @returns @c bool
  */
 bool pljs_jsvalue_object_contains_all_column_names(JSValue val, JSContext *ctx,
-                                                   TupleDesc tupdesc) {
+                                                   TupleDesc tupdesc,
+                                                   char **missing_colname,
+                                                   char **provided_keys) {
   uint32_t object_keys_length = 0;
   JSPropertyEnum *tab;
+
+  if (missing_colname != NULL) {
+    *missing_colname = NULL;
+  }
+
+  if (provided_keys != NULL) {
+    *provided_keys = NULL;
+  }
 
   if (JS_GetOwnPropertyNames(ctx, &tab, &object_keys_length, val,
                              JS_GPN_STRING_MASK) < 0) {
@@ -669,7 +679,7 @@ bool pljs_jsvalue_object_contains_all_column_names(JSValue val, JSContext *ctx,
          object_key++) {
       const char *atom = JS_AtomToCString(ctx, tab[object_key].atom);
 
-      if (strcmp(colname, atom) == 0) {
+      if (atom != NULL && strcmp(colname, atom) == 0) {
         found = true;
         JS_FreeCString(ctx, atom);
         break;
@@ -679,6 +689,41 @@ bool pljs_jsvalue_object_contains_all_column_names(JSValue val, JSContext *ctx,
     }
 
     if (!found) {
+      /*
+       * Report which column is missing, and what the object did offer, so the
+       * caller can raise something actionable.  The bare "field name / property
+       * name mismatch" left the author to guess, and the usual cause is a case
+       * difference: JavaScript property names are case sensitive while
+       * PostgreSQL folds unquoted identifiers to lower case.
+       */
+      if (missing_colname != NULL) {
+        *missing_colname = pstrdup(colname);
+      }
+
+      if (provided_keys != NULL) {
+        StringInfoData keys;
+
+        initStringInfo(&keys);
+
+        for (uint32_t object_key = 0; object_key < object_keys_length;
+             object_key++) {
+          const char *atom = JS_AtomToCString(ctx, tab[object_key].atom);
+
+          if (atom == NULL) {
+            continue;
+          }
+
+          if (keys.len > 0) {
+            appendStringInfoString(&keys, ", ");
+          }
+
+          appendStringInfoString(&keys, atom);
+          JS_FreeCString(ctx, atom);
+        }
+
+        *provided_keys = keys.data;
+      }
+
       return false;
     }
   }
