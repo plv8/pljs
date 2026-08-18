@@ -822,17 +822,41 @@ static JSValue pljs_plan_cursor_fetch(JSContext *ctx, JSValueConst this_val,
     }
   }
 
+  /*
+   * Guard the fetch with an internal subtransaction (same pattern as
+   * pljs_execute).  The previous code called SPI_rollback()+SPI_finish() in
+   * the error handler, which (a) double-finishes the SPI connection owned by
+   * call_function and (b) raises "invalid transaction termination" in an
+   * atomic context, masking the real error (e.g. a division-by-zero that
+   * surfaces lazily during the fetch).  With the subtransaction we can roll
+   * back cleanly and re-raise the actual error into JS so it is catchable.
+   */
+  ResourceOwner m_resowner = CurrentResourceOwner;
+  MemoryContext m_mcontext = CurrentMemoryContext;
+
   PG_TRY();
   {
+    BeginInternalSubTransaction(NULL);
+    MemoryContextSwitchTo(m_mcontext);
     SPI_cursor_fetch(cursor, forward, nfetch);
   }
   PG_CATCH();
   {
-    SPI_rollback();
-    SPI_finish();
-    return js_throw("Unable to fetch", ctx);
+    MemoryContextSwitchTo(m_mcontext);
+    ErrorData *edata = CopyErrorData();
+    JSValue error = js_throw_error_data(edata, ctx);
+    RollbackAndReleaseCurrentSubTransaction();
+    MemoryContextSwitchTo(m_mcontext);
+    CurrentResourceOwner = m_resowner;
+    FlushErrorState();
+    FreeErrorData(edata);
+    return error;
   }
   PG_END_TRY();
+
+  ReleaseCurrentSubTransaction();
+  MemoryContextSwitchTo(m_mcontext);
+  CurrentResourceOwner = m_resowner;
 
   if (SPI_processed > 0) {
     if (!wantarray) {
@@ -888,15 +912,34 @@ static JSValue pljs_plan_cursor_move(JSContext *ctx, JSValueConst this_val,
     forward = false;
   }
 
+  /* Subtransaction guard so a move error rolls back cleanly and re-raises the
+   * real error into JS (see pljs_plan_cursor_fetch). */
+  ResourceOwner m_resowner = CurrentResourceOwner;
+  MemoryContext m_mcontext = CurrentMemoryContext;
+
   PG_TRY();
   {
+    BeginInternalSubTransaction(NULL);
+    MemoryContextSwitchTo(m_mcontext);
     SPI_cursor_move(cursor, forward, nmove);
   }
   PG_CATCH();
   {
-    return js_throw("Unable to fetch", ctx);
+    MemoryContextSwitchTo(m_mcontext);
+    ErrorData *edata = CopyErrorData();
+    JSValue error = js_throw_error_data(edata, ctx);
+    RollbackAndReleaseCurrentSubTransaction();
+    MemoryContextSwitchTo(m_mcontext);
+    CurrentResourceOwner = m_resowner;
+    FlushErrorState();
+    FreeErrorData(edata);
+    return error;
   }
   PG_END_TRY();
+
+  ReleaseCurrentSubTransaction();
+  MemoryContextSwitchTo(m_mcontext);
+  CurrentResourceOwner = m_resowner;
 
   return JS_UNDEFINED;
 }
@@ -922,19 +965,38 @@ static JSValue pljs_plan_cursor_close(JSContext *ctx, JSValueConst this_val,
     return js_throw("Unable to find cursor", ctx);
   }
 
+  /* Subtransaction guard; the previous SPI_rollback()+SPI_finish() here
+   * double-finished the connection owned by call_function and raised
+   * "invalid transaction termination" in an atomic context (see
+   * pljs_plan_cursor_fetch). */
+  ResourceOwner m_resowner = CurrentResourceOwner;
+  MemoryContext m_mcontext = CurrentMemoryContext;
+
   PG_TRY();
   {
+    BeginInternalSubTransaction(NULL);
+    MemoryContextSwitchTo(m_mcontext);
     SPI_cursor_close(cursor);
   }
   PG_CATCH();
   {
-    SPI_rollback();
-    SPI_finish();
-    return js_throw("Unable to close cursor", ctx);
+    MemoryContextSwitchTo(m_mcontext);
+    ErrorData *edata = CopyErrorData();
+    JSValue error = js_throw_error_data(edata, ctx);
+    RollbackAndReleaseCurrentSubTransaction();
+    MemoryContextSwitchTo(m_mcontext);
+    CurrentResourceOwner = m_resowner;
+    FlushErrorState();
+    FreeErrorData(edata);
+    return error;
   }
   PG_END_TRY();
 
-  JSValue ret = JS_NewInt32(ctx, cursor ? 1 : 0);
+  ReleaseCurrentSubTransaction();
+  MemoryContextSwitchTo(m_mcontext);
+  CurrentResourceOwner = m_resowner;
+
+  JSValue ret = JS_NewInt32(ctx, 1);
 
   return ret;
 }
