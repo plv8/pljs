@@ -625,16 +625,25 @@ static JSValue pljs_prepare(JSContext *ctx, JSValueConst this_val, int argc,
 
   sql = JS_ToCString(ctx, argv[0]);
 
+  /*
+   * Allocate parstate in CacheMemoryContext so it survives beyond the current
+   * call_function execution_context (which gets deleted on return).
+   * param_types is palloc'd via parstate->memory_context so it must point to
+   * the same long-lived context.  We allocate it *before* PG_TRY so the
+   * pointer is stable for the cleanup path (and not at risk of being clobbered
+   * across the longjmp), and so the PG_CATCH branch can free it: because it
+   * lives in the permanent CacheMemoryContext, a failed SPI_prepare would
+   * otherwise leak it (and its param_types) for the life of the backend.
+   */
+  if (argc > 1) {
+    parstate =
+        MemoryContextAllocZero(CacheMemoryContext, sizeof(pljs_param_state));
+    parstate->memory_context = CacheMemoryContext;
+  }
+
   PG_TRY();
   {
-    if (argc > 1) {
-      /* Allocate parstate in CacheMemoryContext so it survives beyond the
-       * current call_function execution_context (which gets deleted on
-       * return).  param_types is palloc'd via parstate->memory_context so
-       * it must point to the same long-lived context. */
-      parstate = MemoryContextAllocZero(CacheMemoryContext,
-                                        sizeof(pljs_param_state));
-      parstate->memory_context = CacheMemoryContext;
+    if (parstate) {
       initial = SPI_prepare_params(sql, pljs_variable_param_setup, parstate, 0);
     } else {
       initial = SPI_prepare(sql, nparams, types);
@@ -646,6 +655,17 @@ static JSValue pljs_prepare(JSContext *ctx, JSValueConst this_val, int argc,
 
   PG_CATCH();
   {
+    if (parstate) {
+      if (parstate->param_types) {
+        pfree(parstate->param_types);
+      }
+      pfree(parstate);
+    }
+
+    if (types != NULL) {
+      pfree(types);
+    }
+
     if (cleanup_params) {
       JS_FreeValue(ctx, params);
     }
