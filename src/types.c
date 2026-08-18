@@ -945,6 +945,28 @@ static Datum pljs_jsvalue_to_datum_fallback(JSValue value, bool *is_null,
   return ret;
 }
 
+/*
+ * Return a SQL NULL from a conversion without touching fcinfo.
+ *
+ * PG_RETURN_NULL() expands to `fcinfo->isnull = true; return (Datum) 0`, so it
+ * only works where fcinfo is real.  pljs_jsvalue_to_datum() is also called for
+ * every column of a composite -- from pljs_jsvalue_to_datums() and
+ * pljs_jsvalue_to_record() -- and both of those pass fcinfo == NULL, reporting
+ * the null through the is_null argument instead.  Using PG_RETURN_NULL() on
+ * those paths writes through a null pointer.
+ */
+static inline Datum pljs_null_datum(bool *is_null, FunctionCallInfo fcinfo) {
+  if (is_null != NULL) {
+    *is_null = true;
+  }
+
+  if (fcinfo != NULL) {
+    fcinfo->isnull = true;
+  }
+
+  return (Datum)0;
+}
+
 /**
  * @brief Converts a Javascript value to a Postgres #Datum.
  *
@@ -983,15 +1005,7 @@ Datum pljs_jsvalue_to_datum(Oid rettype, JSValue val, bool *is_null,
   }
 
   if (JS_IsNull(val) || JS_IsUndefined(val)) {
-    if (fcinfo) {
-      PG_RETURN_NULL();
-    } else {
-      if (is_null) {
-        *is_null = true;
-      }
-
-      PG_RETURN_NULL();
-    }
+    return pljs_null_datum(is_null, fcinfo);
   }
 
   switch (rettype) {
@@ -1256,7 +1270,7 @@ Datum pljs_jsvalue_to_datum(Oid rettype, JSValue val, bool *is_null,
         }
       }
 
-      PG_RETURN_NULL();
+      return pljs_null_datum(is_null, fcinfo);
     }
   }
 
@@ -1280,8 +1294,20 @@ Datum pljs_jsvalue_to_datum(Oid rettype, JSValue val, bool *is_null,
     return pljs_jsvalue_to_datum_fallback(val, is_null, type, ctx);
   }
 
-  // shut up, compiler
-  PG_RETURN_NULL();
+  /*
+   * Reached when a case matched the type but not the value -- DATEOID,
+   * TIMESTAMPOID and TIMESTAMPTZOID each handle only a JavaScript Date and
+   * break out of the switch for anything else.  A plain string for a date
+   * column lands here, so this is an ordinary path and not just a sop to the
+   * compiler.
+   *
+   * NB: it yields SQL NULL, which means a perfectly valid date *string* is
+   * silently dropped rather than parsed through the type's input function.
+   * That is the pre-existing behaviour of the scalar path and changing it is a
+   * separate question from not crashing; this commit only stops the write
+   * through a null fcinfo.
+   */
+  return pljs_null_datum(is_null, fcinfo);
 }
 
 /**
