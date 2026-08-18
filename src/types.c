@@ -1084,7 +1084,26 @@ Datum pljs_jsvalue_to_datum(Oid rettype, JSValue val, bool *is_null,
 
   pljs_type_fill(&type, rettype);
 
-  if (type.typid != JSONOID && type.typid != JSONBOID && JS_IsArray(ctx, val)) {
+  /*
+   * Decide "build a SQL array" or "build a JSON array" from the SQL type's
+   * category, not from type.typid: pljs_type_fill() has already rewritten
+   * type.typid to the ELEMENT type for any array type, so comparing it against
+   * JSONOID/JSONBOID here also matched jsonb[] and json[], whose element type
+   * *is* json or jsonb.
+   *
+   * Those fell through to the scalar json branch, which stringified the whole
+   * JavaScript array -- "[object Object],[object Object]" -- and handed that to
+   * the json input function. The array construction below never ran, and what
+   * surfaced was a cache lookup failure for a type OID read out of
+   * uninitialised memory, so `RETURNS jsonb[]` has never worked for any element
+   * shape.
+   *
+   * A bare json/jsonb target still turns a JavaScript array into a JSON array,
+   * which is what the original condition was for.
+   */
+  if (JS_IsArray(ctx, val) &&
+      (type.category == TYPCATEGORY_ARRAY ||
+       (type.typid != JSONOID && type.typid != JSONBOID))) {
     return pljs_jsvalue_to_array(&type, val, ctx, fcinfo);
   }
 
