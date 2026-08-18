@@ -852,6 +852,9 @@ static JSValue pljs_plan_cursor(JSContext *ctx, JSValueConst this_val, int argc,
         plan->parstate ? plan->parstate->param_types[i] : 0, param, &is_null,
         ctx, NULL);
     nulls[i] = is_null ? 'n' : ' ';
+
+    /* plan.execute() frees its params; this path leaked one ref per bind. */
+    JS_FreeValue(ctx, param);
   }
 
   m_resowner = CurrentResourceOwner;
@@ -1160,6 +1163,9 @@ static JSValue pljs_plan_to_string(JSContext *ctx, JSValueConst this_val,
  */
 static JSValue pljs_commit(JSContext *ctx, JSValueConst this_val, int argc,
                            JSValueConst *argv) {
+  ResourceOwner m_resowner = CurrentResourceOwner;
+  MemoryContext m_mcontext = CurrentMemoryContext;
+
   PG_TRY();
   {
     // HoldPinnedPortals();
@@ -1168,10 +1174,29 @@ static JSValue pljs_commit(JSContext *ctx, JSValueConst this_val, int argc,
   }
   PG_CATCH();
   {
-    // Flush the error before returning; see the note in pljs_execute().
-    FlushErrorState();
+    /*
+     * The caught error MUST be flushed off the errordata stack.  Returning
+     * without FlushErrorState() leaves the entry there permanently: the stack
+     * is only ERRORDATA_STACK_SIZE (5) deep and is not unwound until the
+     * enclosing statement finishes, so five caught commit failures inside a
+     * single call make the sixth ereport() PANIC with "ERRORDATA_STACK_SIZE
+     * exceeded" -- which kills every backend in the cluster, not just this
+     * session.  A procedure that retries a failing commit in a loop (a
+     * deadlock, serialization failure, or full disk) hits this.
+     *
+     * Report the real Postgres error rather than a generic string, so the
+     * caller can tell a deadlock from a disk-full.
+     */
+    MemoryContextSwitchTo(m_mcontext);
+    ErrorData *edata = CopyErrorData();
+    JSValue error = js_throw_error_data(edata, ctx);
 
-    return js_throw("Unable to commit", ctx);
+    FlushErrorState();
+    FreeErrorData(edata);
+    MemoryContextSwitchTo(m_mcontext);
+    CurrentResourceOwner = m_resowner;
+
+    return error;
   }
   PG_END_TRY();
 
@@ -1187,6 +1212,9 @@ static JSValue pljs_commit(JSContext *ctx, JSValueConst this_val, int argc,
  */
 static JSValue pljs_rollback(JSContext *ctx, JSValueConst this_val, int argc,
                              JSValueConst *argv) {
+  ResourceOwner m_resowner = CurrentResourceOwner;
+  MemoryContext m_mcontext = CurrentMemoryContext;
+
   PG_TRY();
   {
     // HoldPinnedPortals();
@@ -1195,10 +1223,17 @@ static JSValue pljs_rollback(JSContext *ctx, JSValueConst this_val, int argc,
   }
   PG_CATCH();
   {
-    // Flush the error before returning; see the note in pljs_execute().
-    FlushErrorState();
+    /* Flush the caught error; see pljs_commit() for why this is mandatory. */
+    MemoryContextSwitchTo(m_mcontext);
+    ErrorData *edata = CopyErrorData();
+    JSValue error = js_throw_error_data(edata, ctx);
 
-    return js_throw("Unable to rollback", ctx);
+    FlushErrorState();
+    FreeErrorData(edata);
+    MemoryContextSwitchTo(m_mcontext);
+    CurrentResourceOwner = m_resowner;
+
+    return error;
   }
   PG_END_TRY();
 
@@ -1219,6 +1254,8 @@ static JSValue pljs_find_function(JSContext *ctx, JSValueConst this_val,
   }
   const char *signature = JS_ToCString(ctx, argv[0]);
   JSValue func = JS_UNDEFINED;
+  ResourceOwner m_resowner = CurrentResourceOwner;
+  MemoryContext m_mcontext = CurrentMemoryContext;
 
   PG_TRY();
   {
@@ -1249,17 +1286,24 @@ static JSValue pljs_find_function(JSContext *ctx, JSValueConst this_val,
   }
   PG_CATCH();
   {
-    // Flush the error before returning; see the note in pljs_execute().
-    FlushErrorState();
+    /*
+     * Flush the caught error (see pljs_commit(): five unflushed catches PANIC
+     * the cluster) and surface the real Postgres error.  The old generic
+     * "javascript function is not found" message also hid unrelated failures,
+     * e.g. a permission or syscache error.
+     */
+    MemoryContextSwitchTo(m_mcontext);
+    ErrorData *edata = CopyErrorData();
+    JSValue error = js_throw_error_data(edata, ctx);
 
-    StringInfoData str;
-    initStringInfo(&str);
-    appendStringInfo(&str, "javascript function is not found for \"%s\"",
-                     signature);
+    FlushErrorState();
+    FreeErrorData(edata);
+    MemoryContextSwitchTo(m_mcontext);
+    CurrentResourceOwner = m_resowner;
 
     JS_FreeCString(ctx, signature);
 
-    return js_throw(NameStr(str), ctx);
+    return error;
   }
   PG_END_TRY();
 
@@ -1372,6 +1416,7 @@ static JSValue pljs_window_get_partition_local(JSContext *ctx,
   WindowObject winobj = PG_WINDOW_OBJECT();
 
   pljs_window_storage *window_storage;
+  MemoryContext m_mcontext = CurrentMemoryContext;
 
   PG_TRY();
   {
@@ -1380,10 +1425,16 @@ static JSValue pljs_window_get_partition_local(JSContext *ctx,
   }
   PG_CATCH();
   {
-    // Flush the error before returning; see the note in pljs_execute().
-    FlushErrorState();
+    /* Flush the caught error; see pljs_commit() for why this is mandatory. */
+    MemoryContextSwitchTo(m_mcontext);
+    ErrorData *edata = CopyErrorData();
+    JSValue error = js_throw_error_data(edata, ctx);
 
-    return js_throw("Unable to retrieve window storage", ctx);
+    FlushErrorState();
+    FreeErrorData(edata);
+    MemoryContextSwitchTo(m_mcontext);
+
+    return error;
   }
   PG_END_TRY();
 
