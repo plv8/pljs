@@ -1,0 +1,27 @@
+-- A `RETURNS record` function called without a column definition list produced
+-- "record type has not been registered", which is an unhelpful way to say
+-- "you forgot AS (a int, b text)".
+--
+-- call_function() discarded get_call_result_type()'s status.  TYPEFUNC_RECORD
+-- means the caller supplied no column list and hands back a NULL tupdesc;
+-- pljs_jsvalue_to_record() then reached lookup_rowtype_tupdesc(RECORDOID, -1),
+-- which is where that message comes from.
+CREATE FUNCTION recnl() RETURNS record AS $$
+  return { a: 1, b: 'x' };
+$$ LANGUAGE pljs;
+
+-- No column definition list: a clear error naming what is missing.
+SELECT recnl();
+
+-- With one, it works.
+SELECT * FROM recnl() AS x(a int, b text);
+
+-- The SETOF form has its own path and must stay working.
+CREATE FUNCTION recnl_set() RETURNS SETOF record AS $$
+  pljs.return_next({ a: 1, b: 'one' });
+  pljs.return_next({ a: 2, b: 'two' });
+$$ LANGUAGE pljs;
+
+SELECT * FROM recnl_set() AS x(a int, b text);
+
+DROP FUNCTION recnl, recnl_set;
