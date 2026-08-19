@@ -1,0 +1,21 @@
+-- Regression test for the errordata-stack leak in pljs_execute's PG_CATCH.
+--
+-- When pljs.execute() caught a PostgreSQL error it copied the error data and
+-- returned a JS exception but never called FlushErrorState(), so each catch
+-- leaked one errordata_stack_depth slot. ERRORDATA_STACK_SIZE is 5, so after a
+-- few caught errors in one backend the next ereport() -- even a NOTICE --
+-- PANICs with "ERRORDATA_STACK_SIZE exceeded", taking the whole postmaster into
+-- recovery. The fix mirrors pljs_elog(): CopyErrorData -> FlushErrorState ->
+-- FreeErrorData. This loops through 12 caught errors (well past the limit of 5)
+-- and then runs a valid query and a NOTICE; without the fix the backend dies
+-- before this completes.
+DO $$
+  let caught = 0;
+  for (let i = 0; i < 12; i++) {
+    try { pljs.execute('SELECT 1/0'); } catch (e) { caught++; }
+  }
+  pljs.elog(NOTICE, 'caught ' + caught + ' errors; backend alive');
+  pljs.elog(NOTICE, 'after: ' + pljs.execute('SELECT 42 AS x')[0].x);
+$$ LANGUAGE pljs;
+NOTICE:  caught 12 errors; backend alive
+NOTICE:  after: 42
