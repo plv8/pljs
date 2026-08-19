@@ -69,12 +69,14 @@ SELECT text_to_int4('123');
           123
 (1 row)
 
+-- A string is parsed by int4's input function, so text that is not an integer
+-- raises instead of silently becoming 0, which is what routing it through a
+-- double produced.
 SELECT text_to_int4('abc');
- text_to_int4 
---------------
-            0
-(1 row)
-
+ERROR:  invalid input syntax for type integer: "abc"
+-- Out of range likewise raises rather than wrapping.
+SELECT text_to_int4('2147483648');
+ERROR:  value "2147483648" is out of range for type integer
 -- ARRAYS
 CREATE FUNCTION return_array() RETURNS TEXT[] AS $$ return ["foo", "bar"]; $$LANGUAGE pljs;
 SELECT return_array();
@@ -107,7 +109,7 @@ CREATE OR REPLACE FUNCTION bigint_failing(val BIGINT)
     return val - 1;
    $$ LANGUAGE pljs STABLE STRICT;
 SELECT bigint_failing(9223372036854775807);
-ERROR:  execution error
+ERROR:  cannot convert bigint to number
 DETAIL:  TypeError: cannot convert bigint to number
     at bigint_failing (<function>:3:16)
 
