@@ -4,7 +4,7 @@ set pljs.memory_limit = '64';
 do $$ Object.prototype [Symbol.iterator] = function() { return { next:() => this } };
 [...({})];
 $$ language pljs;
-ERROR:  execution error
+ERROR:  out of memory
 DETAIL:  InternalError: out of memory
     at <anonymous> (<function>:2:1)
     at <eval> (<function>:3:3)

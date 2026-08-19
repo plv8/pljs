@@ -1,6 +1,6 @@
 #include "postgres.h"
 
-#include "catalog/pg_database.h"
+#include "catalog/pg_language.h"
 #include "catalog/pg_proc.h"
 #include "catalog/pg_type_d.h"
 #include "commands/trigger.h"
@@ -8,6 +8,7 @@
 #include "funcapi.h"
 #include "miscadmin.h"
 #include "nodes/parsenodes.h"
+#include "tcop/tcopprot.h"
 #include "utils/builtins.h"
 #include "utils/guc.h"
 #include "utils/lsyscache.h"
@@ -37,7 +38,6 @@ static Datum call_srf_function(PG_FUNCTION_ARGS, pljs_context *context,
 
 static void call_anonymous_function(const char *, JSContext *);
 static Datum call_trigger(FunctionCallInfo fcinfo, pljs_context *context);
-static void signal_handler(int sig_num);
 static int interrupt_handler(JSRuntime *rt, void *opaque);
 static void setup_storage_for_context(pljs_context *context,
                                       FunctionCallInfo fcinfo);
@@ -62,8 +62,6 @@ JSClassID js_pljs_storage_id;
 // class id for pljs window object
 JSClassID js_window_id;
 
-static uint64_t os_pending_signals = 0;
-
 /**
  * @brief PostgreSQL extension initialization function.
  *
@@ -71,9 +69,12 @@ static uint64_t os_pending_signals = 0;
  * runtime.
  */
 void _PG_init(void) {
-  signal(SIGINT, signal_handler);
-  signal(SIGTERM, signal_handler);
-  signal(SIGABRT, signal_handler);
+  // NB: do NOT install our own signal() handlers here.  This runs inside a
+  // backend that has already set up PostgreSQL's own SIGINT/SIGTERM handlers
+  // (query cancel, fast shutdown); overwriting them process-wide broke
+  // statement_timeout / pg_cancel_backend / pg_terminate_backend for the whole
+  // backend for the rest of its life.  Instead, interrupt_handler() consults
+  // PostgreSQL's interrupt flags directly (see below).
 
   // Initialize cache.
   pljs_cache_init();
@@ -84,9 +85,65 @@ void _PG_init(void) {
   // Set up the quickjs runtime.
   rt = JS_NewRuntime();
 
+  /*
+   * Bound the JS call-stack budget explicitly instead of trusting the vendored
+   * JS_DEFAULT_STACK_SIZE.  Without an active limit, unbounded/deep JS
+   * recursion runs the backend's C stack into the ground and crashes the whole
+   * process (SIGSEGV) rather than raising a catchable "stack overflow".  We
+   * size the JS budget to half of the DBA's max_stack_depth so pure-JS
+   * recursion trips QuickJS's guard well before PostgreSQL's own C-stack limit
+   * (and long before the kernel stack limit) is reached, with a floor so a
+   * small max_stack_depth still leaves JS usable.  PostgreSQL's own
+   * check_stack_depth() bounds any cumulative C stack consumed across nested
+   * JS<->SQL re-entries.
+   *
+   * The budget set here is a size, not an anchor: JS_NewRuntime() records the
+   * stack top at this point in _PG_init, which is not where any real JS call
+   * begins.  Each entry into JS therefore calls JS_UpdateStackTop() to
+   * re-anchor the measurement at its own depth -- see the call sites around
+   * each JS_Call().
+   *
+   * Note an asymmetry with pljs.memory_limit below, which does install an
+   * assign hook: max_stack_depth is read once, here, so a later SET
+   * max_stack_depth does not change the JS budget for the life of the backend.
+   * It is a core GUC with no hook available to us, and re-reading it per call
+   * would let one session's SET silently resize a runtime shared with every
+   * other function in the backend.
+   */
+  {
+    long depth_bytes = (long)max_stack_depth * 1024L;
+    size_t js_stack_size = (size_t)(depth_bytes / 2);
+    if (js_stack_size < 256 * 1024) {
+      js_stack_size = 256 * 1024;
+    }
+    JS_SetMaxStackSize(rt, js_stack_size);
+  }
+
+  // Register runtime JS classes (must happen before any JSContext is created,
+  // so every context sees the class; e.g. the prepared-statement handle whose
+  // finalizer reclaims otherwise-leaked SPI plans).
+  pljs_register_js_classes(rt);
+
   // Set up a memory limit if it exists.
   if (configuration.memory_limit) {
     JS_SetMemoryLimit(rt, configuration.memory_limit * 1024 * 1024);
+  }
+}
+
+/**
+ * @brief Assign hook for pljs.memory_limit.
+ *
+ * Re-applies the limit to the live QuickJS runtime when the GUC is changed at
+ * runtime (SET pljs.memory_limit = ...).  Without this the GUC value changed
+ * but the interpreter kept whatever limit was installed in _PG_init (the value
+ * present when pljs was first loaded), so a runtime SET silently had no effect
+ * and could not be used to contain a misbehaving function in a running backend.
+ * At initial GUC definition (boot value) rt is still NULL, so this is a no-op
+ * then and _PG_init installs the load-time value explicitly.
+ */
+static void pljs_assign_memory_limit(int newval, void *extra) {
+  if (rt != NULL && newval > 0) {
+    JS_SetMemoryLimit(rt, (size_t)newval * 1024 * 1024);
   }
 }
 
@@ -110,7 +167,7 @@ void pljs_guc_init(void) {
                           gettext_noop("Runtime limit in MBytes"),
                           gettext_noop("The default value is 512 MB"),
                           (int *)&configuration.memory_limit, 512, 64, 3096,
-                          PGC_SUSET, 0, NULL, NULL, NULL);
+                          PGC_SUSET, 0, NULL, pljs_assign_memory_limit, NULL);
 
   DefineCustomStringVariable(
       "pljs.start_proc",
@@ -127,7 +184,19 @@ void pljs_guc_init(void) {
  * @param ctx #JSContext - Javascript context with the error
  * @returns @c char * as an error message
  */
-static char *dump_error(JSContext *ctx) {
+/*
+ * Extract the current JavaScript exception.
+ *
+ * Returns a palloc'd string suitable for errdetail(): the stringified error
+ * followed by its stack trace.  When message_out is non-NULL it is set to a
+ * palloc'd copy of the error's own `message` property (or the stringified
+ * throw value for non-Error throws), so callers can surface that as the
+ * primary errmsg() the way plv8 does, instead of a generic "execution error".
+ * Preserving the message here is what lets a coded error (e.g. the "[CODE] "
+ * prefix embedded by the mirror procedures) survive across a nested
+ * pljs.execute()/SPI boundary.
+ */
+static char *dump_error(JSContext *ctx, char **message_out, char **detail_out) {
   JSValue exception_val, val;
   const char *stack;
   const char *str;
@@ -135,12 +204,24 @@ static char *dump_error(JSContext *ctx) {
   char *ret = NULL;
   size_t s1, s2;
 
+  if (message_out) {
+    *message_out = NULL;
+  }
+
+  if (detail_out) {
+    *detail_out = NULL;
+  }
+
   exception_val = JS_GetException(ctx);
 
   /* In the case of OOM, a null exception is thrown. */
   if (JS_IsNull(exception_val)) {
     char *oom = palloc(14);
     strcpy(oom, "out of memory");
+
+    if (message_out) {
+      *message_out = pstrdup("out of memory");
+    }
 
     JS_FreeValue(ctx, exception_val);
 
@@ -153,6 +234,57 @@ static char *dump_error(JSContext *ctx) {
   if (!str) {
     elog(DEBUG3, "error thrown but no error message");
     return NULL;
+  }
+
+  if (detail_out && is_error) {
+    /*
+     * Carry a Postgres detail forward when the error came from a caught SPI
+     * error (see js_throw_error_data): callers surface it as errdetail so the
+     * original explanation survives a nested pljs.execute() re-raise.
+     */
+    JSValue detailval = JS_GetPropertyStr(ctx, exception_val, "detail");
+
+    if (!JS_IsUndefined(detailval)) {
+      const char *detailstr = JS_ToCString(ctx, detailval);
+
+      if (detailstr && detailstr[0]) {
+        *detail_out = pstrdup(detailstr);
+      }
+
+      if (detailstr) {
+        JS_FreeCString(ctx, detailstr);
+      }
+    }
+
+    JS_FreeValue(ctx, detailval);
+  }
+
+  if (message_out) {
+    /*
+     * Prefer the Error's own `message` property; fall back to the stringified
+     * throw value for non-Error throws or a missing/empty message.
+     */
+    if (is_error) {
+      JSValue msgval = JS_GetPropertyStr(ctx, exception_val, "message");
+
+      if (!JS_IsUndefined(msgval)) {
+        const char *msgstr = JS_ToCString(ctx, msgval);
+
+        if (msgstr && msgstr[0]) {
+          *message_out = pstrdup(msgstr);
+        }
+
+        if (msgstr) {
+          JS_FreeCString(ctx, msgstr);
+        }
+      }
+
+      JS_FreeValue(ctx, msgval);
+    }
+
+    if (*message_out == NULL) {
+      *message_out = pstrdup(str);
+    }
   }
 
   if (!is_error) {
@@ -178,12 +310,51 @@ static char *dump_error(JSContext *ctx) {
   return ret;
 }
 
-static void signal_handler(int sig_num) {
-  os_pending_signals |= ((uint64_t)1 << sig_num);
+/*
+ * Report a JavaScript exception as a PostgreSQL error.
+ *
+ * `message` and `detail` are dump_error()'s out-parameters; `fallback` is used when
+ * the exception carried no message of its own, which is why the empty-string check
+ * matters and why it lives in one place rather than at every report site.
+ *
+ * Does not return.
+ */
+pg_noreturn static void pljs_ereport_js_error(const char *message,
+                                             const char *pg_detail,
+                                             const char *detail,
+                                             const char *fallback) {
+  ereport(ERROR, (errmsg("%s", (message && message[0]) ? message : fallback),
+                  errdetail("%s", (pg_detail && pg_detail[0]) ? pg_detail : detail)));
+  pg_unreachable();
 }
 
 static int interrupt_handler(JSRuntime *rt, void *opaque) {
-  return (os_pending_signals >> SIGINT) & 1;
+  /*
+   * Return non-zero to make QuickJS abort the running script.  We interrupt on
+   * a pending query cancel (statement_timeout, pg_cancel_backend) or backend
+   * termination (pg_terminate_backend, fast shutdown), read straight from
+   * PostgreSQL's own interrupt flags.
+   *
+   * We deliberately do NOT call CHECK_FOR_INTERRUPTS() here: that would
+   * ereport(ERROR) / siglongjmp out of the middle of the QuickJS interpreter
+   * and leave the runtime in an inconsistent state.  Instead we let QuickJS
+   * unwind cleanly to a JS exception, and each caller runs
+   * CHECK_FOR_INTERRUPTS() once control is back in C to raise the real error
+   * (see the JS_IsException paths below).
+   */
+  /*
+   * QueryCancelPending and ProcDiePending are the two that matter most, and are
+   * kept as an explicit fast path.  InterruptPending then catches everything else
+   * PostgreSQL considers worth interrupting for -- ClientConnectionLost, recovery
+   * conflicts, IdleInTransactionSessionTimeoutPending -- so a runaway script
+   * unwinds for those too rather than spinning until one of the first two happens
+   * to be set.
+   *
+   * A spurious wake-up is harmless: the caller runs CHECK_FOR_INTERRUPTS() once
+   * control is back in C, and if nothing is actually pending that is a no-op and
+   * the JavaScript exception is reported normally.
+   */
+  return (QueryCancelPending || ProcDiePending || InterruptPending) ? 1 : 0;
 }
 
 /**
@@ -398,9 +569,26 @@ static void setup_start_proc(JSContext *ctx) {
   } else {
     JSValue ret = JS_Call(ctx, func, JS_UNDEFINED, 0, NULL);
     if (JS_IsException(ret)) {
-      ereport(ERROR, (errmsg("start proc execution error"),
-                      errdetail("%s", dump_error(ctx))));
+      char *message = NULL, *pg_detail = NULL;
+      char *detail = dump_error(ctx, &message, &pg_detail);
+
+      /*
+       * Release the JavaScript side before reporting: the report does not
+       * return, so anything freed after it is never freed at all.
+       */
+      JS_FreeValue(ctx, ret);
+      JS_FreeValue(ctx, func);
+
+      pljs_ereport_js_error(message, pg_detail, detail, "start proc execution error");
     }
+
+    /*
+     * The function reference and the call's result both belong to this function.
+     * Neither was released, so every context creation with pljs.start_proc set
+     * leaked both.
+     */
+    JS_FreeValue(ctx, ret);
+    JS_FreeValue(ctx, func);
   }
 }
 
@@ -489,7 +677,19 @@ pljs_storage *pljs_storage_for_context(JSContext *ctx) {
 
   JSValue pljs = JS_GetPropertyStr(ctx, global_obj, "pljs");
 
+  /*
+   * JS_GetOpaque only reads a pointer off the object; it does not keep the
+   * object alive.  Both global_obj and pljs are fresh references returned by
+   * the getters above, so we must drop them here.  The pljs object stays
+   * alive via the global object's property table.  Without this, every call
+   * (and this is a hot path: return_next, window helpers, each function
+   * invocation) leaks a reference and monotonically bumps the singletons'
+   * refcounts for the life of the backend.
+   */
   pljs_storage *storage = JS_GetOpaque(pljs, js_pljs_storage_id);
+
+  JS_FreeValue(ctx, pljs);
+  JS_FreeValue(ctx, global_obj);
 
   return storage;
 }
@@ -534,6 +734,11 @@ static void store_storage_in_context(pljs_context *context,
 
   // Attach storage to the pljs object.
   JS_SetOpaque(pljs, storage);
+
+  // Drop the fresh references returned by the getters above (see
+  // pljs_storage_for_context); the pljs object survives via the global object.
+  JS_FreeValue(context->ctx, pljs);
+  JS_FreeValue(context->ctx, global_obj);
 }
 
 /**
@@ -605,6 +810,12 @@ Datum pljs_call_handler(PG_FUNCTION_ARGS) {
 
     // If there was a problem creating the function, we'll just return VOID.
     if (JS_IsUndefined(context.js_function)) {
+      /*
+       * This early return bypassed the per-branch ReleaseSysCache() below, so a
+       * function whose body failed to compile leaked the pg_proc pin for the
+       * rest of the transaction.
+       */
+      ReleaseSysCache(proctuple);
       PG_RETURN_VOID();
     }
 
@@ -612,8 +823,20 @@ Datum pljs_call_handler(PG_FUNCTION_ARGS) {
     pljs_cache_function_add(&context);
   }
 
-  ReleaseSysCache(proctuple);
-
+  /*
+   * NB: `proctuple` must stay pinned until we have finished reading from it,
+   * but it MUST be released before we enter JavaScript, because a PROCEDURE
+   * can run COMMIT/ROLLBACK internally and it is illegal to hold a syscache
+   * pin across a transaction boundary (it trips "resource was not closed").
+   *
+   * The original code released the pin up front, before either branch, which
+   * was a use-after-free: the trigger branch still read GETSTRUCT(proctuple)
+   * and the function branch still passed the tuple to
+   * convert_arguments_to_javascript() -> get_func_arg_info().  That only bit
+   * once the entry was actually evicted (cache pressure / concurrent DDL in a
+   * long-running backend).  Release it in each branch at the last safe point
+   * instead: right after the final read, before any JS is executed.
+   */
   if (is_trigger) {
     // Call in the context of a trigger.
     Form_pg_proc procStruct;
@@ -621,11 +844,16 @@ Datum pljs_call_handler(PG_FUNCTION_ARGS) {
     procStruct = (Form_pg_proc)GETSTRUCT(proctuple);
 
     context.function->rettype = procStruct->prorettype;
+
+    ReleaseSysCache(proctuple);
+
     retval = call_trigger(fcinfo, &context);
   } else {
     // Call as a function.
     JSValueConst *argv =
         convert_arguments_to_javascript(fcinfo, proctuple, &context);
+
+    ReleaseSysCache(proctuple);
 
     // Get the old storage object.
     pljs_storage *old_storage = pljs_storage_for_context(context.ctx);
@@ -633,11 +861,38 @@ Datum pljs_call_handler(PG_FUNCTION_ARGS) {
     // Set up a new storage object for this call.
     setup_storage_for_context(&context, fcinfo);
 
-    if (context.function->is_srf) {
-      retval = call_srf_function(fcinfo, &context, argv);
-    } else {
-      retval = call_function(fcinfo, &context, argv);
+    /*
+     * The storage MUST be restored even when the call raises.
+     *
+     * JSContexts are cached per user id and reused for the rest of the session,
+     * and the storage is attached to the context, so a call that raised used to
+     * leave its own storage installed permanently -- pointing at this call's
+     * fcinfo, its return_state and its execution memory context, all of which
+     * are gone once the error has unwound.  The next call of *any* kind that
+     * reads pljs_storage_for_context() -- a trigger, a window function,
+     * return_next() -- then dereferenced that stale pointer and segfaulted the
+     * backend.
+     *
+     * This was latent until a conversion error became reachable from inside a
+     * set-returning function: before that, returning an out-of-range integer
+     * wrapped silently instead of raising, so nothing escaped this block.  A
+     * failing SETOF call followed by any trigger reproduces it within a couple
+     * of dozen iterations.
+     */
+    PG_TRY();
+    {
+      if (context.function->is_srf) {
+        retval = call_srf_function(fcinfo, &context, argv);
+      } else {
+        retval = call_function(fcinfo, &context, argv);
+      }
     }
+    PG_CATCH();
+    {
+      store_storage_in_context(&context, old_storage);
+      PG_RE_THROW();
+    }
+    PG_END_TRY();
 
     // Reset to the old storage now that the call is over.
     store_storage_in_context(&context, old_storage);
@@ -710,6 +965,29 @@ Datum pljs_inline_handler(PG_FUNCTION_ARGS) {
  * @returns #Datum of type `VOID`
  */
 Datum pljs_call_validator(PG_FUNCTION_ARGS) {
+  /*
+   * XXX This validator does not actually validate anything, and fixing that is
+   * deliberately left out of this change.
+   *
+   * A language validator is called as validator(oid_of_function_being_created),
+   * so the function to check is the ARGUMENT; fcinfo->flinfo->fn_oid below is
+   * the validator's *own* OID.  Reading prosrc from it fetches the validator's
+   * own pg_proc row, whose prosrc is the C symbol name "pljs_call_validator" --
+   * which happens to parse as a bare JavaScript identifier.  So validation
+   * always succeeds and an invalid body is accepted silently:
+   *
+   *   CREATE FUNCTION f() RETURNS int AS $$ this is ( not js $$ LANGUAGE pljs;
+   *   CREATE FUNCTION
+   *
+   * with the syntax error only surfacing on the first call.
+   *
+   * Simply switching to PG_GETARG_OID(0) is NOT the fix: a pljs body is a
+   * function *body*, not a standalone program -- `return 42;` is a syntax error
+   * at top level -- so the validator has to wrap it the way
+   * pljs_compile_function() does, with the function's argument names, before
+   * compiling.  Without that, correcting the OID rejects almost every valid
+   * function in the suite.  That belongs in its own change with its own tests.
+   */
   Oid fn_oid = fcinfo->flinfo->fn_oid;
   HeapTuple proctuple;
   const char *sourcecode;
@@ -741,17 +1019,51 @@ Datum pljs_call_validator(PG_FUNCTION_ARGS) {
                         JS_EVAL_FLAG_COMPILE_ONLY);
 
   if (JS_IsException(val)) {
-    ereport(ERROR,
-            (errmsg("execution error"), errdetail("%s", dump_error(ctx))));
+    char *message = NULL, *pg_detail = NULL;
+    char *detail = dump_error(ctx, &message, &pg_detail);
+
+    /*
+     * dump_error() has copied everything we need into palloc'd memory, so the
+     * JavaScript side can go now.  Without this the whole context leaks on
+     * every rejected function body.
+     */
+    JS_FreeValue(ctx, val);
+    JS_FreeContext(ctx);
+    ReleaseSysCache(proctuple);
+
+    pljs_ereport_js_error(message, pg_detail, detail, "execution error");
   }
 
-  // call validator can release the context
+  /*
+   * Drop the compiled function before releasing the context.  JS_FreeContext()
+   * does not free a context that still has live references into it, so leaving
+   * this JSValue alone leaked the entire JSContext -- including all of QuickJS's
+   * intrinsic objects, roughly 68KB measured -- on every single CREATE OR
+   * REPLACE FUNCTION.  A backend doing repeated DDL grew past 500MB and died
+   * with SIGSEGV in seconds.  QuickJS allocates on the libc heap, so none of it
+   * was visible in pg_backend_memory_contexts.
+   */
+  JS_FreeValue(ctx, val);
   JS_FreeContext(ctx);
 
   ReleaseSysCache(proctuple);
 
-  // We also clear the caches.  It is safest to just clear up any instances of
-  // the function or procedure.
+  /*
+   * Clear the caches: the function being created or replaced may already have a
+   * compiled copy cached, and it is now stale.
+   *
+   * This is deliberately still the blanket reset rather than a targeted removal
+   * of this one function.  A cached entry also carries the result-type
+   * information resolved at its first call, and for a RECORD-returning function
+   * that comes from the *call site*, not the function -- so a targeted
+   * invalidation leaves the entry from an earlier call site in place and the
+   * next call converts against the wrong tuple descriptor.  Until the cache key
+   * covers that, the reset is what keeps it correct.
+   *
+   * pljs_cache_reset() now frees the QuickJS side before dropping the Postgres
+   * memory that references it; it previously orphaned every cached JSContext on
+   * the libc heap.
+   */
   pljs_cache_reset();
 
   PG_RETURN_VOID();
@@ -820,8 +1132,9 @@ JSValue pljs_compile_function(pljs_context *context, bool is_trigger) {
 
     return val;
   } else {
-    ereport(ERROR, (errmsg("execution error"),
-                    errdetail("%s", dump_error(context->ctx))));
+    char *message = NULL, *pg_detail = NULL;
+    char *detail = dump_error(context->ctx, &message, &pg_detail);
+    pljs_ereport_js_error(message, pg_detail, detail, "execution error");
 
     return JS_UNDEFINED;
   }
@@ -846,17 +1159,44 @@ static void call_anonymous_function(const char *source, JSContext *ctx) {
   // generate the function as javascript with all of its arguments
   appendStringInfo(&src, "(function () {%s})();", source);
 
+  /*
+   * Re-anchor QuickJS's stack measurement here, at the C-stack depth this call
+   * actually starts from.  JS_NewRuntime() records the stack top once, inside
+   * _PG_init, at whatever depth the first pljs call happened to be -- but JS
+   * can run far deeper than that (SQL -> JS -> pljs.execute -> SQL -> JS ->
+   * ...), so a budget measured from the original anchor does not describe the
+   * stack this call has left.  The vendored QuickJS exports JS_UpdateStackTop()
+   * for exactly this.
+   */
+  JS_UpdateStackTop(JS_GetRuntime(ctx));
   JS_SetInterruptHandler(JS_GetRuntime(ctx), interrupt_handler, NULL);
-  os_pending_signals &= ~((uint64_t)1 << SIGINT);
 
   JSValue val = JS_Eval(ctx, src.data, strlen(src.data), "<function>", 0);
 
   if (!JS_IsException(val)) {
     pfree(src.data);
   } else {
+    /*
+     * Extract the error, release everything, then report.  The report never
+     * returns, so anything freed after it is dead code -- and `val` was never
+     * released on this path at all, leaking a QuickJS reference for every failed
+     * DO block.
+     */
+    char *message = NULL, *pg_detail = NULL;
+    char *detail = dump_error(ctx, &message, &pg_detail);
 
-    ereport(ERROR,
-            (errmsg("execution error"), errdetail("%s", dump_error(ctx))));
+    JS_FreeValue(ctx, val);
+    pfree(src.data);
+
+    /*
+     * If QuickJS aborted because a cancel/terminate is pending, raise the real
+     * PostgreSQL error (canceling statement / terminating connection) now that
+     * we are safely back in C, instead of the generic JS interrupt message.
+     * After the cleanup above, so a cancel cannot skip it.
+     */
+    CHECK_FOR_INTERRUPTS();
+
+    pljs_ereport_js_error(message, pg_detail, detail, "execution error");
   }
 }
 
@@ -962,20 +1302,59 @@ static Datum call_trigger(FunctionCallInfo fcinfo, pljs_context *context) {
 
   argv[9] = tgargv;
 
+  /*
+   * Connect to SPI, which call_trigger() never did -- so pljs.execute(),
+   * pljs.prepare() and every other SPI entry point failed inside a trigger. Not
+   * just DDL: a bare pljs.execute("SELECT 1") in a BEFORE INSERT trigger failed
+   * too.  Upstream reports it as "execution error"; the error-surfacing work in
+   * this series turns it into the underlying "current transaction is aborted",
+   * which is what made it findable.
+   *
+   * Atomic unconditionally: a trigger has no CallContext, so there is no
+   * nonatomic case to honour, and a trigger must not be able to commit.
+   */
+  if (SPI_connect_ext(0) != SPI_OK_CONNECT) {
+    elog(ERROR, "could not connect to spi manager");
+  }
+
+  /*
+   * Re-anchor QuickJS's stack measurement here, at the C-stack depth this call
+   * actually starts from.  JS_NewRuntime() records the stack top once, inside
+   * _PG_init, at whatever depth the first pljs call happened to be -- but JS
+   * can run far deeper than that (SQL -> JS -> pljs.execute -> SQL -> JS ->
+   * ...), so a budget measured from the original anchor does not describe the
+   * stack this call has left.  The vendored QuickJS exports JS_UpdateStackTop()
+   * for exactly this.
+   */
+  JS_UpdateStackTop(JS_GetRuntime(context->ctx));
   JS_SetInterruptHandler(JS_GetRuntime(context->ctx), interrupt_handler, NULL);
-  os_pending_signals &= ~((uint64_t)1 << SIGINT);
 
   JSValue ret =
       JS_Call(context->ctx, context->js_function, JS_UNDEFINED, 10, argv);
 
+  /*
+   * Before the exception check, as in call_function(): the report below does
+   * not return, so an SPI_finish() after it would never run.
+   */
+  SPI_finish();
+
   if (JS_IsException(ret)) {
-    ereport(ERROR, (errmsg("execution error"),
-                    errdetail("%s", dump_error(context->ctx))));
+    /*
+     * Same order as call_function(): extract, release, then report.  The
+     * JS_FreeValue() below used to sit *after* the report, which never returns,
+     * so it was dead code -- `ret` leaked a QuickJS reference on every trigger
+     * exception, not merely on a cancel.
+     */
+    char *message = NULL, *pg_detail = NULL;
+    char *detail = dump_error(context->ctx, &message, &pg_detail);
 
     JS_FreeValue(context->ctx, ret);
-
     MemoryContextSwitchTo(old_context);
-    PG_RETURN_VOID();
+
+    /* Surface a pending cancel/terminate as the real PostgreSQL error. */
+    CHECK_FOR_INTERRUPTS();
+
+    pljs_ereport_js_error(message, pg_detail, detail, "execution error");
   }
 
   if (JS_IsNull(ret) || !TRIGGER_FIRED_FOR_ROW(event)) {
@@ -1037,8 +1416,17 @@ static Datum call_function(FunctionCallInfo fcinfo, pljs_context *context,
     elog(ERROR, "could not connect to spi manager");
   }
 
+  /*
+   * Re-anchor QuickJS's stack measurement here, at the C-stack depth this call
+   * actually starts from.  JS_NewRuntime() records the stack top once, inside
+   * _PG_init, at whatever depth the first pljs call happened to be -- but JS
+   * can run far deeper than that (SQL -> JS -> pljs.execute -> SQL -> JS ->
+   * ...), so a budget measured from the original anchor does not describe the
+   * stack this call has left.  The vendored QuickJS exports JS_UpdateStackTop()
+   * for exactly this.
+   */
+  JS_UpdateStackTop(JS_GetRuntime(context->ctx));
   JS_SetInterruptHandler(JS_GetRuntime(context->ctx), interrupt_handler, NULL);
-  os_pending_signals &= ~((uint64_t)1 << SIGINT);
 
   JSValue ret = JS_Call(context->ctx, context->js_function, JS_UNDEFINED,
                         context->function->inargs, argv);
@@ -1046,11 +1434,18 @@ static Datum call_function(FunctionCallInfo fcinfo, pljs_context *context,
   SPI_finish();
 
   if (JS_IsException(ret)) {
-    char *error_message = dump_error(context->ctx);
+    char *message = NULL, *pg_detail = NULL;
+    char *error_message = dump_error(context->ctx, &message, &pg_detail);
 
     JS_FreeValue(context->ctx, ret);
 
-    ereport(ERROR, (errmsg("execution error"), errdetail("%s", error_message)));
+    /*
+     * If the exception is really a pending cancel or terminate, raise the proper
+     * PostgreSQL error rather than reporting it as a JavaScript failure.
+     */
+    CHECK_FOR_INTERRUPTS();
+
+    pljs_ereport_js_error(message, pg_detail, error_message, "execution error");
 
     /* Shuts up the compiler, since ereports of ERROR stop execution. */
     return (Datum)0;
@@ -1059,7 +1454,22 @@ static Datum call_function(FunctionCallInfo fcinfo, pljs_context *context,
 
     if (rettype == RECORDOID) {
       TupleDesc tupdesc;
-      get_call_result_type(fcinfo, &rettype, &tupdesc);
+
+      /*
+       * Check the status rather than discarding it.  TYPEFUNC_RECORD means the
+       * caller did not supply a column definition list, and tupdesc comes back
+       * NULL; pljs_jsvalue_to_record() then reached
+       * lookup_rowtype_tupdesc(RECORDOID, -1) and raised "record type has not
+       * been registered", which is an unhelpful way to say "you forgot
+       * AS (a int, b text)".
+       */
+      if (get_call_result_type(fcinfo, &rettype, &tupdesc) != TYPEFUNC_COMPOSITE) {
+        ereport(ERROR,
+                (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                 errmsg("a function returning \"record\" needs a column "
+                        "definition list"),
+                 errhint("Call it as ... AS (column_name data_type, ...).")));
+      }
 
       pljs_type type;
       pljs_type_fill(&type, rettype);
@@ -1162,8 +1572,17 @@ static Datum call_srf_function(FunctionCallInfo fcinfo, pljs_context *context,
   // Set the current return context.
   storage->return_state = state;
 
+  /*
+   * Re-anchor QuickJS's stack measurement here, at the C-stack depth this call
+   * actually starts from.  JS_NewRuntime() records the stack top once, inside
+   * _PG_init, at whatever depth the first pljs call happened to be -- but JS
+   * can run far deeper than that (SQL -> JS -> pljs.execute -> SQL -> JS ->
+   * ...), so a budget measured from the original anchor does not describe the
+   * stack this call has left.  The vendored QuickJS exports JS_UpdateStackTop()
+   * for exactly this.
+   */
+  JS_UpdateStackTop(JS_GetRuntime(context->ctx));
   JS_SetInterruptHandler(JS_GetRuntime(context->ctx), interrupt_handler, NULL);
-  os_pending_signals &= ~((uint64_t)1 << SIGINT);
 
   JSValue ret = JS_Call(context->ctx, context->js_function, JS_UNDEFINED,
                         context->function->inargs, argv);
@@ -1171,11 +1590,15 @@ static Datum call_srf_function(FunctionCallInfo fcinfo, pljs_context *context,
   SPI_finish();
 
   if (JS_IsException(ret)) {
-    char *error_message = dump_error(context->ctx);
+    // Surface a pending cancel/terminate as the real PostgreSQL error.
+    CHECK_FOR_INTERRUPTS();
+
+    char *message = NULL, *pg_detail = NULL;
+    char *error_message = dump_error(context->ctx, &message, &pg_detail);
 
     JS_FreeValue(context->ctx, ret);
 
-    ereport(ERROR, (errmsg("execution error"), errdetail("%s", error_message)));
+    pljs_ereport_js_error(message, pg_detail, error_message, "execution error");
 
     /* Shuts up the compiler, since ereports of ERROR stop execution. */
     return (Datum)0;
@@ -1279,6 +1702,48 @@ JSValue js_throw(const char *message, JSContext *ctx) {
   return JS_Throw(ctx, error);
 }
 
+/*
+ * Like js_throw(), but also attaches the Postgres error's detail, hint and
+ * SQLSTATE to the JS error object (matching plv8).  Used when a Postgres
+ * error caught during SPI execution is surfaced to JavaScript, so the full
+ * error envelope survives into JS and can be re-raised faithfully across a
+ * nested pljs.execute() boundary instead of collapsing to the message alone.
+ */
+JSValue js_throw_error_data(ErrorData *edata, JSContext *ctx) {
+  JSValue error = JS_NewError(ctx);
+
+  JS_SetPropertyStr(ctx, error, "message",
+                    JS_NewString(ctx, edata->message ? edata->message : ""));
+
+  if (edata->detail) {
+    JS_SetPropertyStr(ctx, error, "detail", JS_NewString(ctx, edata->detail));
+  }
+
+  if (edata->hint) {
+    JS_SetPropertyStr(ctx, error, "hint", JS_NewString(ctx, edata->hint));
+  }
+
+  /*
+   * Expose the SQLSTATE under both names.
+   *
+   * The value has always been the five-character string rather than the packed
+   * integer -- unpack_sql_state() is applied here -- but the property was named
+   * `sqlerrcode`, which is PostgreSQL's internal name for the *packed* form.
+   * Every other PL calls it `sqlstate`, and that is the name a JavaScript author
+   * reaches for:
+   *
+   *     catch (e) { if (e.sqlstate === '23505') ... }
+   *
+   * `sqlerrcode` is kept so that existing code keeps working.
+   */
+  JS_SetPropertyStr(ctx, error, "sqlerrcode",
+                    JS_NewString(ctx, unpack_sql_state(edata->sqlerrcode)));
+  JS_SetPropertyStr(ctx, error, "sqlstate",
+                    JS_NewString(ctx, unpack_sql_state(edata->sqlerrcode)));
+
+  return JS_Throw(ctx, error);
+}
+
 /**
  * @brief Finds a `pljs` function and returns the JSValue of the function.
  *
@@ -1309,6 +1774,7 @@ JSValue pljs_find_js_function(Oid fn_oid, JSContext *ctx) {
 
   /* Should not happen? */
   if (!OidIsValid(prolang)) { // NOLINT
+    ReleaseSysCache(functuple);
     return func;
   }
 
@@ -1316,12 +1782,20 @@ JSValue pljs_find_js_function(Oid fn_oid, JSContext *ctx) {
   HeapTuple langtuple =
       SearchSysCache(LANGNAME, NameGetDatum(&langname), 0, 0, 0);
   if (HeapTupleIsValid(langtuple)) {
-    Form_pg_database datForm = (Form_pg_database)GETSTRUCT(langtuple);
-    Oid langtupoid = datForm->oid;
+    /*
+     * This is a pg_language tuple, so it must be read through
+     * Form_pg_language.  It was previously cast to Form_pg_database, which
+     * happened to yield the right answer only because both catalogs begin with
+     * an `Oid oid` at the same offset -- any future field access, or a change to
+     * either catalog's layout, would have read the wrong bytes.
+     */
+    Form_pg_language langForm = (Form_pg_language)GETSTRUCT(langtuple);
+    Oid langtupoid = langForm->oid;
 
     ReleaseSysCache(langtuple);
 
     if (langtupoid != prolang) {
+      ReleaseSysCache(functuple);
       return func;
     }
   }
@@ -1334,7 +1808,26 @@ JSValue pljs_find_js_function(Oid fn_oid, JSContext *ctx) {
   if (function_entry != NULL) {
     pljs_function_cache_to_context(&context, function_entry);
 
-    func = context.js_function;
+    /*
+     * Hand out a reference we own.  pljs_function_cache_to_context() borrows the
+     * cache's, and the cache entry is that value's only owner -- but a JSValue
+     * returned from a C function belongs to its caller, so pljs.find_function()
+     * handed JavaScript a reference it had not counted.  The engine dropped it
+     * when the JS variable died, and after enough lookups the refcount reached
+     * zero while the entry was still cached, leaving the cache holding a freed
+     * object.  The next call through it terminated the backend.
+     */
+    func = JS_DupValue(context.ctx, context.js_function);
+
+    /*
+     * The pin was previously released only on the cache-miss branch below, so a
+     * pljs.find_function() that hit the cache -- the common case once a function
+     * has been called once -- held a syscache pin on pg_proc for the rest of the
+     * transaction.  Repeated lookups in one transaction accumulated them, which
+     * is what produces "WARNING: resource was not closed: cache pg_proc ... has
+     * count N" under USE_ASSERT_CHECKING.
+     */
+    ReleaseSysCache(functuple);
   } else {
     pljs_context_cache_value *context_entry =
         pljs_cache_context_find(GetUserId());

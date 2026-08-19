@@ -17,6 +17,15 @@
 #include "deps/quickjs/quickjs-libc.h"
 #include "deps/quickjs/quickjs.h"
 
+/*
+ * PostgreSQL 18 provides pg_noreturn (C11 _Noreturn); earlier versions provide
+ * only pg_attribute_noreturn().  GNU attributes may also precede the declaration
+ * specifiers, so one spelling works on every supported version.
+ */
+#ifndef pg_noreturn
+#define pg_noreturn pg_attribute_noreturn()
+#endif
+
 #define STORAGE_HASH_LEN 32
 #ifndef PLJS_VERSION
 #define PLJS_VERSION "unknown"
@@ -150,9 +159,15 @@ void _PG_init(void);
 void pljs_guc_init(void);
 void pljs_cache_init(void);
 void pljs_setup_namespace(JSContext *ctx);
+// Registers runtime JS classes (e.g. the prepared-statement handle whose GC
+// finalizer reclaims the SPI plan).  Must run once, after the runtime exists
+// and before any JSContext is created.
+void pljs_register_js_classes(JSRuntime *rt);
 
 // Throw a Javascript error
 JSValue js_throw(const char *, JSContext *);
+// Throw a Javascript error carrying a Postgres ErrorData's detail/hint/sqlstate
+JSValue js_throw_error_data(ErrorData *, JSContext *);
 
 // Functions
 JSValue pljs_compile_function(pljs_context *context, bool is_trigger);
@@ -203,7 +218,9 @@ Datum *pljs_jsvalue_to_datums(pljs_type *type, JSValue val, bool **is_null,
 uint32_t pljs_js_array_length(JSValue, JSContext *);
 void pljs_type_fill(pljs_type *, Oid);
 bool pljs_jsvalue_object_contains_all_column_names(JSValue val, JSContext *ctx,
-                                                   TupleDesc tupdesc);
+                                                   TupleDesc tupdesc,
+                                                   char **missing_colname,
+                                                   char **provided_keys);
 JSValue pljs_values_to_array(JSValue *, int, int, JSContext *);
 void pljs_variable_param_setup(ParseState *, void *);
 ParamListInfo pljs_setup_variable_paramlist(pljs_param_state *, Datum *,
