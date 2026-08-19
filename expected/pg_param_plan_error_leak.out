@@ -1,0 +1,72 @@
+-- Regression: pljs.execute() with parameters leaked its SPI plan whenever the
+-- query raised.
+--
+-- pljs_execute_params() freed the plan, the parameter list and the parameter
+-- arrays *after* SPI_execute_plan_with_paramlist().  Any query that raised --
+-- the common case in real code, and the entire point of a retry loop -- skipped
+-- all of it.  Nothing else reclaims it: the unsaved plan lives in the SPI
+-- procedure context and the rest in the caller's, and neither is reset by the
+-- subtransaction rollback that pljs.execute() performs to make the error
+-- catchable in JavaScript.
+--
+-- So a loop that retries a failing parameterised statement grew at the same rate
+-- as the successful-loop case this was originally reported for.
+--
+-- Threshold rationale, so the number is not simply raised until it tests nothing: measured on PostgreSQL 17, the leak costs about
+-- 1.6 kB per failed iteration, reaching ~3.1 MB at 2000 iterations.  With the
+-- plan freed on the error path it is about 0.55 kB per iteration, ~1.1 MB.  The
+-- 2 MB bound below sits between the two, so this test fails without the fix and
+-- passes with it rather than merely tracking whatever the current number is.
+--
+-- The residual ~0.55 kB per iteration is SPI's own per-statement bookkeeping and
+-- the subtransaction machinery, which is pre-existing and not what this fixes.
+CREATE FUNCTION planleak_spi_bytes(n int) RETURNS bigint AS $$
+  for (let i = 0; i < n; i++) {
+    // Prepares a plan through SPI_prepare_params, then fails in the execute.
+    try { pljs.execute('SELECT $1::int / 0', [i]); } catch (e) { /* expected */ }
+  }
+  const r = pljs.execute(
+    "SELECT coalesce(sum(total_bytes), 0)::bigint AS b " +
+    "FROM pg_backend_memory_contexts WHERE name LIKE 'SPI%'");
+  return BigInt(r[0].b);
+$$ LANGUAGE pljs;
+SELECT planleak_spi_bytes(2000) < 2 * 1024 * 1024 AS spi_growth_bounded;
+ spi_growth_bounded 
+--------------------
+ t
+(1 row)
+
+-- The successful path must stay bounded too -- that is what the fix originally
+-- covered, and this pins it so a refactor cannot regress it.
+CREATE FUNCTION planleak_ok_spi_bytes(n int) RETURNS bigint AS $$
+  for (let i = 0; i < n; i++) {
+    pljs.execute('SELECT $1::int AS v', [i]);
+  }
+  const r = pljs.execute(
+    "SELECT coalesce(sum(total_bytes), 0)::bigint AS b " +
+    "FROM pg_backend_memory_contexts WHERE name LIKE 'SPI%'");
+  return BigInt(r[0].b);
+$$ LANGUAGE pljs;
+SELECT planleak_ok_spi_bytes(2000) < 2 * 1024 * 1024 AS spi_growth_bounded_on_success;
+ spi_growth_bounded_on_success 
+-------------------------------
+ t
+(1 row)
+
+-- A mix: the two paths must not interact, and the function must still work
+-- correctly after thousands of caught failures.
+CREATE FUNCTION planleak_mixed(n int) RETURNS int AS $$
+  let ok = 0;
+  for (let i = 0; i < n; i++) {
+    try { pljs.execute('SELECT $1::int / 0', [i]); } catch (e) { /* expected */ }
+    ok += pljs.execute('SELECT $1::int AS v', [i])[0].v === i ? 1 : 0;
+  }
+  return ok;
+$$ LANGUAGE pljs;
+SELECT planleak_mixed(500) AS correct_after_interleaved_failures;
+ correct_after_interleaved_failures 
+------------------------------------
+                                500
+(1 row)
+
+DROP FUNCTION planleak_spi_bytes, planleak_ok_spi_bytes, planleak_mixed;
