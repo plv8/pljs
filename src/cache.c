@@ -1,5 +1,6 @@
 #include "postgres.h"
 
+#include "access/htup_details.h"
 #include "utils/memutils.h"
 
 #include "pljs.h"
@@ -49,9 +50,100 @@ void pljs_cache_init(void) {
 }
 
 /**
+ * @brief Drops the cached compiled form of one function, in every user's cache.
+ *
+ * Used when a function is created or replaced, so the next call recompiles it.
+ *
+ * The alternative -- pljs_cache_reset() -- destroys every per-user JSContext and
+ * rebuilds it on the next call.  JS_FreeContext() will not free a context that
+ * still has live references into it, so the old one is not necessarily reclaimed,
+ * and a backend doing repeated DDL grows without bound.  Removing a single entry
+ * keeps every JSContext alive and owned, so nothing is orphaned and nothing
+ * dangles -- including when the DDL is executed from inside a running pljs
+ * function via pljs.execute(), where freeing the context we are executing in
+ * would be fatal.
+ *
+ * @param fn_oid #Oid - the function whose compiled form is now stale
+ */
+void pljs_cache_function_remove(Oid fn_oid) {
+  HASH_SEQ_STATUS status;
+  pljs_context_cache_value *ctx_hvalue;
+
+  if (pljs_context_HashTable == NULL) {
+    return;
+  }
+
+  hash_seq_init(&status, pljs_context_HashTable);
+
+  while ((ctx_hvalue =
+              (pljs_context_cache_value *)hash_seq_search(&status)) != NULL) {
+    bool found = false;
+    pljs_function_cache_value *value;
+
+    if (ctx_hvalue->function_hash_table == NULL) {
+      continue;
+    }
+
+    value = (pljs_function_cache_value *)hash_search(
+        ctx_hvalue->function_hash_table, &fn_oid, HASH_FIND, &found);
+
+    if (!found || value == NULL) {
+      continue;
+    }
+
+    /*
+     * Drop our reference to the compiled function before the entry goes away;
+     * this is its only owner, so otherwise it leaks on the QuickJS heap.
+     */
+    JS_FreeValue(value->ctx, value->fn);
+
+    if (value->prosrc != NULL) {
+      pfree(value->prosrc);
+      value->prosrc = NULL;
+    }
+
+    hash_search(ctx_hvalue->function_hash_table, &fn_oid, HASH_REMOVE, NULL);
+  }
+}
+
+/**
  * @brief Clears all caches and recreates them.
  */
 void pljs_cache_reset(void) {
+  HASH_SEQ_STATUS status;
+  pljs_context_cache_value *ctx_hvalue;
+
+  /*
+   * Free the QuickJS side before dropping the Postgres memory that points at
+   * it.  hash_destroy() and MemoryContextDelete() below reclaim only the
+   * palloc'd entries; the JSContexts and compiled functions they reference live
+   * on the libc heap and would otherwise be orphaned inside the runtime with no
+   * owner left to free them.
+   */
+  if (pljs_context_HashTable != NULL) {
+    hash_seq_init(&status, pljs_context_HashTable);
+
+    while ((ctx_hvalue = (pljs_context_cache_value *)hash_seq_search(&status)) !=
+           NULL) {
+      if (ctx_hvalue->function_hash_table != NULL) {
+        HASH_SEQ_STATUS fstatus;
+        pljs_function_cache_value *value;
+
+        hash_seq_init(&fstatus, ctx_hvalue->function_hash_table);
+
+        while ((value = (pljs_function_cache_value *)hash_seq_search(
+                    &fstatus)) != NULL) {
+          JS_FreeValue(value->ctx, value->fn);
+        }
+      }
+
+      if (ctx_hvalue->ctx != NULL) {
+        JS_FreeContext(ctx_hvalue->ctx);
+        ctx_hvalue->ctx = NULL;
+      }
+    }
+  }
+
   hash_destroy(pljs_context_HashTable);
   MemoryContextDelete(cache_memory_context);
   pljs_cache_init();
@@ -191,7 +283,8 @@ void pljs_cache_function_add(pljs_context *context) {
  * @param fn_oid #Oid
  * @returns #pljs_function_cache_value that is found, or `NULL` if not found
  */
-pljs_function_cache_value *pljs_cache_function_find(Oid user_id, Oid fn_oid) {
+pljs_function_cache_value *pljs_cache_function_find(Oid user_id, Oid fn_oid,
+                                                    HeapTuple proctuple) {
   bool found;
 
   // Search for the context.
@@ -207,6 +300,33 @@ pljs_function_cache_value *pljs_cache_function_find(Oid user_id, Oid fn_oid) {
   // Search for the function inside of the context.
   pljs_function_cache_value *value = (pljs_function_cache_value *)hash_search(
       ctx_hvalue->function_hash_table, &fn_oid, HASH_FIND, &found);
+
+  if (!found || value == NULL) {
+    return NULL;
+  }
+
+  /*
+   * A hit is only usable if it was compiled from the pg_proc tuple that is
+   * current now.  CREATE OR REPLACE writes a new tuple version, and the OID is
+   * unchanged, so the entry would otherwise still match and the backend would
+   * go on running the previous body.
+   *
+   * The validator drops the entry directly, which covers the backend issuing
+   * the DDL.  It cannot cover any other backend: pljs registers no syscache
+   * invalidation callback, so nothing else tells them.  Before this check, a
+   * session that had already called a function kept running the old body for
+   * the rest of its life, however many times the function was replaced.
+   *
+   * This also settles DROP FUNCTION followed by OID reuse, where a new function
+   * inherits the OID of the old one: the tuple is a different tuple, so the
+   * mismatch is detected rather than the old body being run under the new name.
+   */
+  if (HeapTupleIsValid(proctuple) &&
+      (value->fn_xmin != HeapTupleHeaderGetRawXmin(proctuple->t_data) ||
+       !ItemPointerEquals(&value->fn_tid, &proctuple->t_self))) {
+    pljs_cache_function_remove(fn_oid);
+    return NULL;
+  }
 
   return value;
 }
@@ -242,9 +362,13 @@ void pljs_function_cache_to_context(pljs_context *context,
 
   memcpy(context->function->proname, function_entry->proname, NAMEDATALEN);
 
-  context->function->prosrc = (char *)palloc(NAMEDATALEN);
-
-  memcpy(context->function->prosrc, function_entry->prosrc, NAMEDATALEN);
+  /*
+   * prosrc is the (variable-length) function body, not a NAMEDATALEN name.
+   * Copying a fixed NAMEDATALEN bytes truncated bodies longer than 63 chars
+   * and over-read the source allocation for shorter ones.  pstrdup copies
+   * exactly the right length now that the cached copy is NUL-terminated.
+   */
+  context->function->prosrc = pstrdup(function_entry->prosrc);
 }
 
 /**
@@ -266,6 +390,9 @@ void pljs_context_to_function_cache(pljs_function_cache_value *function_entry,
   function_entry->is_srf = context->function->is_srf;
   function_entry->typeclass = context->function->typeclass;
 
+  function_entry->fn_xmin = context->function->fn_xmin;
+  function_entry->fn_tid = context->function->fn_tid;
+
   function_entry->fn = context->js_function;
   function_entry->nargs = context->function->inargs;
   for (int i = 0; i < function_entry->nargs; i++) {
@@ -275,11 +402,14 @@ void pljs_context_to_function_cache(pljs_function_cache_value *function_entry,
 
   memcpy(function_entry->proname, context->function->proname, NAMEDATALEN);
 
-  function_entry->prosrc =
-      (char *)palloc(strlen(context->function->prosrc) + 1);
-
-  memcpy(function_entry->prosrc, context->function->prosrc,
-         strlen(context->function->prosrc));
+  /*
+   * Copy the full body including its NUL terminator.  The previous code
+   * allocated strlen+1 but memcpy'd only strlen bytes, leaving the final byte
+   * uninitialized (palloc does not zero), so the cached string was not
+   * NUL-terminated and any later read walked off the end.  We are in
+   * cache_memory_context here, so pstrdup allocates in the right place.
+   */
+  function_entry->prosrc = pstrdup(context->function->prosrc);
 
   MemoryContextSwitchTo(old_context);
 }
