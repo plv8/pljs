@@ -107,7 +107,7 @@ CREATE OR REPLACE FUNCTION bigint_failing(val BIGINT)
     return val - 1;
    $$ LANGUAGE pljs STABLE STRICT;
 SELECT bigint_failing(9223372036854775807);
-ERROR:  execution error
+ERROR:  cannot convert bigint to number
 DETAIL:  TypeError: cannot convert bigint to number
     at bigint_failing (<function>:3:16)
 
