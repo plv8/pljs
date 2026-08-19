@@ -20,7 +20,7 @@ SET ROLE new_context;
 SET pljs.start_proc = 'end';
 DO $$ pljs.elog(NOTICE, pljs.current_scope.name); $$ language pljs;
 WARNING:  failed to find pljs function function "end" does not exist: 
-ERROR:  execution error
+ERROR:  cannot read property 'name' of undefined
 DETAIL:  TypeError: cannot read property 'name' of undefined
     at <anonymous> (<function>:1:52)
     at <eval> (<function>:1:62)
