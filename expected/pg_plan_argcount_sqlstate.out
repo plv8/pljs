@@ -1,0 +1,39 @@
+-- The argument-count mismatch on a prepared plan is the caller's mistake -- the
+-- wrong number of values was passed -- so it must carry a SQLSTATE that says so.
+-- It was raised with elog(), which means ERRCODE_INTERNAL_ERROR (XX000), and XX000
+-- tells the caller to treat the failure as a bug in the extension rather than as
+-- its own error.
+--
+-- Asserted with \set VERBOSITY sqlstate, which prints the code and nothing else.
+-- It cannot be read from JavaScript: this error is raised by a C function that
+-- QuickJS called, and it unwinds past any JavaScript try/catch rather than
+-- arriving as an exception -- unlike an error from pljs.execute().
+CREATE FUNCTION pac_execute() RETURNS int AS $$
+  const plan = pljs.prepare('SELECT $1::int AS v', ['int']);
+  return plan.execute([])[0].v;
+$$ LANGUAGE pljs;
+CREATE FUNCTION pac_too_many() RETURNS int AS $$
+  const plan = pljs.prepare('SELECT $1::int AS v', ['int']);
+  return plan.execute([1, 2])[0].v;
+$$ LANGUAGE pljs;
+-- The cursor entry point carries its own copy of the same check.
+CREATE FUNCTION pac_cursor() RETURNS int AS $$
+  const plan = pljs.prepare('SELECT $1::int AS v', ['int']);
+  const c = plan.cursor([]);
+  c.close();
+  return 1;
+$$ LANGUAGE pljs;
+\set VERBOSITY sqlstate
+SELECT pac_execute();
+ERROR:  22023
+SELECT pac_too_many();
+ERROR:  22023
+SELECT pac_cursor();
+ERROR:  22023
+\set VERBOSITY default
+-- And the message itself still says what happened.
+\set VERBOSITY terse
+SELECT pac_execute();
+ERROR:  plan expected 1 arguments but 0 were passed instead
+\set VERBOSITY default
+DROP FUNCTION pac_execute, pac_too_many, pac_cursor;

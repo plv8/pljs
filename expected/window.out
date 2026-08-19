@@ -354,7 +354,7 @@ CREATE FUNCTION bad_alloc(sz text) RETURNS void AS $$
   winobj.set_partition_local(context);
 $$ LANGUAGE pljs WINDOW;
 SELECT bad_alloc('5') OVER ();
-ERROR:  execution error
+ERROR:  window local memory overflow
 DETAIL:  Error: window local memory overflow
     at bad_alloc (<function>:6:29)
 
@@ -374,7 +374,7 @@ CREATE FUNCTION non_window() RETURNS void AS $$
   var winobj = pljs.get_window_object();
 $$ LANGUAGE pljs;
 SELECT non_window();
-ERROR:  execution error
+ERROR:  get_window_object called in wrong context
 DETAIL:  Error: get_window_object called in wrong context
     at non_window (<function>:3:38)
 
