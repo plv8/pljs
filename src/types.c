@@ -19,6 +19,7 @@
 #include "pljs.h"
 
 #include <string.h>
+#include <time.h>
 
 /*
  * Error handling helper macros for consistent error patterns.
@@ -317,7 +318,7 @@ JSValue pljs_datum_to_object(pljs_type *type, Datum arg, JSContext *ctx) {
   PG_CATCH();
   {
     ErrorData *edata = CopyErrorData();
-    JSValue error = js_throw(edata->message, ctx);
+    JSValue error = js_throw_error_data(edata, ctx);
     FlushErrorState();
     FreeErrorData(edata);
 
@@ -418,9 +419,11 @@ static JSValue pljs_datum_to_jsvalue_fallback(Datum arg, pljs_type type,
   } else {
     // If this is a variable length type, make a copy of it.
     if (type.length == -1) {
-      ret = JS_NewStringLen(ctx, (char *)VARDATA(arg), VARSIZE_ANY_EXHDR(arg));
+      struct varlena *vl = (struct varlena *)DatumGetPointer(arg);
+
+      ret = JS_NewStringLen(ctx, VARDATA(vl), VARSIZE_ANY_EXHDR(vl));
       JS_SetPropertyStr(ctx, ret, "length",
-                        JS_NewInt32(ctx, VARSIZE_ANY_EXHDR(arg)));
+                        JS_NewInt32(ctx, VARSIZE_ANY_EXHDR(vl)));
     } else {
       ret = JS_NewStringLen(ctx, (char *)arg, type.length);
       JS_SetPropertyStr(ctx, ret, "length", JS_NewInt32(ctx, type.length));
@@ -644,9 +647,19 @@ Datum pljs_jsvalue_to_array(pljs_type *type, JSValue val, JSContext *ctx,
  * @returns @c bool
  */
 bool pljs_jsvalue_object_contains_all_column_names(JSValue val, JSContext *ctx,
-                                                   TupleDesc tupdesc) {
+                                                   TupleDesc tupdesc,
+                                                   char **missing_colname,
+                                                   char **provided_keys) {
   uint32_t object_keys_length = 0;
   JSPropertyEnum *tab;
+
+  if (missing_colname != NULL) {
+    *missing_colname = NULL;
+  }
+
+  if (provided_keys != NULL) {
+    *provided_keys = NULL;
+  }
 
   if (JS_GetOwnPropertyNames(ctx, &tab, &object_keys_length, val,
                              JS_GPN_STRING_MASK) < 0) {
@@ -666,7 +679,7 @@ bool pljs_jsvalue_object_contains_all_column_names(JSValue val, JSContext *ctx,
          object_key++) {
       const char *atom = JS_AtomToCString(ctx, tab[object_key].atom);
 
-      if (strcmp(colname, atom) == 0) {
+      if (atom != NULL && strcmp(colname, atom) == 0) {
         found = true;
         JS_FreeCString(ctx, atom);
         break;
@@ -676,6 +689,59 @@ bool pljs_jsvalue_object_contains_all_column_names(JSValue val, JSContext *ctx,
     }
 
     if (!found) {
+      /*
+       * Report which column is missing, and what the object did offer, so the
+       * caller can raise something actionable.  The bare "field name / property
+       * name mismatch" left the author to guess, and the usual cause is a case
+       * difference: JavaScript property names are case sensitive while
+       * PostgreSQL folds unquoted identifiers to lower case.
+       */
+      if (missing_colname != NULL) {
+        *missing_colname = pstrdup(colname);
+      }
+
+      if (provided_keys != NULL) {
+        StringInfoData keys;
+        uint32_t listed = 0;
+
+        /*
+         * Cap the list.  An object with ten thousand properties would otherwise
+         * produce a ten-thousand-name error message, which goes to the server
+         * log as well as to the client.  Ten names plus the total is enough to
+         * diagnose a typo, which is what this message is for.
+         */
+        const uint32_t max_listed = 10;
+
+        initStringInfo(&keys);
+
+        for (uint32_t object_key = 0; object_key < object_keys_length;
+             object_key++) {
+          const char *atom;
+
+          if (listed >= max_listed) {
+            appendStringInfo(&keys, ", ... (%u properties in total)",
+                             object_keys_length);
+            break;
+          }
+
+          atom = JS_AtomToCString(ctx, tab[object_key].atom);
+
+          if (atom == NULL) {
+            continue;
+          }
+
+          if (keys.len > 0) {
+            appendStringInfoString(&keys, ", ");
+          }
+
+          appendStringInfoString(&keys, atom);
+          JS_FreeCString(ctx, atom);
+          listed++;
+        }
+
+        *provided_keys = keys.data;
+      }
+
       return false;
     }
   }
@@ -879,6 +945,28 @@ static Datum pljs_jsvalue_to_datum_fallback(JSValue value, bool *is_null,
   return ret;
 }
 
+/*
+ * Return a SQL NULL from a conversion without touching fcinfo.
+ *
+ * PG_RETURN_NULL() expands to `fcinfo->isnull = true; return (Datum) 0`, so it
+ * only works where fcinfo is real.  pljs_jsvalue_to_datum() is also called for
+ * every column of a composite -- from pljs_jsvalue_to_datums() and
+ * pljs_jsvalue_to_record() -- and both of those pass fcinfo == NULL, reporting
+ * the null through the is_null argument instead.  Using PG_RETURN_NULL() on
+ * those paths writes through a null pointer.
+ */
+static inline Datum pljs_null_datum(bool *is_null, FunctionCallInfo fcinfo) {
+  if (is_null != NULL) {
+    *is_null = true;
+  }
+
+  if (fcinfo != NULL) {
+    fcinfo->isnull = true;
+  }
+
+  return (Datum)0;
+}
+
 /**
  * @brief Converts a Javascript value to a Postgres #Datum.
  *
@@ -917,15 +1005,7 @@ Datum pljs_jsvalue_to_datum(Oid rettype, JSValue val, bool *is_null,
   }
 
   if (JS_IsNull(val) || JS_IsUndefined(val)) {
-    if (fcinfo) {
-      PG_RETURN_NULL();
-    } else {
-      if (is_null) {
-        *is_null = true;
-      }
-
-      PG_RETURN_NULL();
-    }
+    return pljs_null_datum(is_null, fcinfo);
   }
 
   switch (rettype) {
@@ -1144,7 +1224,7 @@ Datum pljs_jsvalue_to_datum(Oid rettype, JSValue val, bool *is_null,
 
       uint32_t *array_copy = palloc(pbytes_per_element * length);
 
-      for (size_t i = 0; i < pbytes_per_element * length; i++) {
+      for (size_t i = 0; i < length; i++) {
         int32_t in;
 
         JSValue jsval = JS_GetPropertyUint32(ctx, val, i);
@@ -1190,7 +1270,7 @@ Datum pljs_jsvalue_to_datum(Oid rettype, JSValue val, bool *is_null,
         }
       }
 
-      PG_RETURN_NULL();
+      return pljs_null_datum(is_null, fcinfo);
     }
   }
 
@@ -1214,8 +1294,20 @@ Datum pljs_jsvalue_to_datum(Oid rettype, JSValue val, bool *is_null,
     return pljs_jsvalue_to_datum_fallback(val, is_null, type, ctx);
   }
 
-  // shut up, compiler
-  PG_RETURN_NULL();
+  /*
+   * Reached when a case matched the type but not the value -- DATEOID,
+   * TIMESTAMPOID and TIMESTAMPTZOID each handle only a JavaScript Date and
+   * break out of the switch for anything else.  A plain string for a date
+   * column lands here, so this is an ordinary path and not just a sop to the
+   * compiler.
+   *
+   * NB: it yields SQL NULL, which means a perfectly valid date *string* is
+   * silently dropped rather than parsed through the type's input function.
+   * That is the pre-existing behaviour of the scalar path and changing it is a
+   * separate question from not crashing; this commit only stops the write
+   * through a null fcinfo.
+   */
+  return pljs_null_datum(is_null, fcinfo);
 }
 
 /**
