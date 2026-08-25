@@ -880,6 +880,58 @@ static Datum pljs_jsvalue_to_datum_fallback(JSValue value, bool *is_null,
 }
 
 /**
+ * @brief Parse a JavaScript string with a PostgreSQL type's input function.
+ *
+ * QuickJS's numeric/boolean coercions do not parse SQL text: JS_ToBool()
+ * treats every non-empty string as true, and the numeric conversions go
+ * through an IEEE-754 double. The input function reads the text exactly
+ * as a SQL literal of that type would, and raises on anything it cannot
+ * accept. That is also what plv8 does.
+ *
+ * @param typid #Oid - target type
+ * @param val #JSValue - the JavaScript string to parse
+ * @param ctx #JSContext - Javascript context to execute in
+ * @returns #Datum parsed from the string
+ */
+static Datum pljs_string_to_datum_via_input(Oid typid, JSValueConst val,
+                                            JSContext *ctx) {
+  size_t plen;
+  const char *str = JS_ToCStringLen(ctx, &plen, val);
+  Oid typinput, typioparam;
+  Datum ret;
+
+  if (str == NULL) {
+    elog(ERROR, "could not convert JavaScript value to a string");
+  }
+
+  if (memchr(str, '\0', plen) != NULL) {
+    JS_FreeCString(ctx, str);
+    ereport(ERROR,
+            (errcode(ERRCODE_UNTRANSLATABLE_CHARACTER),
+             errmsg("null byte (\\u0000) is not allowed in a value of type %s",
+                    format_type_be(typid))));
+  }
+
+  getTypeInputInfo(typid, &typinput, &typioparam);
+
+  PG_TRY();
+  {
+    ret = OidInputFunctionCall(typinput, (char *)str, typioparam, -1);
+  }
+  PG_CATCH();
+  {
+    /* Do not leak the QuickJS C-string when the input function rejects it. */
+    JS_FreeCString(ctx, str);
+    PG_RE_THROW();
+  }
+  PG_END_TRY();
+
+  JS_FreeCString(ctx, str);
+
+  return ret;
+}
+
+/**
  * @brief Converts a Javascript value to a Postgres #Datum.
  *
  * Takes a Javascript value and converts it into a Postgres #Datum,
@@ -942,6 +994,21 @@ Datum pljs_jsvalue_to_datum(Oid rettype, JSValue val, bool *is_null,
   }
 
   case BOOLOID: {
+    /*
+     * A string is parsed by bool's input function, not coerced with
+     * JS_ToBool(). JS_ToBool() reports every non-empty string as true, so
+     * "false", "f", "no" and "0" all became true while "" became false —
+     * the opposite of what the text means. The input function accepts
+     * exactly what SQL accepts and raises on anything else.
+     *
+     * This is a behaviour change: a bind or return of the string "false"
+     * used to store true. A JavaScript boolean, and the truthiness of any
+     * non-string, are untouched.
+     */
+    if (JS_IsString(val)) {
+      return pljs_string_to_datum_via_input(BOOLOID, val, ctx);
+    }
+
     int8_t in = JS_ToBool(ctx, val);
     PG_RETURN_BOOL(in);
     break;
