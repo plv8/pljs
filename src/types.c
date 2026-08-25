@@ -1368,6 +1368,21 @@ Datum pljs_jsvalue_to_datum(Oid rettype, JSValue val, bool *is_null,
   }
 
   case BOOLOID: {
+    /*
+     * A string is parsed by bool's input function, not coerced with
+     * JS_ToBool(). JS_ToBool() reports every non-empty string as true, so
+     * "false", "f", "no" and "0" all became true while "" became false —
+     * the opposite of what the text means. The input function accepts
+     * exactly what SQL accepts and raises on anything else.
+     *
+     * This is a behaviour change: a bind or return of the string "false"
+     * used to store true. A JavaScript boolean, and the truthiness of any
+     * non-string, are untouched.
+     */
+    if (JS_IsString(val)) {
+      return pljs_string_to_datum_via_input(BOOLOID, val, ctx);
+    }
+
     int8_t in = JS_ToBool(ctx, val);
     PG_RETURN_BOOL(in);
     break;
