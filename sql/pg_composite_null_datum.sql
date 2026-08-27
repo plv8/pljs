@@ -8,11 +8,18 @@
 -- through a null pointer: a SIGSEGV on address 0x1c, which is the offset of
 -- FunctionCallInfoBaseData.isnull.
 --
--- Reaching it takes nothing exotic.  `case DATEOID` handles only a JavaScript
--- Date and breaks out of the switch for anything else, so a plain string for a
--- date column falls through to the trailing null return.  The scalar form of the
--- same conversion has a real fcinfo and quietly returns NULL, which is why this
--- stayed hidden: `RETURNS date` is fine, and only the composite form dies.
+-- Reaching it takes nothing exotic.  `case DATEOID` handled only a JavaScript
+-- Date and broke out of the switch for anything else, so a plain string for a
+-- date column fell through to the trailing null return.  The scalar form of the
+-- same conversion has a real fcinfo and quietly returned NULL, which is why this
+-- stayed hidden: `RETURNS date` was fine, and only the composite form died.
+--
+-- An unparseable date now raises instead of binding SQL NULL (see
+-- pg_conversion_footguns), so the cases below that used to yield NULL columns
+-- assert a *clean, catchable* error and a live backend.  That is still exactly
+-- this test's original assertion -- the crash was a SIGSEGV, and a SIGSEGV is
+-- neither catchable nor survivable -- so catching the error in PL/pgSQL and
+-- reporting SQLSTATE proves the same thing the NULL columns used to.
 CREATE TYPE cnd_row AS (d date, ts timestamp, n int);
 
 -- Through return_next() on a set.
@@ -20,14 +27,28 @@ CREATE FUNCTION cnd_set() RETURNS SETOF cnd_row AS $$
   pljs.return_next({ d: 'not-a-date', ts: 'not-a-timestamp', n: 1 });
 $$ LANGUAGE pljs;
 
-SELECT * FROM cnd_set();
+DO $$
+BEGIN
+  PERFORM count(*) FROM cnd_set();
+  RAISE NOTICE 'cnd_set: no error (unexpected)';
+EXCEPTION WHEN others THEN
+  RAISE NOTICE 'cnd_set: caught %, backend alive', SQLSTATE;
+END
+$$;
 
 -- Through a plain composite return, which takes pljs_jsvalue_to_record().
 CREATE FUNCTION cnd_record() RETURNS cnd_row AS $$
   return { d: 'not-a-date', ts: 42, n: 2 };
 $$ LANGUAGE pljs;
 
-SELECT * FROM cnd_record();
+DO $$
+BEGIN
+  PERFORM cnd_record();
+  RAISE NOTICE 'cnd_record: no error (unexpected)';
+EXCEPTION WHEN others THEN
+  RAISE NOTICE 'cnd_record: caught %, backend alive', SQLSTATE;
+END
+$$;
 
 -- An array column reaches the same path one level deeper: the element conversion
 -- is handed the caller's fcinfo, which is NULL here too.
@@ -37,17 +58,30 @@ CREATE FUNCTION cnd_array() RETURNS cnd_arr AS $$
   return { a: ['not-a-date'] };
 $$ LANGUAGE pljs;
 
-SELECT * FROM cnd_array();
+DO $$
+BEGIN
+  PERFORM cnd_array();
+  RAISE NOTICE 'cnd_array: no error (unexpected)';
+EXCEPTION WHEN others THEN
+  RAISE NOTICE 'cnd_array: caught %, backend alive', SQLSTATE;
+END
+$$;
 
--- A valid date string takes the same path, because the check is Is_Date() and not
--- a parse: it becomes NULL rather than 2020-01-01.  Recorded here as the current
--- behaviour, not endorsed -- routing these through the type's input function is a
--- change of semantics and belongs with the rest of the type I/O work.
+-- A valid date string used to take the same path, because the check was
+-- Is_Date() and not a parse: it became NULL rather than 2020-01-01.  That was
+-- recorded here as the then-current behaviour and explicitly not endorsed;
+-- routing these through the type's input function is the change that settled it,
+-- so the value now arrives as the date it names.
+--
+-- Compared rather than printed: the rendering of a date depends on DateStyle.
 CREATE FUNCTION cnd_valid_string() RETURNS cnd_row AS $$
   return { d: '2020-01-01', ts: '2020-01-01 12:00:00', n: 3 };
 $$ LANGUAGE pljs;
 
-SELECT * FROM cnd_valid_string();
+SELECT (r).d = DATE '2020-01-01'                        AS date_parses,
+       (r).ts = TIMESTAMP '2020-01-01 12:00:00'         AS timestamp_parses,
+       (r).n                                            AS n
+  FROM cnd_valid_string() r;
 
 -- A real Date still converts, so the fix did not disturb the working path.
 CREATE FUNCTION cnd_real_date() RETURNS cnd_row AS $$
@@ -60,10 +94,18 @@ SELECT (r).d = DATE '2020-01-01'                        AS date_converts,
        (r).n                                            AS n
   FROM cnd_real_date() r;
 
--- The scalar path, which always had a real fcinfo, is unchanged.
+-- The scalar path, which always had a real fcinfo, took the same conversion and
+-- so also rejects an unparseable date now -- catchably, not fatally.
 CREATE FUNCTION cnd_scalar() RETURNS date AS $$ return 'not-a-date'; $$ LANGUAGE pljs;
 
-SELECT cnd_scalar() IS NULL AS scalar_still_null;
+DO $$
+BEGIN
+  PERFORM cnd_scalar();
+  RAISE NOTICE 'cnd_scalar: no error (unexpected)';
+EXCEPTION WHEN others THEN
+  RAISE NOTICE 'cnd_scalar: caught %, backend alive', SQLSTATE;
+END
+$$;
 
 SELECT 1 AS alive;
 

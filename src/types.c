@@ -1436,7 +1436,31 @@ Datum pljs_jsvalue_to_datum(Oid rettype, JSValue val, bool *is_null,
     size_t plen;
     const char *str = JS_ToCStringLen(ctx, &plen, val);
 
-    Datum ret = CStringGetTextDatum(str);
+    /*
+     * JS_ToCStringLen() returns NULL when the value cannot be rendered -- an
+     * out-of-memory under pljs.memory_limit, or a toString() that threw.
+     * CStringGetTextDatum() would hand that straight to strlen().
+     */
+    if (str == NULL) {
+      elog(ERROR, "could not convert JavaScript value to a string");
+    }
+
+    /*
+     * A PostgreSQL text value cannot carry an embedded NUL, and
+     * CStringGetTextDatum() measures with strlen(): "a\u0000b" was stored as
+     * "a", three characters silently becoming one. Truncating a value at a
+     * caller-supplied byte is how a string that passed an application's
+     * validation becomes a different string in the table, so reject it rather
+     * than write the prefix.
+     */
+    if (memchr(str, '\0', plen) != NULL) {
+      JS_FreeCString(ctx, str);
+      ereport(ERROR,
+              (errcode(ERRCODE_UNTRANSLATABLE_CHARACTER),
+               errmsg("null byte (\\u0000) is not allowed in a text value")));
+    }
+
+    Datum ret = PointerGetDatum(cstring_to_text_with_len(str, plen));
     JS_FreeCString(ctx, str);
 
     return ret;
@@ -1590,7 +1614,16 @@ Datum pljs_jsvalue_to_datum(Oid rettype, JSValue val, bool *is_null,
         }
       }
 
-      return pljs_null_datum(is_null, fcinfo);
+      /*
+       * Not a string, ArrayBuffer, or typed array, so there is no byte
+       * representation to store. This used to bind SQL NULL, which turns
+       * passing the wrong thing -- a number, a plain object, a Float64Array --
+       * into a row that looks like the caller meant to write nothing.
+       */
+      ereport(ERROR,
+              (errcode(ERRCODE_DATATYPE_MISMATCH),
+               errmsg("cannot convert JavaScript value to bytea"),
+               errdetail("Expected a string, ArrayBuffer, or typed array.")));
     }
   }
 
@@ -1621,25 +1654,31 @@ Datum pljs_jsvalue_to_datum(Oid rettype, JSValue val, bool *is_null,
       }
 
       return pljs_convert_epoch_to_timestamptz(in);
+    } else {
+      /*
+       * Not a Date object. Only Is_Date() was handled, so everything else --
+       * including a perfectly valid ISO string like "2020-01-02 03:04:05" --
+       * fell through and became SQL NULL, discarding a value the caller
+       * plainly meant. Parse it with the target type's own input function, so
+       * a valid string lands as the date it names and an invalid one raises
+       * instead of vanishing.
+       */
+      return pljs_string_to_datum_via_input(rettype, val, ctx);
     }
-    break;
 
   default:
     return pljs_jsvalue_to_datum_fallback(val, is_null, type, ctx);
   }
 
   /*
-   * Reached when a case matched the type but not the value -- DATEOID,
-   * TIMESTAMPOID and TIMESTAMPTZOID each handle only a JavaScript Date and
-   * break out of the switch for anything else.  A plain string for a date
-   * column lands here, so this is an ordinary path and not just a sop to the
-   * compiler.
+   * Reached only if a case above breaks out of the switch without returning.
+   * The date/timestamp cases used to do exactly that for any non-Date value,
+   * which is how a valid date string became SQL NULL; they now parse through
+   * the type's input function instead, so nothing routes here today.
    *
-   * NB: it yields SQL NULL, which means a perfectly valid date *string* is
-   * silently dropped rather than parsed through the type's input function.
-   * That is the pre-existing behaviour of the scalar path and changing it is a
-   * separate question from not crashing; this commit only stops the write
-   * through a null fcinfo.
+   * Kept as a defined outcome rather than an assertion: a case added later that
+   * breaks instead of returning gets SQL NULL, not a fall off the end of a
+   * non-void function.
    */
   return pljs_null_datum(is_null, fcinfo);
 }
