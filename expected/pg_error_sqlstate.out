@@ -1,0 +1,55 @@
+-- pljs hands the SQLSTATE of a PostgreSQL error to JavaScript as e.sqlstate: the
+-- five-character string, under the name every other procedural language uses and
+-- the one a JavaScript author reaches for.  e.sqlerrcode stays as an alias, since
+-- code already written against it must keep working.
+CREATE FUNCTION esq_fields() RETURNS text AS $$
+  try {
+    pljs.execute('SELECT 1/0');
+  } catch (e) {
+    return 'sqlstate=' + e.sqlstate + ' sqlerrcode=' + e.sqlerrcode;
+  }
+  return 'no error';
+$$ LANGUAGE pljs;
+SELECT esq_fields() AS division_by_zero;
+        division_by_zero         
+---------------------------------
+ sqlstate=22012 sqlerrcode=22012
+(1 row)
+
+-- Dispatching on the value is the reason for exposing it.
+CREATE TABLE esq_t (id int PRIMARY KEY);
+INSERT INTO esq_t VALUES (1);
+CREATE FUNCTION esq_dispatch() RETURNS text AS $$
+  try {
+    pljs.execute('INSERT INTO esq_t VALUES (1)');
+  } catch (e) {
+    if (e.sqlstate === '23505') {
+      return 'unique_violation, dispatched on sqlstate';
+    }
+    return 'unexpected sqlstate: ' + e.sqlstate;
+  }
+  return 'no error';
+$$ LANGUAGE pljs;
+SELECT esq_dispatch() AS dispatched;
+                dispatched                
+------------------------------------------
+ unique_violation, dispatched on sqlstate
+(1 row)
+
+-- An error raised by RAISE in SQL keeps the SQLSTATE it was given.
+CREATE FUNCTION esq_raised() RETURNS text AS $$
+  try {
+    pljs.execute("DO $x$ BEGIN RAISE EXCEPTION 'nope' USING ERRCODE = '22023'; END $x$");
+  } catch (e) {
+    return 'sqlstate=' + e.sqlstate;
+  }
+  return 'no error';
+$$ LANGUAGE pljs;
+SELECT esq_raised() AS explicit_errcode;
+ explicit_errcode 
+------------------
+ sqlstate=22023
+(1 row)
+
+DROP FUNCTION esq_fields, esq_dispatch, esq_raised;
+DROP TABLE esq_t;
