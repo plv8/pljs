@@ -648,12 +648,25 @@ Datum pljs_jsvalue_to_array(pljs_type *type, JSValue val, JSContext *ctx,
   for (int i = 0; i < array_length; i++) {
     JSValue elem = JS_GetPropertyUint32(ctx, val, i);
 
-    if (JS_IsNull(elem)) {
+    if (JS_IsNull(elem) || JS_IsUndefined(elem)) {
       nulls[i] = true;
     } else {
+      /*
+       * Pass NULL rather than fcinfo: an element is not the function's result.
+       * Every path in pljs_jsvalue_to_datum() that signals SQL NULL does it
+       * through pljs_null_datum(), which sets fcinfo->isnull when it has an
+       * fcinfo -- and that flag marks the *whole array* as SQL NULL. So one
+       * null-producing element discarded every other element: [1, undefined, 4]
+       * came back as NULL instead of {1,NULL,4}, as did a date[] holding an
+       * invalid Date. With NULL fcinfo the null is reported through the
+       * per-element is_null out-parameter, which is what nulls[i] is for.
+       */
       values[i] =
-          pljs_jsvalue_to_datum(type->typid, elem, &nulls[i], ctx, fcinfo);
+          pljs_jsvalue_to_datum(type->typid, elem, &nulls[i], ctx, NULL);
     }
+
+    /* JS_GetPropertyUint32() returns an owned reference. */
+    JS_FreeValue(ctx, elem);
   }
 
   result = construct_md_array(values, nulls, 1, ndims, lbs, type->typid,
