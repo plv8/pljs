@@ -1374,8 +1374,8 @@ static Datum call_srf_function(FunctionCallInfo fcinfo, pljs_context *context,
                 NULL, val, &nulls, state->tuple_desc, context->ctx);
 
             if (values != NULL) {
-              tuplestore_putvalues(state->tuple_store_state,
-                                   state->tuple_desc, values, nulls);
+              tuplestore_putvalues(state->tuple_store_state, state->tuple_desc,
+                                   values, nulls);
               pfree(values);
             }
             pfree(nulls);
@@ -1390,8 +1390,8 @@ static Datum call_srf_function(FunctionCallInfo fcinfo, pljs_context *context,
               NULL, ret, &nulls, state->tuple_desc, context->ctx);
 
           if (values != NULL) {
-            tuplestore_putvalues(state->tuple_store_state,
-                                 state->tuple_desc, values, nulls);
+            tuplestore_putvalues(state->tuple_store_state, state->tuple_desc,
+                                 values, nulls);
             pfree(values);
           }
           pfree(nulls);

@@ -1737,9 +1737,8 @@ static JsonbValue *jsonb_from_value(JSValue value, JsonbBuildState *pstate,
  * @param ctx #JSContext - Javascript context to execute in
  * @returns #JsonbValue of the `JSONB` array
  */
-static JsonbValue *jsonb_array_from_array(JSValue array,
-                                          JsonbBuildState *pstate,
-                                          JSContext *ctx) {
+static JsonbValue *
+jsonb_array_from_array(JSValue array, JsonbBuildState *pstate, JSContext *ctx) {
   // Push the beginning of the array into the parse state.
   JsonbValue *value = jsonb_push(pstate, WJB_BEGIN_ARRAY, NULL);
 
