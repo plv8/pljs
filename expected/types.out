@@ -144,3 +144,41 @@ SELECT ltree_echo('1.2.3'::ltree);
  1.2.3
 (1 row)
 
+-- Custom and domain types reach the catch-all varlena conversion in
+-- pljs_datum_to_jsvalue_fallback().  A literal is built with a 4-byte header,
+-- but the same value read back out of a column carries a 1-byte short header,
+-- and a large one is stored compressed.  Reading either of those with VARDATA()
+-- instead of VARDATA_ANY(), and without detoasting, returned a value shifted
+-- three bytes into its own payload -- or the raw compressed bytes.
+CREATE TABLE ltree_tbl (l ltree);
+INSERT INTO ltree_tbl VALUES ('1.2.3');
+SELECT ltree_echo(l) FROM ltree_tbl;
+ ltree_echo 
+------------
+ 1.2.3
+(1 row)
+
+CREATE DOMAIN packed_text AS text;
+CREATE FUNCTION packed_echo(v packed_text) RETURNS text AS $$
+  return v;
+$$ LANGUAGE pljs;
+CREATE TABLE packed_tbl (v packed_text);
+INSERT INTO packed_tbl VALUES ('ABCDEFGHIJ'), (repeat('Z', 5000));
+SELECT packed_echo('ABCDEFGHIJ'::packed_text) AS from_literal;
+ from_literal 
+--------------
+ ABCDEFGHIJ
+(1 row)
+
+SELECT packed_echo(v) AS from_column FROM packed_tbl WHERE length(v) = 10;
+ from_column 
+-------------
+ ABCDEFGHIJ
+(1 row)
+
+SELECT length(packed_echo(v)) AS toasted_len FROM packed_tbl WHERE length(v) > 100;
+ toasted_len 
+-------------
+        5000
+(1 row)
+
