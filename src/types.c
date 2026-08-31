@@ -170,6 +170,57 @@ static double pljs_convert_timestamptz_to_epoch(TimestampTz tm) {
   return epoch + (POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE) * 86400000.0;
 }
 
+/*
+ * Free a detoasted copy, if detoasting made one.
+ *
+ * PG_DETOAST_DATUM() and its relatives return the original pointer when the
+ * value was already a plain, uncompressed varlena, and a fresh palloc'd copy
+ * otherwise -- when it was compressed, stored out of line, or carrying a
+ * 1-byte short header, which is what PostgreSQL uses for any small value in a
+ * tuple.  Nothing freed those copies, so converting a short-headered text,
+ * array or jsonb column to JavaScript leaked one per row, for the length of
+ * the enclosing function call.
+ */
+static void pljs_free_if_detoasted(void *detoasted, Datum original) {
+  if (detoasted != NULL && detoasted != DatumGetPointer(original)) {
+    pfree(detoasted);
+  }
+}
+
+/**
+ * @brief Converts a `NUMERIC` #Datum to a Javascript double.
+ *
+ * Does what `numeric_float8()` does -- render the value with `numeric_out()`
+ * and parse it back with `float8in()` -- rather than calling it, for two
+ * reasons.  As of PostgreSQL 19 `numeric_float8()` frees the string it renders
+ * only on its error path, so every successful conversion leaked one.  And it
+ * reaches its argument through `PG_GETARG_NUMERIC()`, which detoasts without
+ * freeing: a `NUMERIC` column carries a 1-byte short header in a tuple, so
+ * that leaked a copy per row on every server version.  Detoasting here instead
+ * puts both allocations somewhere we can release them.
+ *
+ * A number inside a `JSONB` value needs no copy -- it is stored int-aligned
+ * with a full header -- so detoasting returns it unchanged and frees nothing.
+ *
+ * Special values survive the round trip: `numeric_out()` writes `NaN`,
+ * `Infinity` and `-Infinity`, all of which `float8in()` accepts.
+ *
+ * @param arg #Datum of type `Numeric`
+ * @returns @c double value of the numeric
+ */
+static double pljs_numeric_to_double(Datum arg) {
+  Numeric numeric = DatumGetNumeric(arg);
+  char *str = DatumGetCString(
+      DirectFunctionCall1(numeric_out, NumericGetDatum(numeric)));
+  double value =
+      DatumGetFloat8(DirectFunctionCall1(float8in, CStringGetDatum(str)));
+
+  pfree(str);
+  pljs_free_if_detoasted(numeric, arg);
+
+  return value;
+}
+
 /**
  * @brief Makes a copy of a #text type from Postgres and returns a `cstring`.
  *
@@ -389,23 +440,6 @@ JSValue pljs_datum_to_object(pljs_type *type, Datum arg, JSContext *ctx) {
  * @param ctx #JSContext - Javascript context to execute in
  * @returns #JSValue of the array
  */
-/*
- * Free a detoasted copy, if detoasting made one.
- *
- * PG_DETOAST_DATUM() and its relatives return the original pointer when the
- * value was already a plain, uncompressed varlena, and a fresh palloc'd copy
- * otherwise -- when it was compressed, stored out of line, or carrying a
- * 1-byte short header, which is what PostgreSQL uses for any small value in a
- * tuple.  Nothing freed those copies, so converting a short-headered text,
- * array or jsonb column to JavaScript leaked one per row, for the length of
- * the enclosing function call.
- */
-static void pljs_free_if_detoasted(void *detoasted, Datum original) {
-  if (detoasted != NULL && detoasted != DatumGetPointer(original)) {
-    pfree(detoasted);
-  }
-}
-
 JSValue pljs_datum_to_array(pljs_type *type, Datum arg, JSContext *ctx) {
   JSValue array = JS_NewArray(ctx);
   Datum *values;
@@ -560,8 +594,7 @@ JSValue pljs_datum_to_jsvalue(Oid argtype, Datum arg, bool is_null,
     break;
 
   case NUMERICOID:
-    return_result = JS_NewFloat64(
-        ctx, DatumGetFloat8(DirectFunctionCall1(numeric_float8, arg)));
+    return_result = JS_NewFloat64(ctx, pljs_numeric_to_double(arg));
     break;
 
   case TEXTOID:
@@ -1487,9 +1520,8 @@ static JSValue get_jsonb_value(JsonbValue *scalar_value, JSContext *ctx) {
                            scalar_value->val.string.len);
   } else if (scalar_value->type == jbvNumeric) {
     // `Number`.
-    return JS_NewFloat64(
-        ctx, DatumGetFloat8(DirectFunctionCall1(
-                 numeric_float8, PointerGetDatum(scalar_value->val.numeric))));
+    return JS_NewFloat64(ctx, pljs_numeric_to_double(
+                                  PointerGetDatum(scalar_value->val.numeric)));
   } else if (scalar_value->type == jbvBool) {
     // `Bool`.
     return JS_NewBool(ctx, scalar_value->val.boolean);

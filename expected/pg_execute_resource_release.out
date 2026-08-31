@@ -84,6 +84,11 @@ SELECT spi_context_bytes(10000) < spi_context_bytes(100) * 4 AS spi_context_boun
 -- 1-byte short header -- which is what PostgreSQL stores for any small value in
 -- a tuple.  So every row of a small text, array, jsonb, json or bytea column
 -- leaked a copy, while a large value, which is not short-headered, did not.
+--
+-- A number leaked for a second reason, whether it arrived as a NUMERIC column
+-- or inside a JSONB value: the conversion called numeric_float8(), which as of
+-- PostgreSQL 19 frees the string it renders only on its error path.  pljs
+-- renders and frees that string itself now.  Both shapes are covered below.
 CREATE FUNCTION result_context_bytes(n int, q text) RETURNS bigint AS $$
   for (let i = 0; i < n; i++) {
     pljs.execute(q);
@@ -100,7 +105,8 @@ SELECT result_context_bytes(5000, q) < result_context_bytes(100, q) * 4
                ('SELECT ARRAY[1,2,3,4,5] AS v'),
                ('SELECT ''{"a":1,"b":2}''::jsonb AS v'),
                ('SELECT (''{"k":"'' || repeat(''y'', 100) || ''"}'')::json AS v'),
-               ('SELECT repeat(''a'', 120)::bytea AS v')) AS t(q);
+               ('SELECT repeat(''a'', 120)::bytea AS v'),
+               ('SELECT 1.5::numeric AS v')) AS t(q);
  result_context_bounded |                        returning                         
 ------------------------+----------------------------------------------------------
  t                      | SELECT repeat('x', 120)::text AS v
@@ -108,7 +114,8 @@ SELECT result_context_bytes(5000, q) < result_context_bytes(100, q) * 4
  t                      | SELECT '{"a":1,"b":2}'::jsonb AS v
  t                      | SELECT ('{"k":"' || repeat('y', 100) || '"}')::json AS v
  t                      | SELECT repeat('a', 120)::bytea AS v
-(5 rows)
+ t                      | SELECT 1.5::numeric AS v
+(6 rows)
 
 DROP FUNCTION err_cursor, ok_cursor, spi_context_bytes, result_context_bytes;
 DROP TABLE err_t;
