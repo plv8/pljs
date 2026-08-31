@@ -19,8 +19,8 @@
 
 /*
  * PostgreSQL 18 provides pg_noreturn (C11 _Noreturn); earlier versions provide
- * only pg_attribute_noreturn().  GNU attributes may also precede the declaration
- * specifiers, so one spelling works on every supported version.
+ * only pg_attribute_noreturn().  GNU attributes may also precede the
+ * declaration specifiers, so one spelling works on every supported version.
  */
 #ifndef pg_noreturn
 #define pg_noreturn pg_attribute_noreturn()

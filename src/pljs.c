@@ -1222,7 +1222,8 @@ static Datum call_function(FunctionCallInfo fcinfo, pljs_context *context,
        * been registered", which is an unhelpful way to say "you forgot
        * AS (a int, b text)".
        */
-      if (get_call_result_type(fcinfo, &rettype, &tupdesc) != TYPEFUNC_COMPOSITE) {
+      if (get_call_result_type(fcinfo, &rettype, &tupdesc) !=
+          TYPEFUNC_COMPOSITE) {
         ereport(ERROR,
                 (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
                  errmsg("a function returning \"record\" needs a column "
@@ -1478,8 +1479,8 @@ JSValue js_throw_error_data(ErrorData *edata, JSContext *ctx) {
    * The value has always been the five-character string rather than the packed
    * integer -- unpack_sql_state() is applied here -- but the property was named
    * `sqlerrcode`, which is PostgreSQL's internal name for the *packed* form.
-   * Every other PL calls it `sqlstate`, and that is the name a JavaScript author
-   * reaches for:
+   * Every other PL calls it `sqlstate`, and that is the name a JavaScript
+   * author reaches for:
    *
    *     catch (e) { if (e.sqlstate === '23505') ... }
    *
