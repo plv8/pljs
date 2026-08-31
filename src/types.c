@@ -19,6 +19,7 @@
 #include "pljs.h"
 
 #include <string.h>
+#include <time.h>
 
 /*
  * Error handling helper macros for consistent error patterns.
@@ -418,9 +419,25 @@ static JSValue pljs_datum_to_jsvalue_fallback(Datum arg, pljs_type type,
   } else {
     // If this is a variable length type, make a copy of it.
     if (type.length == -1) {
-      ret = JS_NewStringLen(ctx, (char *)VARDATA(arg), VARSIZE_ANY_EXHDR(arg));
+      /*
+       * The datum may be compressed, stored out of line, or carry a 1-byte
+       * short header, so it has to be detoasted before it can be read.
+       * VARDATA() assumes a 4-byte header: pairing it with
+       * VARSIZE_ANY_EXHDR() skipped three bytes into a packed value's payload
+       * and read three bytes past its end.  VARDATA_ANY() is the accessor
+       * that matches VARSIZE_ANY_EXHDR().
+       */
+      struct varlena *vl = PG_DETOAST_DATUM_PACKED(arg);
+
+      ret = JS_NewStringLen(ctx, VARDATA_ANY(vl), VARSIZE_ANY_EXHDR(vl));
       JS_SetPropertyStr(ctx, ret, "length",
-                        JS_NewInt32(ctx, VARSIZE_ANY_EXHDR(arg)));
+                        JS_NewInt32(ctx, VARSIZE_ANY_EXHDR(vl)));
+
+      // Only free what detoasting allocated: an already-unpacked datum is
+      // returned as-is and belongs to the caller.
+      if (vl != (struct varlena *)DatumGetPointer(arg)) {
+        pfree(vl);
+      }
     } else {
       ret = JS_NewStringLen(ctx, (char *)arg, type.length);
       JS_SetPropertyStr(ctx, ret, "length", JS_NewInt32(ctx, type.length));
@@ -1144,7 +1161,7 @@ Datum pljs_jsvalue_to_datum(Oid rettype, JSValue val, bool *is_null,
 
       uint32_t *array_copy = palloc(pbytes_per_element * length);
 
-      for (size_t i = 0; i < pbytes_per_element * length; i++) {
+      for (size_t i = 0; i < length; i++) {
         int32_t in;
 
         JSValue jsval = JS_GetPropertyUint32(ctx, val, i);
