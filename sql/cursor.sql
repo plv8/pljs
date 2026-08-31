@@ -79,3 +79,12 @@ CREATE FUNCTION prep1() RETURNS void AS $$
   }
 $$ LANGUAGE pljs STRICT;
 SELECT prep1();
+
+-- cursor.fetch() invoked through Function.prototype.apply, which reaches
+-- pljs_cursor_fetch() with the cursor as this_val and no arguments.
+DO $$
+  const cur = pljs.prepare('SELECT 42 AS x').cursor();
+  const row = cur.fetch.apply(cur);
+  pljs.elog(NOTICE, 'fetch.apply: ' + JSON.stringify(row));
+  cur.close();
+$$ LANGUAGE pljs;

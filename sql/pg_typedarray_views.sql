@@ -4,14 +4,21 @@
 -- -> bytea path in src/types.c: the copy loop iterated 4*length times while the
 -- destination held only length uint32 slots, overwriting 3*length slots past
 -- the end of the allocation. (The 8- and 16-bit paths already looped over
--- length correctly.) The fix bounds the 32-bit loop by length. This pins the
--- correct little-endian bytes for 8/16/32-bit views, an offset view
--- (new Uint32Array(ab, byteOffset, n)), and that cursor.fetch still works when
--- invoked through Function.prototype.apply.
+-- length correctly.) The fix bounds the 32-bit loop by length.
+--
+-- ta_big() is what actually fails without the fix.  At small lengths palloc
+-- rounds the request up to a chunk with enough slack to absorb the overrun, so
+-- the output stays correct and the corruption is invisible; only past the 8KB
+-- chunk limit does the allocation get its own malloc'd block, where writing
+-- 4MiB into 1MiB runs off the end of the mapping and takes the backend with
+-- it.  The small cases below pin the correct little-endian bytes for the
+-- 8/16/32-bit widths, a zero-length view, and an offset view
+-- (new Uint32Array(ab, byteOffset, n)).
 CREATE FUNCTION ta_u8()  RETURNS bytea LANGUAGE pljs AS $$ return new Uint8Array([1, 2, 3, 255]); $$;
 CREATE FUNCTION ta_u16() RETURNS bytea LANGUAGE pljs AS $$ return new Uint16Array([1, 258]); $$;
 CREATE FUNCTION ta_u32() RETURNS bytea LANGUAGE pljs AS $$ return new Uint32Array([1, 2, 3]); $$;
 CREATE FUNCTION ta_i32() RETURNS bytea LANGUAGE pljs AS $$ return new Int32Array([-1, 256]); $$;
+CREATE FUNCTION ta_nil() RETURNS bytea LANGUAGE pljs AS $$ return new Uint32Array(0); $$;
 CREATE FUNCTION ta_off() RETURNS bytea LANGUAGE pljs AS $$
   const ab = new ArrayBuffer(16);
   const full = new Uint32Array(ab);
@@ -19,16 +26,22 @@ CREATE FUNCTION ta_off() RETURNS bytea LANGUAGE pljs AS $$
   return new Uint32Array(ab, 4, 2);   // view over elements 1,2 only
 $$;
 SELECT ta_u8() AS u8, ta_u16() AS u16, ta_u32() AS u32, ta_i32() AS i32, ta_off() AS off;
+SELECT ta_nil() AS nil, length(ta_nil()) AS nil_len;
 
-DO $$
-  const cur = pljs.prepare('SELECT 42 AS x').cursor();
-  const row = cur.fetch.apply(cur);
-  pljs.elog(NOTICE, 'fetch.apply: ' + JSON.stringify(row));
-  cur.close();
-$$ LANGUAGE pljs;
+-- 1MiB of uint32 slots: pre-fix the loop wrote 4MiB into it and segfaulted the
+-- backend.  Only the length is checked; the point is that the backend survives.
+CREATE FUNCTION ta_big() RETURNS bytea LANGUAGE pljs AS $$
+  return new Uint32Array(262144);
+$$;
+SELECT length(ta_big()) AS big_len;
+
+-- The backend is still alive after the large conversion.
+SELECT 1 AS alive;
 
 DROP FUNCTION ta_u8();
 DROP FUNCTION ta_u16();
 DROP FUNCTION ta_u32();
 DROP FUNCTION ta_i32();
+DROP FUNCTION ta_nil();
 DROP FUNCTION ta_off();
+DROP FUNCTION ta_big();
