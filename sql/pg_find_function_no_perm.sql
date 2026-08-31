@@ -4,11 +4,16 @@
 -- next ereport(ERROR) siglongjmp()'d into freed memory and the whole backend
 -- segfaulted (signal 11).  This test drives that exact sequence and must
 -- complete with a clean error instead of crashing.
-CREATE EXTENSION IF NOT EXISTS pljs;
-
 CREATE FUNCTION ff_secret() RETURNS int LANGUAGE sql AS 'SELECT 42';
 REVOKE ALL ON FUNCTION ff_secret() FROM PUBLIC;
 
+-- Roles are cluster-wide, and this test is built to kill the backend when the
+-- fix is absent -- which skips the DROP ROLE at the bottom and leaves the role
+-- behind.  Drop it up front so the next run is not blocked by the last one.
+-- The notice is silenced so the output does not depend on whether it was there.
+SET client_min_messages = warning;
+DROP ROLE IF EXISTS ff_limited;
+RESET client_min_messages;
 CREATE ROLE ff_limited;
 
 -- Call find_function on a function we lack EXECUTE on (the permission-denied
