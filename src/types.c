@@ -74,6 +74,27 @@ inline static bool Is_Date(JSValueConst obj) {
   return NULL != JS_GetOpaque(obj, JS_CLASS_DATE);
 }
 
+/*
+ * Release a property-name enumeration obtained from JS_GetOwnPropertyNames().
+ *
+ * QuickJS hands the caller both the array and a reference on every atom in it,
+ * and expects both back; its own js_free_prop_enum() is static, so this is the
+ * public-API equivalent.  Without it every enumerated object leaked its keys
+ * for the life of the backend.
+ */
+static void pljs_free_prop_enum(JSContext *ctx, JSPropertyEnum *tab,
+                                uint32_t len) {
+  if (tab == NULL) {
+    return;
+  }
+
+  for (uint32_t i = 0; i < len; i++) {
+    JS_FreeAtom(ctx, tab[i].atom);
+  }
+
+  js_free(ctx, tab);
+}
+
 #if JSONB_DIRECT_CONVERSION
 static JSValue convert_jsonb(JsonbContainer *in, JSContext *ctx);
 static JSValue get_jsonb_value(JsonbValue *scalarVal, JSContext *ctx);
@@ -756,9 +777,13 @@ bool pljs_jsvalue_object_contains_all_column_names(JSValue val, JSContext *ctx,
         *provided_keys = keys.data;
       }
 
+      pljs_free_prop_enum(ctx, tab, object_keys_length);
+
       return false;
     }
   }
+
+  pljs_free_prop_enum(ctx, tab, object_keys_length);
 
   return true;
 }
@@ -1791,6 +1816,8 @@ static JsonbValue *jsonb_object_from_object(JSValue object,
     // Free up the memory.
     JS_FreeValue(ctx, o);
   }
+
+  pljs_free_prop_enum(ctx, tab, object_keys_length);
 
   // Push that we are at the end of an object.
   value = jsonb_push(pstate, WJB_END_OBJECT, NULL);
