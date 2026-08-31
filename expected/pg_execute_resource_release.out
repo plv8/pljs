@@ -1,0 +1,56 @@
+-- Resources acquired while running a query must be released when the query
+-- finishes, whether it succeeded or failed.
+--
+-- Opening a cursor caught its error without rolling anything back.
+-- Planning a statement takes a pg_proc syscache reference across constant
+-- folding, so an error raised while folding escaped past its ReleaseSysCache()
+-- and nothing released it.  It surfaced at the end of the statement as
+-- "WARNING: resource was not closed: cache pg_proc".  The absence of that
+-- warning below is the assertion; pljs.execute() already ran inside a
+-- subtransaction and did not have the problem.
+CREATE FUNCTION err_cursor() RETURNS text AS $$
+  try {
+    pljs.prepare('SELECT 1 / $1::int', ['int']).cursor([0]);
+  } catch (e) {
+    return 'caught: ' + e.message + ' [' + e.sqlstate + ']';
+  }
+  return 'no error';
+$$ LANGUAGE pljs;
+SELECT err_cursor();
+            err_cursor            
+----------------------------------
+ caught: division by zero [22012]
+(1 row)
+
+-- A cursor opened the same way still works, still sees rows written earlier in
+-- the same call, and survives the subtransaction it was opened in.
+CREATE TABLE err_t (i int);
+CREATE FUNCTION ok_cursor() RETURNS text AS $$
+  pljs.execute('INSERT INTO err_t VALUES (1), (2), (3)');
+
+  const c = pljs.prepare('SELECT i FROM err_t ORDER BY i').cursor();
+  const seen = [];
+  let row;
+
+  while ((row = c.fetch())) {
+    seen.push(row.i);
+  }
+
+  c.close();
+
+  return 'fetched ' + JSON.stringify(seen);
+$$ LANGUAGE pljs;
+SELECT ok_cursor();
+    ok_cursor    
+-----------------
+ fetched [1,2,3]
+(1 row)
+
+SELECT count(*) AS rows_committed FROM err_t;
+ rows_committed 
+----------------
+              3
+(1 row)
+
+DROP FUNCTION err_cursor, ok_cursor;
+DROP TABLE err_t;

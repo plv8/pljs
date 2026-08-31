@@ -338,6 +338,15 @@ static JSValue pljs_execute(JSContext *ctx, JSValueConst this_val, int argc,
 
   JSValue ret = pljs_spi_result_to_jsvalue(status, ctx);
 
+  /*
+   * The result rows have been copied into JavaScript values, so the SPI
+   * tuple table is dead weight from here.  It lives in the SPI procedure
+   * context and would otherwise survive until SPI_finish() at the end of the
+   * enclosing function call -- so a function looping over pljs.execute() held
+   * every result set it had ever produced.  plan.execute() already does this.
+   */
+  SPI_freetuptable(SPI_tuptable);
+
   return ret;
 }
 
@@ -381,6 +390,24 @@ static int pljs_execute_params(const char *sql, JSValue params,
 
   param_li = pljs_setup_variable_paramlist(&parstate, values, nulls);
   status = SPI_execute_plan_with_paramlist(plan, param_li, false, 0);
+
+  /*
+   * This plan was prepared for this one call and is not saved, so it belongs
+   * to the SPI procedure context and would otherwise last until SPI_finish().
+   * The result rows are in SPI_tuptable and do not depend on it.
+   */
+  SPI_freeplan(plan);
+
+  /*
+   * Same for the per-call parameter machinery: the parameter list was only
+   * needed for the execution above, and the type array only for building it.
+   * Both were palloc'd per call and outlived it.
+   */
+  pfree(param_li);
+
+  if (parstate.param_types) {
+    pfree(parstate.param_types);
+  }
 
   pfree(values);
   pfree(nulls);
@@ -715,6 +742,8 @@ static JSValue pljs_plan_cursor(JSContext *ctx, JSValueConst this_val, int argc,
   int argcount;
   Portal cursor;
   bool cleanup_params = false;
+  ResourceOwner m_resowner;
+  MemoryContext m_mcontext;
 
   JSValue ptr = JS_GetPropertyStr(ctx, this_val, "plan");
 
@@ -772,8 +801,32 @@ static JSValue pljs_plan_cursor(JSContext *ctx, JSValueConst this_val, int argc,
     nulls[i] = is_null ? 'n' : ' ';
   }
 
+  m_resowner = CurrentResourceOwner;
+  m_mcontext = CurrentMemoryContext;
+
   PG_TRY();
   {
+    if (!IsTransactionOrTransactionBlock()) {
+      ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                      errmsg("transaction lock failure")));
+    }
+
+    /*
+     * Open the cursor inside a subtransaction, the way pljs_execute() runs its
+     * query.  Catching an error without rolling back to a savepoint leaves
+     * whatever the failed operation had acquired attached to the current
+     * resource owner: opening a cursor plans the statement, and the planner
+     * holds a pg_proc syscache reference across constant folding, so an error
+     * raised while folding (SELECT 1/$1 with $1 = 0, say) escaped past its
+     * ReleaseSysCache().  Nothing then released it, and the reference survived
+     * to the end of the statement as
+     * "WARNING: resource was not closed: cache pg_proc".  The rollback below
+     * is what cleans that up.  On success the subtransaction is released and
+     * the portal is reassigned to the parent, so the cursor outlives it.
+     */
+    BeginInternalSubTransaction(NULL);
+    MemoryContextSwitchTo(m_mcontext);
+
     if (plan->parstate) {
       ParamListInfo param_li =
           pljs_setup_variable_paramlist(plan->parstate, values, nulls);
@@ -786,17 +839,30 @@ static JSValue pljs_plan_cursor(JSContext *ctx, JSValueConst this_val, int argc,
 
   PG_CATCH();
   {
-    // Flush the error before returning; see the note in pljs_execute().
+    MemoryContextSwitchTo(m_mcontext);
+
+    ErrorData *edata = CopyErrorData();
     FlushErrorState();
+
+    JSValue error = js_throw_error_data(edata, ctx);
+    FreeErrorData(edata);
+
+    RollbackAndReleaseCurrentSubTransaction();
+    MemoryContextSwitchTo(m_mcontext);
+    CurrentResourceOwner = m_resowner;
 
     if (cleanup_params) {
       JS_FreeValue(ctx, params);
     }
 
-    return js_throw("Error executing", ctx);
+    return error;
   }
 
   PG_END_TRY();
+
+  ReleaseCurrentSubTransaction();
+  MemoryContextSwitchTo(m_mcontext);
+  CurrentResourceOwner = m_resowner;
   JSValue ret = JS_NewObject(ctx);
   JSValue str = JS_NewString(ctx, cursor->name);
   JS_SetPropertyStr(ctx, ret, "name", str);
