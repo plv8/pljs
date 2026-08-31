@@ -389,14 +389,33 @@ JSValue pljs_datum_to_object(pljs_type *type, Datum arg, JSContext *ctx) {
  * @param ctx #JSContext - Javascript context to execute in
  * @returns #JSValue of the array
  */
+/*
+ * Free a detoasted copy, if detoasting made one.
+ *
+ * PG_DETOAST_DATUM() and its relatives return the original pointer when the
+ * value was already a plain, uncompressed varlena, and a fresh palloc'd copy
+ * otherwise -- when it was compressed, stored out of line, or carrying a
+ * 1-byte short header, which is what PostgreSQL uses for any small value in a
+ * tuple.  Nothing freed those copies, so converting a short-headered text,
+ * array or jsonb column to JavaScript leaked one per row, for the length of
+ * the enclosing function call.
+ */
+static void pljs_free_if_detoasted(void *detoasted, Datum original) {
+  if (detoasted != NULL && detoasted != DatumGetPointer(original)) {
+    pfree(detoasted);
+  }
+}
+
 JSValue pljs_datum_to_array(pljs_type *type, Datum arg, JSContext *ctx) {
   JSValue array = JS_NewArray(ctx);
   Datum *values;
   bool *nulls;
   int nelems;
 
-  deconstruct_array(DatumGetArrayTypeP(arg), type->typid, type->length,
-                    type->byval, type->align, &values, &nulls, &nelems);
+  ArrayType *array_value = DatumGetArrayTypeP(arg);
+
+  deconstruct_array(array_value, type->typid, type->length, type->byval,
+                    type->align, &values, &nulls, &nelems);
 
   for (int i = 0; i < nelems; i++) {
     JSValue value =
@@ -410,6 +429,13 @@ JSValue pljs_datum_to_array(pljs_type *type, Datum arg, JSContext *ctx) {
 
   pfree(values);
   pfree(nulls);
+
+  /*
+   * Freed only here: for a by-reference element type, deconstruct_array()
+   * hands back pointers into the array rather than copies, so it has to stay
+   * alive until every element has been converted above.
+   */
+  pljs_free_if_detoasted(array_value, arg);
 
   return array;
 }
@@ -541,29 +567,37 @@ JSValue pljs_datum_to_jsvalue(Oid argtype, Datum arg, bool is_null,
   case TEXTOID:
   case VARCHAROID:
   case BPCHAROID:
-  case XMLOID:
+  case XMLOID: {
     // Get a copy of the string.
-    str = pljs_util_dup_pgtext(DatumGetTextP(arg));
+    text *text_value = DatumGetTextP(arg);
+
+    str = pljs_util_dup_pgtext(text_value);
 
     return_result = JS_NewString(ctx, str);
 
     // Free the memory allocated.
     pfree(str);
+    pljs_free_if_detoasted(text_value, arg);
     break;
+  }
 
   case NAMEOID:
     return_result = JS_NewString(ctx, DatumGetName(arg)->data);
     break;
 
-  case JSONOID:
+  case JSONOID: {
     // Get a copy of the string.
-    str = pljs_util_dup_pgtext(DatumGetTextP(arg));
+    text *json_value = DatumGetTextP(arg);
+
+    str = pljs_util_dup_pgtext(json_value);
 
     return_result = JS_ParseJSON(ctx, str, strlen(str), NULL);
 
     // free the memory allocated.
     pfree(str);
+    pljs_free_if_detoasted(json_value, arg);
     break;
+  }
 
   case JSONBOID: {
 #if JSONB_DIRECT_CONVERSION
@@ -576,6 +610,8 @@ JSValue pljs_datum_to_jsvalue(Oid argtype, Datum arg, bool is_null,
     } else {
       return_result = convert_jsonb(&jsonb->root, ctx);
     }
+
+    pljs_free_if_detoasted(jsonb, arg);
 #else
     // Get the datum.
     Jsonb *jb = DatumGetJsonbP(arg);
@@ -588,6 +624,7 @@ JSValue pljs_datum_to_jsvalue(Oid argtype, Datum arg, bool is_null,
 
     // Free the memory allocated.
     pfree(str);
+    pljs_free_if_detoasted(jb, arg);
 #endif
     break;
   }
@@ -600,6 +637,9 @@ JSValue pljs_datum_to_jsvalue(Oid argtype, Datum arg, bool is_null,
 
     return_result = JS_NewStringLen(ctx, buf, VARSIZE_ANY_EXHDR(p));
     pfree(buf);
+
+    // PG_DETOAST_DATUM_COPY always allocates, so this is never the original.
+    pfree(p);
     break;
   }
 

@@ -11,6 +11,7 @@
 #include "utils/builtins.h"
 #include "utils/elog.h"
 #include "utils/fmgrprotos.h"
+#include "utils/lsyscache.h"
 #include "utils/palloc.h"
 #include "utils/resowner.h"
 #include "windowapi.h"
@@ -164,6 +165,40 @@ void pljs_setup_namespace(JSContext *ctx) {
   JS_SetPropertyStr(ctx, global_obj, "NOTICE", JS_NewInt32(ctx, NOTICE));
   JS_SetPropertyStr(ctx, global_obj, "WARNING", JS_NewInt32(ctx, WARNING));
   JS_SetPropertyStr(ctx, global_obj, "ERROR", JS_NewInt32(ctx, ERROR));
+}
+
+/*
+ * Release the parameter Datums built for one call.
+ *
+ * pljs_jsvalue_to_datum() constructs a fresh value for every pass-by-reference
+ * parameter -- a jsonb, a text, an array -- and nothing owned them once the
+ * query had run.  They are palloc'd in the caller's context, which for a
+ * function looping over pljs.execute() is not reset until that function
+ * returns, so every call's parameters accumulated for the length of the loop.
+ *
+ * SPI copies result tuples into its own context, so nothing points at these
+ * once execution is done.  Pass-by-value parameters own nothing to free, and a
+ * NULL parameter was never converted.
+ */
+static void pljs_free_param_datums(Datum *values, char *nulls, Oid *types,
+                                   int nparams) {
+  if (values == NULL || types == NULL) {
+    return;
+  }
+
+  for (int i = 0; i < nparams; i++) {
+    if (nulls != NULL && nulls[i] == 'n') {
+      continue;
+    }
+
+    if (!OidIsValid(types[i]) || get_typbyval(types[i])) {
+      continue;
+    }
+
+    if (DatumGetPointer(values[i]) != NULL) {
+      pfree(DatumGetPointer(values[i]));
+    }
+  }
 }
 
 /**
@@ -398,6 +433,8 @@ static int pljs_execute_params(const char *sql, JSValue params,
    */
   SPI_freeplan(plan);
 
+  pljs_free_param_datums(values, nulls, parstate.param_types, nparams);
+
   /*
    * Same for the per-call parameter machinery: the parameter list was only
    * needed for the execution above, and the type array only for building it.
@@ -435,6 +472,7 @@ static JSValue pljs_plan_execute(JSContext *ctx, JSValueConst this_val,
   ResourceOwner m_resowner;
   int status;
   bool cleanup_params = false;
+  ParamListInfo paramLI = NULL;
 
   if (argc) {
     if (JS_IsArray(ctx, argv[0])) {
@@ -502,11 +540,8 @@ static JSValue pljs_plan_execute(JSContext *ctx, JSValueConst this_val,
     MemoryContextSwitchTo(m_mcontext);
 
     if (plan->parstate) {
-      ParamListInfo paramLI;
-
       paramLI = pljs_setup_variable_paramlist(plan->parstate, values, nulls);
       status = SPI_execute_plan_with_paramlist(plan->plan, paramLI, false, 0);
-
     } else {
       status = SPI_execute_plan(plan->plan, values, nulls, false, 0);
     }
@@ -527,7 +562,14 @@ static JSValue pljs_plan_execute(JSContext *ctx, JSValueConst this_val,
     CurrentResourceOwner = m_resowner;
 
     if (values) {
+      pljs_free_param_datums(
+          values, nulls, plan->parstate ? plan->parstate->param_types : NULL,
+          nparams);
       pfree(values);
+    }
+
+    if (paramLI) {
+      pfree(paramLI);
     }
 
     if (nulls) {
@@ -552,7 +594,18 @@ static JSValue pljs_plan_execute(JSContext *ctx, JSValueConst this_val,
   SPI_freetuptable(SPI_tuptable);
 
   if (values) {
+    pljs_free_param_datums(values, nulls,
+                           plan->parstate ? plan->parstate->param_types : NULL,
+                           nparams);
     pfree(values);
+  }
+
+  /*
+   * The parameter list is rebuilt for every execution of the plan, so it has
+   * to go with the values it carried.
+   */
+  if (paramLI) {
+    pfree(paramLI);
   }
 
   if (nulls) {

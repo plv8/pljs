@@ -65,5 +65,30 @@ $$ LANGUAGE pljs;
 -- far under the ~1400x this grew by before.
 SELECT spi_context_bytes(10000) < spi_context_bytes(100) * 4 AS spi_context_bounded;
 
-DROP FUNCTION err_cursor, ok_cursor, spi_context_bytes;
+-- Part 3: converting a result back to JavaScript detoasted the value and kept
+-- the copy.  PG_DETOAST_DATUM() returns the original pointer for a plain
+-- varlena but a fresh one for anything compressed, out of line, or carrying a
+-- 1-byte short header -- which is what PostgreSQL stores for any small value in
+-- a tuple.  So every row of a small text, array, jsonb, json or bytea column
+-- leaked a copy, while a large value, which is not short-headered, did not.
+CREATE FUNCTION result_context_bytes(n int, q text) RETURNS bigint AS $$
+  for (let i = 0; i < n; i++) {
+    pljs.execute(q);
+  }
+
+  return pljs.execute(
+    "SELECT sum(total_bytes)::bigint AS b " +
+    "FROM pg_backend_memory_contexts WHERE name LIKE 'SPI%'")[0].b;
+$$ LANGUAGE pljs;
+
+SELECT result_context_bytes(5000, q) < result_context_bytes(100, q) * 4
+         AS result_context_bounded,
+       q AS returning
+  FROM (VALUES ('SELECT repeat(''x'', 120)::text AS v'),
+               ('SELECT ARRAY[1,2,3,4,5] AS v'),
+               ('SELECT ''{"a":1,"b":2}''::jsonb AS v'),
+               ('SELECT (''{"k":"'' || repeat(''y'', 100) || ''"}'')::json AS v'),
+               ('SELECT repeat(''a'', 120)::bytea AS v')) AS t(q);
+
+DROP FUNCTION err_cursor, ok_cursor, spi_context_bytes, result_context_bytes;
 DROP TABLE err_t;
