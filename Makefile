@@ -41,7 +41,8 @@ REGRESS = init-extension function json jsonb json_conv types bytea context \
 	trigger procedure find_function start_proc window regressions \
 	currentresource \
 	pg_typedarray_views \
-	pg_find_function_no_perm
+	pg_find_function_no_perm \
+	pg_caught_error_stack
 
 all: deps/quickjs/quickjs.h deps/quickjs/libquickjs.a pljs--$(PLJS_VERSION).sql
 

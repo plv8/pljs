@@ -296,8 +296,19 @@ static JSValue pljs_execute(JSContext *ctx, JSValueConst this_val, int argc,
   {
     MemoryContextSwitchTo(m_mcontext);
 
+    /*
+     * The error has to be flushed before anything else runs: PG_CATCH() only
+     * restores PG_exception_stack, it does not pop the errordata stack.
+     * Returning without FlushErrorState() leaks a slot out of the five
+     * ERRORDATA_STACK_SIZE has, and the sixth caught error PANICs the backend.
+     * CopyErrorData() runs first, and in m_mcontext, so the message survives
+     * the reset of ErrorContext.
+     */
     ErrorData *edata = CopyErrorData();
+    FlushErrorState();
+
     JSValue error = js_throw(edata->message, ctx);
+    FreeErrorData(edata);
 
     RollbackAndReleaseCurrentSubTransaction();
     MemoryContextSwitchTo(m_mcontext);
@@ -475,8 +486,13 @@ static JSValue pljs_plan_execute(JSContext *ctx, JSValueConst this_val,
   PG_CATCH();
   {
     MemoryContextSwitchTo(m_mcontext);
+
+    // See pljs_execute(): flush before the rollback, copy the message first.
     ErrorData *edata = CopyErrorData();
+    FlushErrorState();
+
     JSValue error = js_throw(edata->message, ctx);
+    FreeErrorData(edata);
 
     RollbackAndReleaseCurrentSubTransaction();
     CurrentResourceOwner = m_resowner;
@@ -631,6 +647,13 @@ static JSValue pljs_prepare(JSContext *ctx, JSValueConst this_val, int argc,
 
   PG_CATCH();
   {
+    /*
+     * PG_CATCH() restores PG_exception_stack but does not pop the errordata
+     * stack; without FlushErrorState() each caught error leaks one of the five
+     * ERRORDATA_STACK_SIZE slots and the sixth PANICs the backend.
+     */
+    FlushErrorState();
+
     if (cleanup_params) {
       JS_FreeValue(ctx, params);
     }
@@ -759,6 +782,9 @@ static JSValue pljs_plan_cursor(JSContext *ctx, JSValueConst this_val, int argc,
 
   PG_CATCH();
   {
+    // Flush the error before returning; see the note in pljs_execute().
+    FlushErrorState();
+
     if (cleanup_params) {
       JS_FreeValue(ctx, params);
     }
@@ -819,6 +845,9 @@ static JSValue pljs_plan_cursor_fetch(JSContext *ctx, JSValueConst this_val,
   }
   PG_CATCH();
   {
+    // Flush the error before returning; see the note in pljs_execute().
+    FlushErrorState();
+
     SPI_rollback();
     SPI_finish();
     return js_throw("Unable to fetch", ctx);
@@ -885,6 +914,9 @@ static JSValue pljs_plan_cursor_move(JSContext *ctx, JSValueConst this_val,
   }
   PG_CATCH();
   {
+    // Flush the error before returning; see the note in pljs_execute().
+    FlushErrorState();
+
     return js_throw("Unable to fetch", ctx);
   }
   PG_END_TRY();
@@ -919,6 +951,9 @@ static JSValue pljs_plan_cursor_close(JSContext *ctx, JSValueConst this_val,
   }
   PG_CATCH();
   {
+    // Flush the error before returning; see the note in pljs_execute().
+    FlushErrorState();
+
     SPI_rollback();
     SPI_finish();
     return js_throw("Unable to close cursor", ctx);
@@ -957,6 +992,9 @@ static JSValue pljs_commit(JSContext *ctx, JSValueConst this_val, int argc,
   }
   PG_CATCH();
   {
+    // Flush the error before returning; see the note in pljs_execute().
+    FlushErrorState();
+
     return js_throw("Unable to commit", ctx);
   }
   PG_END_TRY();
@@ -981,6 +1019,9 @@ static JSValue pljs_rollback(JSContext *ctx, JSValueConst this_val, int argc,
   }
   PG_CATCH();
   {
+    // Flush the error before returning; see the note in pljs_execute().
+    FlushErrorState();
+
     return js_throw("Unable to rollback", ctx);
   }
   PG_END_TRY();
@@ -1032,6 +1073,9 @@ static JSValue pljs_find_function(JSContext *ctx, JSValueConst this_val,
   }
   PG_CATCH();
   {
+    // Flush the error before returning; see the note in pljs_execute().
+    FlushErrorState();
+
     StringInfoData str;
     initStringInfo(&str);
     appendStringInfo(&str, "javascript function is not found for \"%s\"",
@@ -1137,6 +1181,9 @@ static JSValue pljs_window_get_partition_local(JSContext *ctx,
   }
   PG_CATCH();
   {
+    // Flush the error before returning; see the note in pljs_execute().
+    FlushErrorState();
+
     return js_throw("Unable to retrieve window storage", ctx);
   }
   PG_END_TRY();
