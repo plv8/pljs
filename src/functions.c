@@ -437,6 +437,15 @@ static int pljs_execute_params(const char *sql, JSValue params,
   {
     plan = SPI_prepare_params(sql, pljs_variable_param_setup, &parstate, 0);
 
+    /*
+     * Every SPI entry point returns with CurrentMemoryContext set to the SPI
+     * procedure context, not to what the caller had.  Re-enter the child
+     * context so the parameter datums and the ParamListInfo built below land
+     * in it and are released with it; otherwise they accumulate in the SPI
+     * procedure context for the life of the enclosing function call.
+     */
+    MemoryContextSwitchTo(parm_cxt);
+
     if (parstate.nparams != nparams) {
       ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
                       errmsg("parameter count mismatch: %d != %d",
