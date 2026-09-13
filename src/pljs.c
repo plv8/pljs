@@ -395,18 +395,19 @@ static int interrupt_handler(JSRuntime *rt, void *opaque) {
    * (see the JS_IsException paths below).
    */
   /*
-   * QueryCancelPending and ProcDiePending are the two that matter most, and are
-   * kept as an explicit fast path.  InterruptPending then catches everything else
-   * PostgreSQL considers worth interrupting for -- ClientConnectionLost, recovery
-   * conflicts, IdleInTransactionSessionTimeoutPending -- so a runaway script
-   * unwinds for those too rather than spinning until one of the first two happens
-   * to be set.
-   *
-   * A spurious wake-up is harmless: the caller runs CHECK_FOR_INTERRUPTS() once
-   * control is back in C, and if nothing is actually pending that is a no-op and
-   * the JavaScript exception is reported normally.
+   * Only the flags that mean "this query must stop": a cancel, a backend
+   * termination, or a lost client.  A recovery conflict sets one of the first
+   * two itself.  InterruptPending is deliberately NOT consulted: PostgreSQL sets
+   * it for many things that do not end the query -- a sinval catchup, a
+   * ProcSignal barrier, pg_log_backend_memory_contexts(), a NOTIFY wake-up --
+   * and once QuickJS has aborted the script there is no way back: the caller's
+   * CHECK_FOR_INTERRUPTS() handles the benign interrupt and returns, and the
+   * function then fails with "interrupted" for no reason.  With InterruptPending
+   * in the condition, pg_object_keys_leak failed on every run on PostgreSQL 18
+   * and any long-running pljs function died when another session called
+   * pg_log_backend_memory_contexts() on it.
    */
-  return (QueryCancelPending || ProcDiePending || InterruptPending) ? 1 : 0;
+  return (QueryCancelPending || ProcDiePending || ClientConnectionLost) ? 1 : 0;
 }
 
 /**
