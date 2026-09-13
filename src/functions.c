@@ -857,6 +857,8 @@ static JSValue pljs_prepare(JSContext *ctx, JSValueConst this_val, int argc,
     parstate->memory_context = CacheMemoryContext;
   }
 
+  MemoryContext m_mcontext = CurrentMemoryContext;
+
   PG_TRY();
   {
     if (parstate) {
@@ -872,11 +874,20 @@ static JSValue pljs_prepare(JSContext *ctx, JSValueConst this_val, int argc,
   PG_CATCH();
   {
     /*
+     * errfinish() leaves CurrentMemoryContext set to ErrorContext and expects
+     * the handler to reset it.  Without this switch the JavaScript function
+     * carried on running in ErrorContext after a caught prepare failure, and
+     * the next caught error copied its ErrorData there, flushed it, and read
+     * the freed copy -- two more caught pljs.execute() failures segfaulted
+     * the backend.
+     *
      * PG_CATCH() restores PG_exception_stack but does not pop the errordata
      * stack; without FlushErrorState() each caught error leaks one of the five
      * ERRORDATA_STACK_SIZE slots and the sixth PANICs the backend.
      */
+    MemoryContextSwitchTo(m_mcontext);
     FlushErrorState();
+
     if (parstate) {
       if (parstate->param_types) {
         pfree(parstate->param_types);
