@@ -12,8 +12,8 @@
 #include "utils/elog.h"
 #include "utils/fmgrprotos.h"
 #include "utils/lsyscache.h"
-#include "utils/palloc.h"
 #include "utils/memutils.h"
+#include "utils/palloc.h"
 #include "utils/resowner.h"
 #include "windowapi.h"
 
@@ -539,7 +539,8 @@ static const JSClassDef pljs_plan_handle_class = {
 
 void pljs_register_js_classes(JSRuntime *runtime) {
   JS_NewClassID(&js_prepared_statement_handle_id);
-  JS_NewClass(runtime, js_prepared_statement_handle_id, &pljs_plan_handle_class);
+  JS_NewClass(runtime, js_prepared_statement_handle_id,
+              &pljs_plan_handle_class);
 }
 
 /**
@@ -639,8 +640,8 @@ static JSValue pljs_plan_execute(JSContext *ctx, JSValueConst this_val,
       bool is_null;
 
       values[i] = pljs_jsvalue_to_datum(
-          plan->parstate ? plan->parstate->param_types[i] : 0, param,
-          &is_null, ctx, NULL);
+          plan->parstate ? plan->parstate->param_types[i] : 0, param, &is_null,
+          ctx, NULL);
       nulls[i] = is_null ? 'n' : ' ';
 
       JS_FreeValue(ctx, param);
@@ -1046,8 +1047,8 @@ static JSValue pljs_plan_cursor(JSContext *ctx, JSValueConst this_val, int argc,
       bool is_null;
 
       values[i] = pljs_jsvalue_to_datum(
-          plan->parstate ? plan->parstate->param_types[i] : 0, param,
-          &is_null, ctx, NULL);
+          plan->parstate ? plan->parstate->param_types[i] : 0, param, &is_null,
+          ctx, NULL);
       nulls[i] = is_null ? 'n' : ' ';
 
       JS_FreeValue(ctx, param);
@@ -1537,8 +1538,8 @@ static JSValue pljs_find_function(JSContext *ctx, JSValueConst this_val,
  *
  * @returns #JSValue containing `undefined`
  */
-static JSValue pljs_return_next_internal(JSContext *ctx, JSValueConst this_val, int argc,
-                                JSValueConst *argv) {
+static JSValue pljs_return_next_internal(JSContext *ctx, JSValueConst this_val,
+                                         int argc, JSValueConst *argv) {
   pljs_storage *storage = pljs_storage_for_context(ctx);
 
   pljs_return_state *retstate = storage->return_state;
@@ -1652,7 +1653,8 @@ static JSValue pljs_return_next_internal(JSContext *ctx, JSValueConst this_val, 
         if (JS_GetOwnPropertyNames(ctx, &props, &nprops, argv[0],
                                    JS_GPN_STRING_MASK | JS_GPN_ENUM_ONLY) ==
             0) {
-          /* Prefer the column's own name whenever the descriptor carries one. */
+          /* Prefer the column's own name whenever the descriptor carries one.
+           */
           if (colname != NULL && colname[0] != '\0') {
             for (uint32_t i = 0; i < nprops; i++) {
               const char *name = JS_AtomToCString(ctx, props[i].atom);
@@ -1740,10 +1742,10 @@ static JSValue pljs_return_next_internal(JSContext *ctx, JSValueConst this_val, 
  * called, so QuickJS has live JSStackFrame structures on the C stack between us
  * and the interpreter, linked from the runtime.  An ereport(ERROR) here
  * siglongjmps straight past them, leaving rt->current_stack_frame pointing at
- * frames that no longer exist.  The session then looks fine until anything walks
- * that list -- which is what constructing an Error does, via build_backtrace --
- * so a later, completely unrelated `throw new Error(...)`, typically in a
- * trigger, segfaults the backend:
+ * frames that no longer exist.  The session then looks fine until anything
+ * walks that list -- which is what constructing an Error does, via
+ * build_backtrace -- so a later, completely unrelated `throw new Error(...)`,
+ * typically in a trigger, segfaults the backend:
  *
  *     build_backtrace <- js_error_constructor <- JS_Call <- call_trigger
  *
@@ -1761,8 +1763,8 @@ static JSValue pljs_return_next(JSContext *ctx, JSValueConst this_val, int argc,
   PG_TRY();
   {
     /*
-     * NB: assign, do not return, from inside PG_TRY -- a return here would leave
-     * PG_exception_stack pointing at this frame's dead sigjmp_buf.
+     * NB: assign, do not return, from inside PG_TRY -- a return here would
+     * leave PG_exception_stack pointing at this frame's dead sigjmp_buf.
      */
     result = pljs_return_next_internal(ctx, this_val, argc, argv);
   }
@@ -1783,7 +1785,6 @@ static JSValue pljs_return_next(JSContext *ctx, JSValueConst this_val, int argc,
 
   return result;
 }
-
 
 /**
  * @brief Javascript function `window.get_partition_local`.
@@ -2246,10 +2247,11 @@ static JSValue pljs_subtransaction(JSContext *ctx, JSValueConst this_val,
 
   /*
    * A PostgreSQL error must not escape this function.  pljs.subtransaction() is
-   * a C function that QuickJS called, so an ereport(ERROR) here siglongjmps past
-   * QuickJS's live stack frames and leaves the runtime's frame list pointing at
-   * dead ones; the session then crashes later, in whatever next builds an
-   * Error's backtrace.  See pljs_return_next() for the full mechanism.
+   * a C function that QuickJS called, so an ereport(ERROR) here siglongjmps
+   * past QuickJS's live stack frames and leaves the runtime's frame list
+   * pointing at dead ones; the session then crashes later, in whatever next
+   * builds an Error's backtrace.  See pljs_return_next() for the full
+   * mechanism.
    *
    * BeginInternalSubTransaction() and ReleaseCurrentSubTransaction() both raise
    * in ordinary operation, so this needs no bad input to reach.
@@ -2282,7 +2284,8 @@ static JSValue pljs_subtransaction(JSContext *ctx, JSValueConst this_val,
     /*
      * A failure while committing or rolling the subtransaction back leaves no
      * valid state to resume into, exactly as for pljs.commit(): re-throw rather
-     * than handing back a catchable exception and letting the function continue.
+     * than handing back a catchable exception and letting the function
+     * continue.
      */
     if (stage == 2) {
       CurrentResourceOwner = m_resowner;

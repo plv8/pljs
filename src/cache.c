@@ -54,14 +54,14 @@ void pljs_cache_init(void) {
  *
  * Used when a function is created or replaced, so the next call recompiles it.
  *
- * The alternative -- pljs_cache_reset() -- destroys every per-user JSContext and
- * rebuilds it on the next call.  JS_FreeContext() will not free a context that
- * still has live references into it, so the old one is not necessarily reclaimed,
- * and a backend doing repeated DDL grows without bound.  Removing a single entry
- * keeps every JSContext alive and owned, so nothing is orphaned and nothing
- * dangles -- including when the DDL is executed from inside a running pljs
- * function via pljs.execute(), where freeing the context we are executing in
- * would be fatal.
+ * The alternative -- pljs_cache_reset() -- destroys every per-user JSContext
+ * and rebuilds it on the next call.  JS_FreeContext() will not free a context
+ * that still has live references into it, so the old one is not necessarily
+ * reclaimed, and a backend doing repeated DDL grows without bound.  Removing a
+ * single entry keeps every JSContext alive and owned, so nothing is orphaned
+ * and nothing dangles -- including when the DDL is executed from inside a
+ * running pljs function via pljs.execute(), where freeing the context we are
+ * executing in would be fatal.
  *
  * @param fn_oid #Oid - the function whose compiled form is now stale
  */
@@ -75,8 +75,8 @@ void pljs_cache_function_remove(Oid fn_oid) {
 
   hash_seq_init(&status, pljs_context_HashTable);
 
-  while ((ctx_hvalue =
-              (pljs_context_cache_value *)hash_seq_search(&status)) != NULL) {
+  while ((ctx_hvalue = (pljs_context_cache_value *)hash_seq_search(&status)) !=
+         NULL) {
     bool found = false;
     pljs_function_cache_value *value;
 
@@ -123,8 +123,8 @@ void pljs_cache_reset(void) {
   if (pljs_context_HashTable != NULL) {
     hash_seq_init(&status, pljs_context_HashTable);
 
-    while ((ctx_hvalue = (pljs_context_cache_value *)hash_seq_search(&status)) !=
-           NULL) {
+    while ((ctx_hvalue =
+                (pljs_context_cache_value *)hash_seq_search(&status)) != NULL) {
       if (ctx_hvalue->function_hash_table != NULL) {
         HASH_SEQ_STATUS fstatus;
         pljs_function_cache_value *value;

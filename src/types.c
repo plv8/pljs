@@ -478,8 +478,8 @@ JSValue pljs_datum_to_array(pljs_type *type, Datum arg, JSContext *ctx) {
                        "JavaScript arrays.")));
   }
 
-  deconstruct_array(array_value, type->typid, type->length, type->byval, type->align,
-                    &values, &nulls, &nelems);
+  deconstruct_array(array_value, type->typid, type->length, type->byval,
+                    type->align, &values, &nulls, &nelems);
 
   for (int i = 0; i < nelems; i++) {
     JSValue value =
@@ -1022,7 +1022,8 @@ Datum pljs_jsvalue_to_record(pljs_type *type, JSValue val, bool *is_null,
 
     JSValue o = JS_GetPropertyStr(ctx, val, colname);
 
-    /* Owned reference: release it on both paths.  See pljs_jsvalue_to_datums(). */
+    /* Owned reference: release it on both paths.  See pljs_jsvalue_to_datums().
+     */
     if (JS_IsNull(o) || JS_IsUndefined(o)) {
       nulls[c] = true;
       JS_FreeValue(ctx, o);
@@ -1200,14 +1201,14 @@ static Datum pljs_string_to_datum_via_input(Oid typid, JSValueConst val,
  * @brief Raises the standard out-of-range error for an integer target type.
  */
 static void pljs_int_out_of_range(Oid typid) {
-  ereport(ERROR, (errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
-                  errmsg("value is out of range for type %s",
-                         format_type_be(typid))));
+  ereport(ERROR,
+          (errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+           errmsg("value is out of range for type %s", format_type_be(typid))));
 }
 
 /**
- * @brief Converts a JavaScript number to an integer, rejecting values the target
- * type cannot represent.
+ * @brief Converts a JavaScript number to an integer, rejecting values the
+ * target type cannot represent.
  *
  * QuickJS's JS_ToInt32/JS_ToInt64 wrap modulo the word size, so 2147483648
  * silently became -2147483648, 40000 became -25536 for a smallint, and NaN and
@@ -1233,9 +1234,9 @@ static int64 pljs_number_to_int_checked(JSContext *ctx, JSValueConst val,
   }
 
   if (isnan(d)) {
-    ereport(ERROR, (errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
-                    errmsg("cannot convert NaN to type %s",
-                           format_type_be(typid))));
+    ereport(ERROR,
+            (errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+             errmsg("cannot convert NaN to type %s", format_type_be(typid))));
   }
 
   if (isinf(d)) {
@@ -1333,19 +1334,18 @@ Datum pljs_jsvalue_to_datum(Oid rettype, JSValue val, bool *is_null,
    * json/jsonb.
    *
    * This dispatched into the array conversion anyway, because the condition
-   * above used to read "not json/jsonb", which is true of every scalar. It built
-   * an array Datum and returned it as the scalar. For a *nested* array that is
-   * silent corruption rather than an error: the element loop converts each
-   * element to the element type, so `return [[1,2],[3,4]]` for int[] yielded
-   * {357119344,357119392} -- the ArrayType pointers of the two inner arrays,
-   * reinterpreted as int4.
+   * above used to read "not json/jsonb", which is true of every scalar. It
+   * built an array Datum and returned it as the scalar. For a *nested* array
+   * that is silent corruption rather than an error: the element loop converts
+   * each element to the element type, so `return [[1,2],[3,4]]` for int[]
+   * yielded {357119344,357119392} -- the ArrayType pointers of the two inner
+   * arrays, reinterpreted as int4.
    *
    * The other direction already refuses a multidimensional array with a clear
    * message. This makes the output direction agree, rather than producing
    * numbers that look like data.
    */
-  if (JS_IsArray(ctx, val) && type.typid != JSONOID &&
-      type.typid != JSONBOID) {
+  if (JS_IsArray(ctx, val) && type.typid != JSONOID && type.typid != JSONBOID) {
     ereport(ERROR,
             (errcode(ERRCODE_DATATYPE_MISMATCH),
              errmsg("cannot convert a JavaScript array to %s",
@@ -1519,12 +1519,12 @@ Datum pljs_jsvalue_to_datum(Oid rettype, JSValue val, bool *is_null,
   case NAMEOID: {
     /*
      * `name` is a fixed-length NameData -- NAMEDATALEN bytes, no varlena header
-     * -- so it cannot be built the way text/varchar/bpchar are below. Doing that
-     * writes a varlena length word into the first bytes of the name, and every
-     * comparison against a real name then reads that as characters: a catalog
-     * lookup by nspname, relname or typname matches nothing at all, silently.
-     * namein() lays the value out correctly and applies the truncation rule for
-     * anything longer than NAMEDATALEN - 1.
+     * -- so it cannot be built the way text/varchar/bpchar are below. Doing
+     * that writes a varlena length word into the first bytes of the name, and
+     * every comparison against a real name then reads that as characters: a
+     * catalog lookup by nspname, relname or typname matches nothing at all,
+     * silently. namein() lays the value out correctly and applies the
+     * truncation rule for anything longer than NAMEDATALEN - 1.
      */
     const char *str = JS_ToCString(ctx, val);
     Datum ret;
@@ -1758,8 +1758,8 @@ Datum pljs_jsvalue_to_datum(Oid rettype, JSValue val, bool *is_null,
       /*
        * An invalid Date -- one whose getTime() is NaN -- has no epoch to
        * convert. It is not an exotic thing to hold: reading
-       * 'infinity'::timestamptz back into JavaScript produces exactly that, so a
-       * read-modify-write of a row with an infinite timestamp reaches here.
+       * 'infinity'::timestamptz back into JavaScript produces exactly that, so
+       * a read-modify-write of a row with an infinite timestamp reaches here.
        *
        * The arithmetic below turns NaN into a finite number, and the value
        * stored was 2000-01-01 -- the PostgreSQL epoch, i.e. an offset of zero.
