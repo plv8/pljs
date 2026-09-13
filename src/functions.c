@@ -592,28 +592,15 @@ static JSValue pljs_plan_execute(JSContext *ctx, JSValueConst this_val,
     argcount = SPI_getargcount(plan->plan);
   }
 
-  if (argcount != nparams) {
-    ereport(ERROR,
-            (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-             errmsg("plan expected %d arguments but %d were passed instead",
-                    argcount, nparams)));
-  }
-
+  /*
+   * Zero the values and mark every slot NULL up front: the conversion below
+   * runs under PG_TRY, and a slot the loop never reached must look like a
+   * NULL to the release path in PG_CATCH rather than like a datum to pfree.
+   */
   if (nparams > 0) {
-    values = palloc(sizeof(Datum) * nparams);
-    nulls = palloc((sizeof(char) * nparams));
-  }
-
-  for (int i = 0; i < nparams; i++) {
-    JSValue param = JS_GetPropertyUint32(ctx, params, i);
-    bool is_null;
-
-    values[i] = pljs_jsvalue_to_datum(
-        plan->parstate ? plan->parstate->param_types[i] : 0, param, &is_null,
-        ctx, NULL);
-    nulls[i] = is_null ? 'n' : ' ';
-
-    JS_FreeValue(ctx, param);
+    values = palloc0(sizeof(Datum) * nparams);
+    nulls = palloc(sizeof(char) * nparams);
+    memset(nulls, 'n', nparams);
   }
 
   m_resowner = CurrentResourceOwner;
@@ -628,6 +615,36 @@ static JSValue pljs_plan_execute(JSContext *ctx, JSValueConst this_val,
 
     BeginInternalSubTransaction(NULL);
     MemoryContextSwitchTo(m_mcontext);
+
+    /*
+     * The argument-count check and the bind-parameter conversion run inside
+     * the PG_TRY, not before it.  Both can raise -- and since the conversion
+     * layer rejects an out-of-range number, a bad boolean string, an embedded
+     * NUL or a nested array, they raise for ordinary bad input.  This is a C
+     * function QuickJS called: an ereport that escapes it siglongjmps past the
+     * interpreter's live frames and the next Error built in the session
+     * (return_next's, for one) walks that dead list and segfaults.  Caught
+     * here, they become ordinary JavaScript exceptions like every other error
+     * from plan.execute().
+     */
+    if (argcount != nparams) {
+      ereport(ERROR,
+              (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+               errmsg("plan expected %d arguments but %d were passed instead",
+                      argcount, nparams)));
+    }
+
+    for (int i = 0; i < nparams; i++) {
+      JSValue param = JS_GetPropertyUint32(ctx, params, i);
+      bool is_null;
+
+      values[i] = pljs_jsvalue_to_datum(
+          plan->parstate ? plan->parstate->param_types[i] : 0, param,
+          &is_null, ctx, NULL);
+      nulls[i] = is_null ? 'n' : ' ';
+
+      JS_FreeValue(ctx, param);
+    }
 
     if (plan->parstate) {
       paramLI = pljs_setup_variable_paramlist(plan->parstate, values, nulls);
@@ -947,13 +964,8 @@ static JSValue pljs_plan_cursor(JSContext *ctx, JSValueConst this_val, int argc,
   JS_FreeValue(ctx, ptr);
 
   if (plan == NULL || plan->plan == NULL) {
-    StringInfoData buf;
-
-    initStringInfo(&buf);
-    appendStringInfo(&buf, "plan unexpectedly null");
-    ereport(ERROR, errcode(ERRCODE_UNDEFINED_OBJECT), errmsg("%s", buf.data));
-
-    return JS_UNDEFINED;
+    /* A JavaScript exception, not an ereport: see the note in the PG_TRY. */
+    return js_throw("plan unexpectedly null", ctx);
   }
 
   if (argc) {
@@ -974,29 +986,15 @@ static JSValue pljs_plan_cursor(JSContext *ctx, JSValueConst this_val, int argc,
     argcount = SPI_getargcount(plan->plan);
   }
 
-  if (argcount != nparams) {
-    ereport(ERROR,
-            (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-             errmsg("plan expected %d arguments but %d were passed instead",
-                    argcount, nparams)));
-  }
-
+  /*
+   * Zero the values and mark every slot NULL up front: the conversion below
+   * runs under PG_TRY, and a slot the loop never reached must look like a
+   * NULL to the release path in PG_CATCH rather than like a datum to pfree.
+   */
   if (nparams > 0) {
-    values = palloc(sizeof(Datum) * nparams);
-    nulls = palloc((sizeof(char) * nparams));
-  }
-
-  for (int i = 0; i < nparams; i++) {
-    JSValue param = JS_GetPropertyUint32(ctx, params, i);
-    bool is_null;
-
-    values[i] = pljs_jsvalue_to_datum(
-        plan->parstate ? plan->parstate->param_types[i] : 0, param, &is_null,
-        ctx, NULL);
-    nulls[i] = is_null ? 'n' : ' ';
-
-    /* plan.execute() frees its params; this path leaked one ref per bind. */
-    JS_FreeValue(ctx, param);
+    values = palloc0(sizeof(Datum) * nparams);
+    nulls = palloc(sizeof(char) * nparams);
+    memset(nulls, 'n', nparams);
   }
 
   m_resowner = CurrentResourceOwner;
@@ -1024,6 +1022,36 @@ static JSValue pljs_plan_cursor(JSContext *ctx, JSValueConst this_val, int argc,
      */
     BeginInternalSubTransaction(NULL);
     MemoryContextSwitchTo(m_mcontext);
+
+    /*
+     * The argument-count check and the bind-parameter conversion run inside
+     * the PG_TRY, not before it.  Both can raise -- and since the conversion
+     * layer rejects an out-of-range number, a bad boolean string, an embedded
+     * NUL or a nested array, they raise for ordinary bad input.  This is a C
+     * function QuickJS called: an ereport that escapes it siglongjmps past the
+     * interpreter's live frames and the next Error built in the session
+     * (return_next's, for one) walks that dead list and segfaults.  Caught
+     * here, they become ordinary JavaScript exceptions like every other error
+     * from plan.cursor().
+     */
+    if (argcount != nparams) {
+      ereport(ERROR,
+              (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+               errmsg("plan expected %d arguments but %d were passed instead",
+                      argcount, nparams)));
+    }
+
+    for (int i = 0; i < nparams; i++) {
+      JSValue param = JS_GetPropertyUint32(ctx, params, i);
+      bool is_null;
+
+      values[i] = pljs_jsvalue_to_datum(
+          plan->parstate ? plan->parstate->param_types[i] : 0, param,
+          &is_null, ctx, NULL);
+      nulls[i] = is_null ? 'n' : ' ';
+
+      JS_FreeValue(ctx, param);
+    }
 
     if (plan->parstate) {
       ParamListInfo param_li =
