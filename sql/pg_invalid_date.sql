@@ -1,0 +1,65 @@
+-- An invalid JavaScript Date must become SQL NULL, not a real date.
+--
+-- `new Date(NaN)` -- and anything else whose getTime() is NaN -- has no epoch to
+-- convert. The conversion read it as a double and did the epoch arithmetic
+-- anyway, and NaN came out the far side as a finite value: 2000-01-01, the
+-- PostgreSQL epoch, an offset of zero. A caller holding no date at all stored a
+-- specific one, with nothing reported.
+--
+-- This is reachable without constructing NaN by hand: an infinite timestamp read
+-- back into JavaScript *is* an invalid Date, so a read-modify-write of such a row
+-- lands here.
+CREATE EXTENSION IF NOT EXISTS pljs;
+
+-- Bound as a parameter.
+CREATE FUNCTION idt_bind_ts() RETURNS text AS $$
+  const v = pljs.execute('SELECT $1::timestamptz AS v', [new Date(NaN)])[0].v;
+  return v === null ? 'NULL' : String(v);
+$$ LANGUAGE pljs;
+
+SELECT idt_bind_ts() AS bound_timestamptz;
+
+CREATE FUNCTION idt_bind_date() RETURNS text AS $$
+  const v = pljs.execute('SELECT $1::date AS v', [new Date(NaN)])[0].v;
+  return v === null ? 'NULL' : String(v);
+$$ LANGUAGE pljs;
+
+SELECT idt_bind_date() AS bound_date;
+
+-- Returned from a function.
+CREATE FUNCTION idt_return() RETURNS timestamptz AS $$ return new Date(NaN); $$ LANGUAGE pljs;
+
+SELECT idt_return() IS NULL AS returned_is_null;
+
+-- As a composite column, which reaches the conversion with no fcinfo.
+CREATE TYPE idt_row AS (ts timestamptz, n int);
+
+CREATE FUNCTION idt_composite() RETURNS idt_row AS $$
+  return { ts: new Date(NaN), n: 1 };
+$$ LANGUAGE pljs;
+
+SELECT (idt_composite()).ts IS NULL AS composite_is_null, (idt_composite()).n AS n;
+
+-- The route in that does not involve writing NaN by hand: an infinite timestamp
+-- read into JavaScript is an invalid Date, and writing it back must not invent
+-- 2000-01-01.
+CREATE FUNCTION idt_roundtrip() RETURNS text AS $$
+  const d = pljs.execute("SELECT 'infinity'::timestamptz AS v")[0].v;
+  const back = pljs.execute('SELECT $1::timestamptz AS v', [d])[0].v;
+  return 'read=' + (d instanceof Date ? (isNaN(d.getTime()) ? 'invalid Date' : String(d))
+                                      : typeof d) +
+         ' wrote=' + (back === null ? 'NULL' : String(back));
+$$ LANGUAGE pljs;
+
+SELECT idt_roundtrip() AS infinity_roundtrip;
+
+-- A valid Date is unaffected, in both directions.
+CREATE FUNCTION idt_valid() RETURNS text AS $$
+  const v = pljs.execute('SELECT $1::timestamptz AS v', [new Date(Date.UTC(2020, 0, 2, 3, 4, 5))])[0].v;
+  return v instanceof Date ? v.toISOString() : String(v);
+$$ LANGUAGE pljs;
+
+SELECT idt_valid() AS valid_date_roundtrip;
+
+DROP FUNCTION idt_bind_ts, idt_bind_date, idt_return, idt_composite, idt_roundtrip, idt_valid;
+DROP TYPE idt_row;

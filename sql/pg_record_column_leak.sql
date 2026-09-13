@@ -1,0 +1,59 @@
+-- Regression: the composite/record column loop leaked one QuickJS reference per
+-- column, per row.
+--
+-- pljs_jsvalue_to_datums() and the column loop in pljs_jsvalue_to_record() both
+-- did:
+--
+--     JSValue o = JS_GetPropertyStr(ctx, val, colname);
+--     if (JS_IsNull(o) || JS_IsUndefined(o)) { nulls[c] = true; continue; }
+--     values[c] = pljs_jsvalue_to_datum(..., o, ..., NULL);
+--
+-- JS_GetPropertyStr() returns an *owned* reference and `o` was never released on
+-- either path.  That is one leaked reference per column per row, on every
+-- composite return and every return_next() of a row object -- the hottest
+-- allocation path in the extension.
+--
+-- This test asserts against pljs.memory_limit rather than
+-- pg_backend_memory_contexts, and that choice is the whole point: QuickJS
+-- allocates on the libc heap, so a leaked JavaScript reference is completely
+-- invisible to pg_backend_memory_contexts.  A test built on that view would pass
+-- whether or not the leak is fixed.
+--
+-- The retained object is deliberately large (4KB per call) so a bounded 64MB
+-- heap is exhausted in a few thousand calls: with the leak this fails with
+-- "InternalError: out of memory" well before 30000, and small values would not
+-- discriminate because QuickJS represents small integers as immediates that are
+-- not reference counted at all.
+CREATE TYPE colleak_row AS (big text);
+
+CREATE FUNCTION colleak_one(i int) RETURNS colleak_row AS $$
+  return { big: 'x'.repeat(4096) + i };
+$$ LANGUAGE pljs;
+
+-- 30000 calls x 4KB retained = ~120MB, comfortably past the cap below.
+SET pljs.memory_limit = 64;
+
+SELECT count(*) AS calls
+  FROM (SELECT (colleak_one(i)).* FROM generate_series(1, 30000) i) s;
+
+-- The same loop runs for return_next() of a row object.
+CREATE FUNCTION colleak_set(n int) RETURNS SETOF colleak_row AS $$
+  for (let i = 0; i < n; i++) pljs.return_next({ big: 'y'.repeat(4096) + i });
+$$ LANGUAGE pljs;
+
+SELECT count(*) AS rows_from_set FROM colleak_set(20000);
+
+-- A NULL column takes the short-circuit path, which leaked the same reference.
+CREATE TYPE colleak_two AS (a text, b text);
+
+CREATE FUNCTION colleak_nulls(i int) RETURNS colleak_two AS $$
+  return { a: null, b: 'z'.repeat(4096) + i };
+$$ LANGUAGE pljs;
+
+SELECT count(*) AS calls_with_null_column
+  FROM (SELECT (colleak_nulls(i)).* FROM generate_series(1, 20000) i) s;
+
+RESET pljs.memory_limit;
+
+DROP FUNCTION colleak_one, colleak_set, colleak_nulls;
+DROP TYPE colleak_row, colleak_two;

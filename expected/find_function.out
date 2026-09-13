@@ -37,8 +37,8 @@ DETAIL:  Error: javascript function is not found for "sqlf"
     at caller (<function>:9:30)
 
 SELECT caller(10, 4);
-ERROR:  javascript function is not found for "callee(int, int)"
-DETAIL:  Error: javascript function is not found for "callee(int, int)"
+ERROR:  function "callee(int, int)" does not exist
+DETAIL:  Error: function "callee(int, int)" does not exist
     at caller (<function>:11:30)
 
 SELECT caller(10, 5);

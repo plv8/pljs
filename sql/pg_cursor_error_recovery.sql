@@ -1,0 +1,33 @@
+-- Regression: the cursor fetch/move/close error handlers used to call
+-- SPI_rollback() + SPI_finish().  In an atomic context SPI_rollback() raises
+-- "invalid transaction termination", masking the real error, and SPI_finish()
+-- double-finishes the SPI connection owned by call_function.  The handlers now
+-- guard the operation with an internal subtransaction (same pattern as
+-- pljs.execute), so the real error is rolled back cleanly and re-raised into
+-- JS where it is catchable.
+CREATE EXTENSION IF NOT EXISTS pljs;
+
+-- A cursor whose query raises division-by-zero lazily during the scan, so the
+-- error fires inside SPI_cursor_fetch().
+CREATE FUNCTION cur_err() RETURNS text LANGUAGE pljs AS $$
+  var p = pljs.prepare("SELECT 1 / (5 - i) AS v FROM generate_series(1,10) i");
+  var c = p.cursor();
+  try {
+    for (var k = 0; k < 10; k++) {
+      var row = c.fetch();
+      if (row === undefined) break;
+    }
+  } catch (e) {
+    return "caught: " + e.message;
+  }
+  return "no error";
+$$;
+
+-- Expect the real error surfaced to JS, not "invalid transaction termination".
+SELECT cur_err();
+
+-- Backend and SPI are intact; the same function runs again.
+SELECT cur_err();
+SELECT 1 AS alive;
+
+DROP FUNCTION cur_err();

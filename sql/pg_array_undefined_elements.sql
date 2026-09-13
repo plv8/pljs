@@ -1,0 +1,67 @@
+-- Regression: one null-producing element must not null the whole array.
+--
+-- pljs_jsvalue_to_array() handed the *function's* fcinfo to the conversion of
+-- each element. Every path in pljs_jsvalue_to_datum() that signals SQL NULL goes
+-- through pljs_null_datum(), which sets fcinfo->isnull when it has an fcinfo --
+-- and that flag means "this function returned NULL", i.e. the entire array. So a
+-- single element that converted to NULL discarded every other element:
+--
+--     [1, undefined, 4]  ->  NULL      (wanted {1,NULL,4})
+--
+-- The element's null belongs in the per-element is_null out-parameter, which is
+-- what the nulls[] array passed to construct_md_array() is for, so the element
+-- conversion is now passed NULL for fcinfo.
+--
+-- Two distinct internal paths reach pljs_null_datum() for an element, and both
+-- are covered below: the null/undefined guard at the top of
+-- pljs_jsvalue_to_datum(), and the invalid-Date (NaN epoch) guard in the
+-- date/timestamp case. A null element already worked, and is kept as a control --
+-- it is the case that proves the fix did not simply make everything non-NULL.
+CREATE EXTENSION IF NOT EXISTS pljs;
+
+-- undefined element: NULL in place, neighbours intact.
+CREATE FUNCTION arr_undef() RETURNS int[] LANGUAGE pljs AS $$
+  return [1, undefined, 4];
+$$;
+
+SELECT arr_undef() AS value, arr_undef() IS NULL AS whole_array_null;
+
+-- control: a null element, which was already correct.
+CREATE FUNCTION arr_null() RETURNS int[] LANGUAGE pljs AS $$
+  return [1, null, 4];
+$$;
+
+SELECT arr_null() AS value, arr_null() IS NULL AS whole_array_null;
+
+-- undefined in a text[], to show this is not specific to the integer path.
+CREATE FUNCTION arr_text_undef() RETURNS text[] LANGUAGE pljs AS $$
+  return ['a', undefined, 'c'];
+$$;
+
+SELECT arr_text_undef() AS value, arr_text_undef() IS NULL AS whole_array_null;
+
+-- An invalid Date inside a date[] reaches pljs_null_datum() from the other
+-- direction -- the NaN-epoch guard -- and must null only its own element.
+-- Compared in SQL so the result does not depend on DateStyle.
+CREATE FUNCTION arr_nan_date() RETURNS date[] LANGUAGE pljs AS $$
+  return [new Date(Date.UTC(2020, 0, 1)), new Date(NaN), new Date(Date.UTC(2020, 0, 3))];
+$$;
+
+SELECT arr_nan_date() IS NULL          AS whole_array_null,
+       array_length(arr_nan_date(), 1) AS len,
+       (arr_nan_date())[1] = DATE '2020-01-01' AS first_kept,
+       (arr_nan_date())[2] IS NULL             AS middle_is_null,
+       (arr_nan_date())[3] = DATE '2020-01-03' AS third_kept;
+
+-- An all-valid array is untouched.
+CREATE FUNCTION arr_all_valid() RETURNS int[] LANGUAGE pljs AS $$
+  return [1, 2, 3];
+$$;
+
+SELECT arr_all_valid() AS value;
+
+DROP FUNCTION arr_undef();
+DROP FUNCTION arr_null();
+DROP FUNCTION arr_text_undef();
+DROP FUNCTION arr_nan_date();
+DROP FUNCTION arr_all_valid();

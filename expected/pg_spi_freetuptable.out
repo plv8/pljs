@@ -1,0 +1,60 @@
+-- Regression: pljs.execute() never freed its SPI tuptable.
+--
+-- pljs_plan_execute() called SPI_freetuptable() once it had converted its results.
+-- pljs_execute(), which backs pljs.execute(), did not -- so every call that
+-- returned rows kept the whole result set alive in the SPI context for as long as
+-- the surrounding function ran.  A loop inside one function accumulated all of it.
+--
+-- The measurement has to happen from inside the call: SPI_finish() releases the
+-- context when the function returns, so the leak is invisible from the outside
+-- either way.  pg_backend_memory_contexts is the right instrument here, unlike for
+-- a QuickJS-heap leak, because an SPI tuptable is PostgreSQL memory.
+--
+-- The assertion is a ratio rather than a byte count, so it does not depend on
+-- allocator details or platform: 1000 further executes must not add more than the
+-- first 100 already accounted for.  Unfixed, the second loop added ~32MB against
+-- ~3MB for the first; fixed, it adds nothing at all.
+CREATE FUNCTION spitup_growth() RETURNS bool AS $$
+  function spi_bytes() {
+    return pljs.execute("SELECT COALESCE(sum(total_bytes), 0)::float8 AS b " +
+                        "FROM pg_backend_memory_contexts WHERE name LIKE 'SPI%'")[0].b;
+  }
+
+  for (let i = 0; i < 100; i++) {
+    pljs.execute('SELECT g FROM generate_series(1, 200) g');
+  }
+  const before = spi_bytes();
+
+  for (let i = 0; i < 1000; i++) {
+    pljs.execute('SELECT g FROM generate_series(1, 200) g');
+  }
+  const after = spi_bytes();
+
+  return (after - before) < before;
+$$ LANGUAGE pljs;
+SELECT spitup_growth() AS spi_memory_bounded;
+ spi_memory_bounded 
+--------------------
+ t
+(1 row)
+
+-- Result-returning executes interleaved with commits, which is the pattern that
+-- made the retention easiest to hit in practice.
+CREATE TABLE t_freetup (a int);
+CREATE PROCEDURE p_freetup() LANGUAGE pljs AS $$
+  for (let i = 0; i < 20; i++) {
+    const rows = pljs.execute('SELECT g FROM generate_series(1, 50) g');
+    pljs.execute('INSERT INTO t_freetup (a) VALUES ($1)', [rows.length]);
+    pljs.commit();
+  }
+$$;
+CALL p_freetup();
+SELECT count(*)::int AS n, min(a) AS mn, max(a) AS mx FROM t_freetup;
+ n  | mn | mx 
+----+----+----
+ 20 | 50 | 50
+(1 row)
+
+DROP PROCEDURE p_freetup;
+DROP TABLE t_freetup;
+DROP FUNCTION spitup_growth();

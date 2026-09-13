@@ -1,0 +1,45 @@
+-- Regression test for prepared-plan / by-reference-return lifetime bugs tied to
+-- call_function()'s execution_context (which is deleted on return).
+--
+-- 1. pljs_prepare() allocated parstate and param_types in CurrentMemoryContext
+--    (= execution_context), so a prepared plan reused in a LATER call
+--    dereferenced freed memory (0x7F7F7F7F). The fix allocates the plan and
+--    parstate in CacheMemoryContext. Here a plan is cached on globalThis in the
+--    first call and reused across later calls; every call must return 7.
+-- 2. A by-reference return value (text, bytea, ...) was computed in
+--    execution_context just before that context was deleted, so the returned
+--    pointer was invalid. The fix switches back to the caller's context before
+--    building the return datum. A function returning a large string must come
+--    back intact.
+CREATE FUNCTION f_plan_reuse() RETURNS int LANGUAGE pljs AS $$
+  if (!globalThis.__plan_reuse)
+    globalThis.__plan_reuse = pljs.prepare('SELECT $1::int + $2::int AS s', ['int', 'int']);
+  return globalThis.__plan_reuse.execute([3, 4])[0].s;
+$$;
+SELECT f_plan_reuse() AS call1;
+ call1 
+-------
+     7
+(1 row)
+
+SELECT f_plan_reuse() AS call2;
+ call2 
+-------
+     7
+(1 row)
+
+SELECT f_plan_reuse() AS call3;
+ call3 
+-------
+     7
+(1 row)
+
+CREATE FUNCTION f_byref_return() RETURNS text LANGUAGE pljs AS $$ return 'ab'.repeat(5000); $$;
+SELECT length(f_byref_return()) AS len, substr(f_byref_return(), 1, 4) AS head;
+  len  | head 
+-------+------
+ 10000 | abab
+(1 row)
+
+DROP FUNCTION f_plan_reuse();
+DROP FUNCTION f_byref_return();
