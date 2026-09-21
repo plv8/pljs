@@ -116,6 +116,9 @@ static JSValue get_jsonb_value(JsonbValue *scalarVal, JSContext *ctx);
 static Jsonb *convert_object(JSValue object, JSContext *ctx);
 #endif
 
+static Datum pljs_string_to_datum_via_input(Oid typid, JSValueConst val,
+                                            JSContext *ctx);
+
 /**
  * @brief Converts a Javascript epoch to a Datum.
  *
@@ -507,14 +510,44 @@ JSValue pljs_datum_to_array(pljs_type *type, Datum arg, JSContext *ctx) {
 /**
  * @brief Fallback type conversion from @Datum to @JSValue.
  *
- * If a type is unknown, instead of returning `undefined` or `NULL`, do a
- * `cstring` or `varlena`, or value based conversion to an `String` or `Int32`
- * and back.
+ * Every type without a case of its own in pljs_datum_to_jsvalue() arrives
+ * here, which is most of them: uuid, inet, cidr, interval, time, timetz,
+ * point and the rest of the geometric types, bit and bit varying, money,
+ * tsvector, every enum, and every extension type such as ltree.
  *
- * In the case of fixed-length `INTERNALLENGTH`, it will be a `String`
- * with those bytes copied into the string, and the length set appropriately.
- * When the `String` is variable, the length would be taken from the `varlena`
- * header, and the rest copied into the string.
+ * It used to hand JavaScript the datum's *internal* bytes -- the varlena
+ * payload for a variable-length type, type.length bytes read straight off the
+ * pointer for a fixed-length one, and a truncating JS_NewInt32() for anything
+ * pass-by-value.  That is only the value the user meant for types whose
+ * storage happens to be text, and it is wrong three separate ways for the
+ * others:
+ *
+ *   - JS_NewStringLen() decodes its input as UTF-8, so every byte above 0x7F
+ *     became U+FFFD.  A uuid arrived as 16 binary bytes, came back through
+ *     the reverse fallback as the *replacement characters'* encoding, and
+ *     round-tripped 0192f1c2-3a4b-7c5d-8e6f-0a1b2c3d4e5f into
+ *     01efbfbd-efbf-bd3a-4b7c-5defbfbd0a1b.  Through a BEFORE INSERT trigger
+ *     returning NEW that silently corrupts a uuid primary key.
+ *
+ *   - The reverse fallback memcpy'd the string's bytes back over the type's
+ *     internal representation without the type ever validating them, so the
+ *     result was not merely wrong but malformed.  `SELECT $$ return v; $$` on
+ *     a `bit varying` produced a varbit datum whose bit length disagreed with
+ *     its allocation, and reading it back crashed the backend in varbit_out().
+ *
+ *   - Pass-by-value types were squeezed through int32.  money lost the high
+ *     half ($92,233,720,368.54 came back as $20,772,523.42), `time` returned
+ *     00:4294967264:28.640256, and an enum reached JavaScript as its pg_enum
+ *     OID rather than its label.
+ *
+ * So use the type's own text output function, which is what psql, COPY and
+ * to_json() all do, and what plv8 does for the same set of types.  The value
+ * reaches JavaScript as the text the user would recognise, and
+ * pljs_jsvalue_to_datum_fallback() parses it back through the matching input
+ * function -- which validates, so a bad value raises instead of being stored.
+ *
+ * The output function detoasts its own argument, so no detoasting is needed
+ * here.
  *
  * @param arg #Datum - Postgres datum to convert
  * @param type #pljs_type - type of the datum
@@ -523,37 +556,16 @@ JSValue pljs_datum_to_array(pljs_type *type, Datum arg, JSContext *ctx) {
  */
 static JSValue pljs_datum_to_jsvalue_fallback(Datum arg, pljs_type type,
                                               JSContext *ctx) {
-  JSValue ret = JS_UNDEFINED;
+  Oid typoutput;
+  bool typisvarlena;
+  char *str;
+  JSValue ret;
 
-  if (type.byval) {
-    ret = JS_NewInt32(ctx, arg);
-  } else {
-    // If this is a variable length type, make a copy of it.
-    if (type.length == -1) {
-      /*
-       * The datum may be compressed, stored out of line, or carry a 1-byte
-       * short header, so it has to be detoasted before it can be read.
-       * VARDATA() assumes a 4-byte header: pairing it with
-       * VARSIZE_ANY_EXHDR() skipped three bytes into a packed value's payload
-       * and read three bytes past its end.  VARDATA_ANY() is the accessor
-       * that matches VARSIZE_ANY_EXHDR().
-       */
-      struct varlena *vl = PG_DETOAST_DATUM_PACKED(arg);
+  getTypeOutputInfo(type.typid, &typoutput, &typisvarlena);
 
-      ret = JS_NewStringLen(ctx, VARDATA_ANY(vl), VARSIZE_ANY_EXHDR(vl));
-      JS_SetPropertyStr(ctx, ret, "length",
-                        JS_NewInt32(ctx, VARSIZE_ANY_EXHDR(vl)));
-
-      // Only free what detoasting allocated: an already-unpacked datum is
-      // returned as-is and belongs to the caller.
-      if (vl != (struct varlena *)DatumGetPointer(arg)) {
-        pfree(vl);
-      }
-    } else {
-      ret = JS_NewStringLen(ctx, (char *)arg, type.length);
-      JS_SetPropertyStr(ctx, ret, "length", JS_NewInt32(ctx, type.length));
-    }
-  }
+  str = OidOutputFunctionCall(typoutput, arg);
+  ret = JS_NewString(ctx, str);
+  pfree(str);
 
   return ret;
 }
@@ -1053,12 +1065,25 @@ Datum pljs_jsvalue_to_record(pljs_type *type, JSValue val, bool *is_null,
 /**
  * @brief Fallback type conversion from @JSValue to @Datum.
  *
- * If a type is unknown, instead of returning `NULL`, do a
- * `cstring` or `varlena`, or value based conversion to an `Datum`.
+ * The reverse of pljs_datum_to_jsvalue_fallback(), and the reason that one
+ * can be trusted: the value is parsed by the target type's own text input
+ * function, so what lands in the column is a datum the type built and
+ * validated itself.
  *
- * In the case of fixed-length `INTERNALLENGTH`, it will be a `cstring`
- * with those bytes copied into the cstring.  When the `String` is variable,
- * a `varlena` will be used and the size set appropriately.
+ * What this replaces wrote the JavaScript string's bytes directly over the
+ * type's internal representation -- memcpy into a varlena for a
+ * variable-length type, into a palloc0() of typlen for a fixed-length one,
+ * and JS_ToInt32() for pass-by-value.  Nothing checked that those bytes were
+ * a legal value of the type, and for anything whose storage is not text they
+ * were not: see pljs_datum_to_jsvalue_fallback() for the uuid corruption and
+ * the varbit_out() crash that came out of it.
+ *
+ * Handling the pass-by-value case the same way matters as much as the rest.
+ * An enum is a 4-byte pass-by-value OID, so the old code round-tripped it
+ * only because both directions agreed to use the raw OID; JavaScript saw
+ * 16400 instead of 'happy'. Now it sees the label and the input function maps
+ * it back, which also means a label that does not exist raises rather than
+ * storing an OID from some other enum.
  *
  * @param value #JSValue - Javascript to convert
  * @param is_null @c bool - pointer to fill of whether the value is null
@@ -1068,11 +1093,11 @@ Datum pljs_jsvalue_to_record(pljs_type *type, JSValue val, bool *is_null,
  */
 static Datum pljs_jsvalue_to_datum_fallback(JSValue value, bool *is_null,
                                             pljs_type type, JSContext *ctx) {
-  Datum ret = 0;
-
   // Set whether the Datum is `NULL` or not.
   JSValue is_set_null_value = JS_GetPropertyStr(ctx, value, "is_null");
+
   *is_null = JS_ToBool(ctx, is_set_null_value);
+  JS_FreeValue(ctx, is_set_null_value);
 
   // If the value's property of `null` is set to `true`, we return an empty
   // Datum.
@@ -1080,42 +1105,7 @@ static Datum pljs_jsvalue_to_datum_fallback(JSValue value, bool *is_null,
     return (Datum)0;
   }
 
-  // If the type is by value, it's a 32bit value.
-  if (type.byval) {
-    int32_t v;
-    ret = JS_ToInt32(ctx, &v, value);
-
-    ret = v;
-  } else {
-    // Get a copy of the data, as well as its length.
-    size_t length;
-    const char *js_data = JS_ToCStringLen(ctx, &length, value);
-
-    //  If this is a variable length array then we return a `varlena`.
-    if (type.length == -1) {
-      //  Allocate a new cstring of the length of the type.
-      struct varlena *return_data = (struct varlena *)palloc(VARHDRSZ + length);
-
-      // Copy in the data and set the size.
-      memcpy(VARDATA(return_data), js_data, length);
-      SET_VARSIZE(return_data, length + VARHDRSZ);
-
-      ret = PointerGetDatum(return_data);
-    } else if (type.length > 0) {
-      // Allocate the memory for the type.
-      char *return_data = palloc0(type.length);
-
-      if (length < (size_t)type.length) {
-        memcpy(return_data, js_data, length);
-      } else {
-        memcpy(return_data, js_data, type.length);
-      }
-
-      ret = PointerGetDatum(return_data);
-    }
-  }
-
-  return ret;
+  return pljs_string_to_datum_via_input(type.typid, value, ctx);
 }
 
 /*
