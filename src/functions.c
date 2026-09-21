@@ -2052,6 +2052,63 @@ static JSValue pljs_window_rows_are_peers(JSContext *ctx, JSValueConst this_val,
   return JS_NewBool(ctx, res);
 }
 
+/**
+ * @brief Resolves the SQL type of window function argument @a argno for the
+ * call currently in progress.
+ *
+ * pljs_func.argtypes[] is not usable on its own here.  It is filled in once,
+ * when the function is first compiled, and then cached against the function's
+ * OID -- but a polymorphic declaration, which is how essentially every window
+ * function is written (`js_lag(arg anyelement)`), resolves to a different
+ * concrete type at every call site.  The first caller's resolution was reused
+ * for all the others, so after `js_lag(some_uuid)` had populated the cache,
+ * `js_lag(some_text)` read the text datum as a uuid, and `js_lag(some_int)`
+ * dereferenced the integer itself as a pointer and took the backend down.
+ *
+ * The expression tree hanging off flinfo belongs to *this* call, so ask that
+ * instead and keep the cached type only as a fallback for when there is no
+ * call expression to consult.
+ *
+ * @param storage #pljs_storage - execution storage for the current context
+ * @param argno @c int - argument number, already range checked
+ * @returns #Oid of the argument type for this call
+ */
+static Oid pljs_window_arg_type(pljs_storage *storage, int argno) {
+  FunctionCallInfo fcinfo = storage->fcinfo;
+
+  if (fcinfo != NULL && fcinfo->flinfo != NULL) {
+    Oid argtype = get_fn_expr_argtype(fcinfo->flinfo, argno);
+
+    if (OidIsValid(argtype)) {
+      return argtype;
+    }
+  }
+
+  return storage->function->argtypes[argno];
+}
+
+/**
+ * @brief Range checks an argument number that came from JavaScript.
+ *
+ * The argument number reaches these functions straight from a JavaScript
+ * caller, so it is whatever the function author typed.  It was used unchecked
+ * to index both pljs_func.argtypes[] and the executor's own per-argument
+ * state, so `winobj.get_func_arg_current(500)` on a one-argument window
+ * function read well off the end of both and crashed the backend.
+ *
+ * The count to check against is inargs rather than nargs: a window function's
+ * arguments are all input arguments, and inargs is the one of the two that is
+ * populated both on a fresh compile and when the function is restored from
+ * the cache.
+ *
+ * @param storage #pljs_storage - execution storage for the current context
+ * @param argno @c int - argument number supplied by the caller
+ * @returns @c true when @a argno names an argument of the running function
+ */
+static bool pljs_window_arg_number_is_valid(pljs_storage *storage, int argno) {
+  return argno >= 0 && argno < storage->function->inargs;
+}
+
 static JSValue pljs_window_get_func_arg_in_partition(JSContext *ctx,
                                                      JSValueConst this_val,
                                                      int argc,
@@ -2078,6 +2135,11 @@ static JSValue pljs_window_get_func_arg_in_partition(JSContext *ctx,
   pljs_storage *storage = pljs_storage_for_context(ctx);
   FunctionCallInfo fcinfo = storage->fcinfo;
 
+  if (!pljs_window_arg_number_is_valid(storage, argno)) {
+    return js_throw(
+        "argument number out of range for get_func_arg_in_partition", ctx);
+  }
+
   WindowObject winobj = PG_WINDOW_OBJECT();
 
   PG_TRY();
@@ -2096,8 +2158,8 @@ static JSValue pljs_window_get_func_arg_in_partition(JSContext *ctx,
     return JS_UNDEFINED;
   }
 
-  return pljs_datum_to_jsvalue(storage->function->argtypes[argno], res, isnull,
-                               true, ctx);
+  return pljs_datum_to_jsvalue(pljs_window_arg_type(storage, argno), res,
+                               isnull, true, ctx);
 }
 
 static JSValue pljs_window_get_func_arg_in_frame(JSContext *ctx,
@@ -2125,6 +2187,11 @@ static JSValue pljs_window_get_func_arg_in_frame(JSContext *ctx,
   pljs_storage *storage = pljs_storage_for_context(ctx);
   FunctionCallInfo fcinfo = storage->fcinfo;
 
+  if (!pljs_window_arg_number_is_valid(storage, argno)) {
+    return js_throw("argument number out of range for get_func_arg_in_frame",
+                    ctx);
+  }
+
   WindowObject winobj = PG_WINDOW_OBJECT();
 
   PG_TRY();
@@ -2142,8 +2209,8 @@ static JSValue pljs_window_get_func_arg_in_frame(JSContext *ctx,
   if (isout) {
     return JS_UNDEFINED;
   }
-  return pljs_datum_to_jsvalue(storage->function->argtypes[argno], res, isnull,
-                               true, ctx);
+  return pljs_datum_to_jsvalue(pljs_window_arg_type(storage, argno), res,
+                               isnull, true, ctx);
 }
 
 static JSValue pljs_window_get_func_arg_current(JSContext *ctx,
@@ -2162,6 +2229,11 @@ static JSValue pljs_window_get_func_arg_current(JSContext *ctx,
   pljs_storage *storage = pljs_storage_for_context(ctx);
   FunctionCallInfo fcinfo = storage->fcinfo;
 
+  if (!pljs_window_arg_number_is_valid(storage, argno)) {
+    return js_throw("argument number out of range for get_func_arg_current",
+                    ctx);
+  }
+
   WindowObject winobj = PG_WINDOW_OBJECT();
 
   PG_TRY();
@@ -2174,8 +2246,8 @@ static JSValue pljs_window_get_func_arg_current(JSContext *ctx,
   }
   PG_END_TRY();
 
-  return pljs_datum_to_jsvalue(storage->function->argtypes[argno], res, isnull,
-                               true, ctx);
+  return pljs_datum_to_jsvalue(pljs_window_arg_type(storage, argno), res,
+                               isnull, true, ctx);
 }
 
 static JSValue pljs_window_object_to_string(JSContext *ctx,

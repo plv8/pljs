@@ -683,11 +683,24 @@ static JSValueConst *convert_arguments_to_javascript(FunctionCallInfo fcinfo,
 
   if (WindowObjectIsValid(window_obj)) {
     for (int i = 0; i < nargs; i++) {
+      Oid argtype = argtypes[i];
       bool is_null;
       Datum arg = WinGetFuncArgCurrent(window_obj, i, &is_null);
+
+      /*
+       * Resolve polymorphic types, as the non-window branch below does.  A
+       * window function is nearly always declared over anyelement --
+       * js_lag(arg anyelement), js_first_value(arg anyelement) -- so without
+       * this the datum is converted as the pseudo-type itself rather than as
+       * the date, text or int it actually holds.
+       */
+      if (fcinfo && IsPolymorphicType(argtype)) {
+        argtype = get_fn_expr_argtype(fcinfo->flinfo, i);
+      }
+
       // Window functions: expand_composite=false (skip composite expansion)
       argv[i] =
-          pljs_datum_to_jsvalue(argtypes[i], arg, is_null, false, context->ctx);
+          pljs_datum_to_jsvalue(argtype, arg, is_null, false, context->ctx);
     }
   } else {
     for (int i = 0; i < nargs; i++) {
