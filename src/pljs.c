@@ -657,6 +657,40 @@ static void setup_start_proc(JSContext *ctx) {
 }
 
 /**
+ * @brief Resolves a declared argument type against the call being made.
+ *
+ * An argument whose declared type is a pseudo-type only names its real type at
+ * the call site, so converting the datum as the declared type is meaningless.
+ *
+ * IsPolymorphicType() covers anyelement and its family, but deliberately
+ * excludes `"any"`: a function declared `f("any")` is not polymorphic in the
+ * resolution sense, because nothing about the *result* type depends on the
+ * argument.  The datum still arrives as some other type, though, so converting
+ * it as ANYOID is just as wrong -- any_out() refuses it outright, and before
+ * that it produced JS_NewInt32() of the datum, which for a pass-by-reference
+ * type is the truncated address of the value.
+ *
+ * @param fcinfo #FunctionCallInfo - the call in progress, may be NULL
+ * @param argtype #Oid - the argument's declared type
+ * @param argno @c int - which argument
+ * @returns #Oid of the type the datum actually has
+ */
+static Oid pljs_resolve_argtype(FunctionCallInfo fcinfo, Oid argtype,
+                                int argno) {
+  if (fcinfo == NULL || !(IsPolymorphicType(argtype) || argtype == ANYOID)) {
+    return argtype;
+  }
+
+  Oid resolved = get_fn_expr_argtype(fcinfo->flinfo, argno);
+
+  /*
+   * Fall back to the declared type when there is no call expression to read,
+   * rather than handing InvalidOid to a syscache lookup.
+   */
+  return OidIsValid(resolved) ? resolved : argtype;
+}
+
+/**
  * @brief Converts all function call arguments from postgres to Javascript.
  *
  * Allocates and creates an array of arguments as Javascript values.
@@ -683,20 +717,18 @@ static JSValueConst *convert_arguments_to_javascript(FunctionCallInfo fcinfo,
 
   if (WindowObjectIsValid(window_obj)) {
     for (int i = 0; i < nargs; i++) {
-      Oid argtype = argtypes[i];
       bool is_null;
       Datum arg = WinGetFuncArgCurrent(window_obj, i, &is_null);
 
       /*
-       * Resolve polymorphic types, as the non-window branch below does.  A
-       * window function is nearly always declared over anyelement --
-       * js_lag(arg anyelement), js_first_value(arg anyelement) -- so without
-       * this the datum is converted as the pseudo-type itself rather than as
-       * the date, text or int it actually holds.
+       * Resolve the declared type against this call, as the non-window branch
+       * below does.  A window function is nearly always declared over a
+       * pseudo-type -- js_lag(arg anyelement), js_first_value(arg anyelement),
+       * or "any" for a variadic-looking one -- so without this the datum is
+       * converted as the pseudo-type itself rather than as the date, text or
+       * int it actually holds.
        */
-      if (fcinfo && IsPolymorphicType(argtype)) {
-        argtype = get_fn_expr_argtype(fcinfo->flinfo, i);
-      }
+      Oid argtype = pljs_resolve_argtype(fcinfo, argtypes[i], i);
 
       // Window functions: expand_composite=false (skip composite expansion)
       argv[i] =
@@ -716,10 +748,17 @@ static JSValueConst *convert_arguments_to_javascript(FunctionCallInfo fcinfo,
         continue;
       }
 
-      /* Resolve polymorphic types, if this is an actual call context. */
-      if (fcinfo && IsPolymorphicType(argtype)) {
-        argtype = get_fn_expr_argtype(fcinfo->flinfo, i);
-      }
+      /*
+       * Resolve the declared type against this call, if there is one.
+       *
+       * This covered anyelement and its family but not `"any"`, and an
+       * unresolved ANYOID is worse here than in the window branch above:
+       * pljs_type_fill() marks every pseudo-type composite, so the datum was
+       * read as a tuple header.  `f("any")` on a text column reported "type
+       * with OID 97 does not exist" and on an int column crashed the backend.
+       */
+      argtype = pljs_resolve_argtype(fcinfo, argtype, i);
+
       bool is_null = (fcinfo->args[inargs].isnull == 1);
       // Regular functions: expand_composite=true (expand composite types)
       argv[inargs] = pljs_datum_to_jsvalue(argtype, fcinfo->args[inargs].value,

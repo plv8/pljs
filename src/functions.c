@@ -19,6 +19,8 @@
 
 #include "pljs.h"
 
+#include <math.h>
+
 // Local only functions for injecting into pljs
 static JSValue pljs_elog(JSContext *, JSValueConst, int, JSValueConst *);
 static JSValue pljs_execute(JSContext *, JSValueConst, int, JSValueConst *);
@@ -2109,6 +2111,44 @@ static bool pljs_window_arg_number_is_valid(pljs_storage *storage, int argno) {
   return argno >= 0 && argno < storage->function->inargs;
 }
 
+/**
+ * @brief Reads an argument number from a JavaScript value.
+ *
+ * JS_ToInt32() alone is not enough for a value that is going to index memory.
+ * Its result is the ECMAScript ToInt32 coercion, which turns a non-numeric
+ * value into 0 through NaN and wraps anything past 2^31, so
+ * get_func_arg_current('x') and get_func_arg_current(4294967296) both landed
+ * on argument 0 -- inside the range check, and silently the wrong argument.
+ *
+ * Require a number that is already a valid argument index instead, and report
+ * anything else to the caller as an exception.  Note the conversion itself can
+ * also raise, from a valueOf() that throws; that arrives as a pending
+ * exception and must not be swallowed either.
+ *
+ * @param ctx #JSContext - Javascript context
+ * @param val #JSValue - the value the caller passed
+ * @param argno @c int* - filled with the argument number on success
+ * @returns @c true on success, @c false with an exception pending
+ */
+static bool pljs_window_arg_number(JSContext *ctx, JSValueConst val,
+                                   int *argno) {
+  double d;
+
+  if (JS_ToFloat64(ctx, &d, val)) {
+    return false;
+  }
+
+  if (!isfinite(d) || d != trunc(d) || d < INT32_MIN || d > INT32_MAX) {
+    JS_ThrowRangeError(ctx, "argument number must be an integer");
+
+    return false;
+  }
+
+  *argno = (int)d;
+
+  return true;
+}
+
 static JSValue pljs_window_get_func_arg_in_partition(JSContext *ctx,
                                                      JSValueConst this_val,
                                                      int argc,
@@ -2119,13 +2159,20 @@ static JSValue pljs_window_get_func_arg_in_partition(JSContext *ctx,
   }
 
   int argno;
-  JS_ToInt32(ctx, &argno, argv[0]);
-
   int relpos;
-  JS_ToInt32(ctx, &relpos, argv[1]);
-
   int seektype;
-  JS_ToInt32(ctx, &seektype, argv[2]);
+
+  /*
+   * Let a failed conversion through as an exception.  These return values were
+   * ignored, so a value whose valueOf() throws left the pending exception in
+   * place and the out parameter at 0: the caller's try/catch never ran and the
+   * call quietly read argument 0.
+   */
+  if (!pljs_window_arg_number(ctx, argv[0], &argno) ||
+      JS_ToInt32(ctx, &relpos, argv[1]) ||
+      JS_ToInt32(ctx, &seektype, argv[2])) {
+    return JS_EXCEPTION;
+  }
 
   bool set_mark = JS_ToBool(ctx, argv[3]);
 
@@ -2171,13 +2218,15 @@ static JSValue pljs_window_get_func_arg_in_frame(JSContext *ctx,
   }
 
   int argno;
-  JS_ToInt32(ctx, &argno, argv[0]);
-
   int relpos;
-  JS_ToInt32(ctx, &relpos, argv[1]);
-
   int seektype;
-  JS_ToInt32(ctx, &seektype, argv[2]);
+
+  /* See get_func_arg_in_partition: do not swallow a conversion failure. */
+  if (!pljs_window_arg_number(ctx, argv[0], &argno) ||
+      JS_ToInt32(ctx, &relpos, argv[1]) ||
+      JS_ToInt32(ctx, &seektype, argv[2])) {
+    return JS_EXCEPTION;
+  }
 
   bool set_mark = JS_ToBool(ctx, argv[3]);
 
@@ -2221,7 +2270,11 @@ static JSValue pljs_window_get_func_arg_current(JSContext *ctx,
   }
 
   int argno;
-  JS_ToInt32(ctx, &argno, argv[0]);
+
+  /* See get_func_arg_in_partition: do not swallow a conversion failure. */
+  if (!pljs_window_arg_number(ctx, argv[0], &argno)) {
+    return JS_EXCEPTION;
+  }
 
   bool isnull;
   Datum res;
