@@ -577,6 +577,13 @@ static JSValue pljs_datum_to_jsvalue_fallback(Datum arg, pljs_type type,
  * value.  If the type is an array or is composite, then call out to
  * the correct functions.
  *
+ * A domain is dispatched as its base type.  A domain has its own OID and its
+ * own pg_type row, so it matches none of the cases below and would land in the
+ * fallback -- which is right for a domain over uuid, and wrong for a domain
+ * over anything pljs has a case for.  `CREATE DOMAIN dint AS int4` would
+ * arrive as the string "5" rather than the number 5, so `return v + 1` on it
+ * produced "51"; a domain over boolean arrived as "f", which is truthy.
+ *
  * @param argtype #Oid - type information for the type
  * @param arg #Datum - Postgres value to convert
  * @param is_null @c bool - whether the datum is null
@@ -594,6 +601,12 @@ JSValue pljs_datum_to_jsvalue(Oid argtype, Datum arg, bool is_null,
 
   JSValue return_result;
   char *str;
+
+  /*
+   * getBaseType() walks a chain of domains down to the concrete type, and
+   * returns its argument unchanged for everything that is not a domain.
+   */
+  argtype = getBaseType(argtype);
 
   pljs_type type;
   pljs_type_fill(&type, argtype);
@@ -1280,6 +1293,9 @@ static int64 pljs_bigint_to_int64_checked(JSContext *ctx, JSValueConst val,
  * checking whether it is an array or record and converting it
  * properly.
  *
+ * Called with the base type for a domain; see pljs_jsvalue_to_datum(), which
+ * resolves the domain and then validates what this builds.
+ *
  * @param rettype #Oid - type information for the record
  * @param val #JSValue - the Javascript object to convert
  * @param is_null @c bool* - pointer to fill with whether the result is null
@@ -1287,8 +1303,9 @@ static int64 pljs_bigint_to_int64_checked(JSContext *ctx, JSValueConst val,
  * @param fcinfo #FunctionCallInfo - optional, can be NULL
  * @returns #Datum of the Postgres value
  */
-Datum pljs_jsvalue_to_datum(Oid rettype, JSValue val, bool *is_null,
-                            JSContext *ctx, FunctionCallInfo fcinfo) {
+static Datum pljs_jsvalue_to_datum_internal(Oid rettype, JSValue val,
+                                            bool *is_null, JSContext *ctx,
+                                            FunctionCallInfo fcinfo) {
   // Initialize is_null to false
   if (is_null) {
     *is_null = false;
@@ -1792,6 +1809,51 @@ Datum pljs_jsvalue_to_datum(Oid rettype, JSValue val, bool *is_null,
    * non-void function.
    */
   return pljs_null_datum(is_null, fcinfo);
+}
+
+/**
+ * @brief Converts a Javascript value to a Postgres #Datum.
+ *
+ * Resolves a domain to its base type, builds that type's datum, and then has
+ * the domain check the result.
+ *
+ * Both halves matter.  Building the base type's datum is what makes a domain
+ * over jsonb take an object, a domain over bytea take a typed array, and a
+ * domain over timestamp take a Date, all of which have a dedicated case that a
+ * domain's own OID never reaches.  Handing the result to domain_check() is
+ * what keeps the domain's NOT NULL and CHECK constraints enforced, which
+ * dispatching on the base type alone would have quietly dropped.
+ *
+ * @param rettype #Oid - type information for the record
+ * @param val #JSValue - the Javascript object to convert
+ * @param is_null @c bool* - pointer to fill with whether the result is null
+ * @param ctx #JSContext - Javascript context to execute in
+ * @param fcinfo #FunctionCallInfo - optional, can be NULL
+ * @returns #Datum of the Postgres value
+ */
+Datum pljs_jsvalue_to_datum(Oid rettype, JSValue val, bool *is_null,
+                            JSContext *ctx, FunctionCallInfo fcinfo) {
+  Oid basetype = getBaseType(rettype);
+  Datum ret;
+  bool isnull;
+  void *extra = NULL;
+
+  if (basetype == rettype) {
+    return pljs_jsvalue_to_datum_internal(rettype, val, is_null, ctx, fcinfo);
+  }
+
+  ret = pljs_jsvalue_to_datum_internal(basetype, val, is_null, ctx, fcinfo);
+
+  /*
+   * A domain can be declared NOT NULL, so the null case has to be checked as
+   * well, not skipped.  Either out-parameter can carry it, depending on which
+   * caller asked for the conversion.
+   */
+  isnull = (is_null != NULL && *is_null) || (fcinfo != NULL && fcinfo->isnull);
+
+  domain_check(ret, isnull, rettype, &extra, CurrentMemoryContext);
+
+  return ret;
 }
 
 /**
