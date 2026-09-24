@@ -115,7 +115,8 @@ CREATE FUNCTION wp_out_of_range(arg anyelement) RETURNS text AS $$
 $$ LANGUAGE pljs WINDOW;
 SELECT wp_out_of_range(n) OVER () FROM wp;
 ERROR:  argument number out of range for get_func_arg_current
-DETAIL:  Error: argument number out of range for get_func_arg_current
+DETAIL:  RangeError: argument number out of range for get_func_arg_current
+    at get_func_arg_current (native)
     at wp_out_of_range (<function>:4:39)
 
 CREATE FUNCTION wp_negative(arg anyelement) RETURNS text AS $$
@@ -124,7 +125,8 @@ CREATE FUNCTION wp_negative(arg anyelement) RETURNS text AS $$
 $$ LANGUAGE pljs WINDOW;
 SELECT wp_negative(n) OVER () FROM wp;
 ERROR:  argument number out of range for get_func_arg_current
-DETAIL:  Error: argument number out of range for get_func_arg_current
+DETAIL:  RangeError: argument number out of range for get_func_arg_current
+    at get_func_arg_current (native)
     at wp_negative (<function>:4:39)
 
 -- ...and it is only an argument number if it is already one.  JS_ToInt32()
@@ -226,7 +228,31 @@ SELECT wp_any_plain(n) FROM wp ORDER BY n;
  number:2
 (2 rows)
 
+-- 6) VARIADIC "any" is declared with one argument, but the call can supply
+-- more.  The accessors must count fcinfo->nargs, not the declared inargs.
+CREATE FUNCTION wp_variadic(VARIADIC "any") RETURNS text AS $$
+  var w = pljs.get_window_object();
+  var out = [];
+  for (var i = 0; i < 3; i++) {
+    var v = w.get_func_arg_current(i);
+    out.push(typeof v + ':' + String(v));
+  }
+  try {
+    w.get_func_arg_current(3);
+    out.push('3 in range');
+  } catch (e) {
+    out.push('3: ' + e.name);
+  }
+  return out.join(',');
+$$ LANGUAGE pljs WINDOW;
+SELECT wp_variadic(n, t, t) OVER () FROM wp ORDER BY n;
+                   wp_variadic                    
+--------------------------------------------------
+ number:1,string:alpha,string:alpha,3: RangeError
+ number:2,string:beta,string:beta,3: RangeError
+(2 rows)
+
 DROP FUNCTION wp_show, wp_prev, wp_current, wp_frame, wp_out_of_range,
               wp_negative, wp_coerced, wp_throwing_argno, wp_any, wp_any_acc,
-              wp_any_plain;
+              wp_any_plain, wp_variadic;
 DROP TABLE wp;

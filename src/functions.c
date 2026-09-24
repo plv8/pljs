@@ -2056,20 +2056,13 @@ static JSValue pljs_window_rows_are_peers(JSContext *ctx, JSValueConst this_val,
 
 /**
  * @brief Resolves the SQL type of window function argument @a argno for the
- * call currently in progress.
+ * current call.
  *
- * pljs_func.argtypes[] is not usable on its own here.  It is filled in once,
- * when the function is first compiled, and then cached against the function's
- * OID -- but a polymorphic declaration, which is how essentially every window
- * function is written (`js_lag(arg anyelement)`), resolves to a different
- * concrete type at every call site.  The first caller's resolution was reused
- * for all the others, so after `js_lag(some_uuid)` had populated the cache,
- * `js_lag(some_text)` read the text datum as a uuid, and `js_lag(some_int)`
- * dereferenced the integer itself as a pointer and took the backend down.
- *
- * The expression tree hanging off flinfo belongs to *this* call, so ask that
- * instead and keep the cached type only as a fallback for when there is no
- * call expression to consult.
+ * The cached pljs_func.argtypes[] is filled once at compile time.  For a
+ * polymorphic or `"any"` argument, the concrete type lives on this call's
+ * expression tree, so ask that first.  The cached type is only a fallback,
+ * and only when @a argno is one of the declared arguments -- extra VARIADIC
+ * `"any"` arguments have no cached slot.
  *
  * @param storage #pljs_storage - execution storage for the current context
  * @param argno @c int - argument number, already range checked
@@ -2086,44 +2079,38 @@ static Oid pljs_window_arg_type(pljs_storage *storage, int argno) {
     }
   }
 
-  return storage->function->argtypes[argno];
+  if (argno >= 0 && argno < storage->function->inargs) {
+    return storage->function->argtypes[argno];
+  }
+
+  return InvalidOid;
 }
 
 /**
  * @brief Range checks an argument number that came from JavaScript.
  *
- * The argument number reaches these functions straight from a JavaScript
- * caller, so it is whatever the function author typed.  It was used unchecked
- * to index both pljs_func.argtypes[] and the executor's own per-argument
- * state, so `winobj.get_func_arg_current(500)` on a one-argument window
- * function read well off the end of both and crashed the backend.
+ * Use the call's actual argument count (`fcinfo->nargs` / `PG_NARGS()`), not
+ * the declared `inargs`.  A VARIADIC `"any"` window function has `inargs == 1`
+ * even when the call supplies more.
  *
- * The count to check against is inargs rather than nargs: a window function's
- * arguments are all input arguments, and inargs is the one of the two that is
- * populated both on a fresh compile and when the function is restored from
- * the cache.
- *
- * @param storage #pljs_storage - execution storage for the current context
+ * @param fcinfo #FunctionCallInfo - the call in progress
  * @param argno @c int - argument number supplied by the caller
  * @returns @c true when @a argno names an argument of the running function
  */
-static bool pljs_window_arg_number_is_valid(pljs_storage *storage, int argno) {
-  return argno >= 0 && argno < storage->function->inargs;
+static bool pljs_window_arg_number_is_valid(FunctionCallInfo fcinfo,
+                                            int argno) {
+  if (fcinfo == NULL) {
+    return false;
+  }
+
+  return argno >= 0 && argno < PG_NARGS();
 }
 
 /**
  * @brief Reads an argument number from a JavaScript value.
  *
- * JS_ToInt32() alone is not enough for a value that is going to index memory.
- * Its result is the ECMAScript ToInt32 coercion, which turns a non-numeric
- * value into 0 through NaN and wraps anything past 2^31, so
- * get_func_arg_current('x') and get_func_arg_current(4294967296) both landed
- * on argument 0 -- inside the range check, and silently the wrong argument.
- *
- * Require a number that is already a valid argument index instead, and report
- * anything else to the caller as an exception.  Note the conversion itself can
- * also raise, from a valueOf() that throws; that arrives as a pending
- * exception and must not be swallowed either.
+ * Require a finite integer in int32 range.  `JS_ToInt32()` is the ECMAScript
+ * ToInt32 coercion, which would turn `'x'` and `4294967296` into 0.
  *
  * @param ctx #JSContext - Javascript context
  * @param val #JSValue - the value the caller passed
@@ -2162,12 +2149,6 @@ static JSValue pljs_window_get_func_arg_in_partition(JSContext *ctx,
   int relpos;
   int seektype;
 
-  /*
-   * Let a failed conversion through as an exception.  These return values were
-   * ignored, so a value whose valueOf() throws left the pending exception in
-   * place and the out parameter at 0: the caller's try/catch never ran and the
-   * call quietly read argument 0.
-   */
   if (!pljs_window_arg_number(ctx, argv[0], &argno) ||
       JS_ToInt32(ctx, &relpos, argv[1]) ||
       JS_ToInt32(ctx, &seektype, argv[2])) {
@@ -2182,9 +2163,10 @@ static JSValue pljs_window_get_func_arg_in_partition(JSContext *ctx,
   pljs_storage *storage = pljs_storage_for_context(ctx);
   FunctionCallInfo fcinfo = storage->fcinfo;
 
-  if (!pljs_window_arg_number_is_valid(storage, argno)) {
-    return js_throw(
-        "argument number out of range for get_func_arg_in_partition", ctx);
+  if (!pljs_window_arg_number_is_valid(fcinfo, argno)) {
+    JS_ThrowRangeError(
+        ctx, "argument number out of range for get_func_arg_in_partition");
+    return JS_EXCEPTION;
   }
 
   WindowObject winobj = PG_WINDOW_OBJECT();
@@ -2221,7 +2203,6 @@ static JSValue pljs_window_get_func_arg_in_frame(JSContext *ctx,
   int relpos;
   int seektype;
 
-  /* See get_func_arg_in_partition: do not swallow a conversion failure. */
   if (!pljs_window_arg_number(ctx, argv[0], &argno) ||
       JS_ToInt32(ctx, &relpos, argv[1]) ||
       JS_ToInt32(ctx, &seektype, argv[2])) {
@@ -2236,9 +2217,10 @@ static JSValue pljs_window_get_func_arg_in_frame(JSContext *ctx,
   pljs_storage *storage = pljs_storage_for_context(ctx);
   FunctionCallInfo fcinfo = storage->fcinfo;
 
-  if (!pljs_window_arg_number_is_valid(storage, argno)) {
-    return js_throw("argument number out of range for get_func_arg_in_frame",
-                    ctx);
+  if (!pljs_window_arg_number_is_valid(fcinfo, argno)) {
+    JS_ThrowRangeError(ctx,
+                       "argument number out of range for get_func_arg_in_frame");
+    return JS_EXCEPTION;
   }
 
   WindowObject winobj = PG_WINDOW_OBJECT();
@@ -2271,7 +2253,6 @@ static JSValue pljs_window_get_func_arg_current(JSContext *ctx,
 
   int argno;
 
-  /* See get_func_arg_in_partition: do not swallow a conversion failure. */
   if (!pljs_window_arg_number(ctx, argv[0], &argno)) {
     return JS_EXCEPTION;
   }
@@ -2282,9 +2263,10 @@ static JSValue pljs_window_get_func_arg_current(JSContext *ctx,
   pljs_storage *storage = pljs_storage_for_context(ctx);
   FunctionCallInfo fcinfo = storage->fcinfo;
 
-  if (!pljs_window_arg_number_is_valid(storage, argno)) {
-    return js_throw("argument number out of range for get_func_arg_current",
-                    ctx);
+  if (!pljs_window_arg_number_is_valid(fcinfo, argno)) {
+    JS_ThrowRangeError(ctx,
+                       "argument number out of range for get_func_arg_current");
+    return JS_EXCEPTION;
   }
 
   WindowObject winobj = PG_WINDOW_OBJECT();

@@ -147,7 +147,27 @@ $$ LANGUAGE pljs;
 SELECT wp_any_plain(t) FROM wp ORDER BY n;
 SELECT wp_any_plain(n) FROM wp ORDER BY n;
 
+-- 6) VARIADIC "any" is declared with one argument, but the call can supply
+-- more.  The accessors must count fcinfo->nargs, not the declared inargs.
+CREATE FUNCTION wp_variadic(VARIADIC "any") RETURNS text AS $$
+  var w = pljs.get_window_object();
+  var out = [];
+  for (var i = 0; i < 3; i++) {
+    var v = w.get_func_arg_current(i);
+    out.push(typeof v + ':' + String(v));
+  }
+  try {
+    w.get_func_arg_current(3);
+    out.push('3 in range');
+  } catch (e) {
+    out.push('3: ' + e.name);
+  }
+  return out.join(',');
+$$ LANGUAGE pljs WINDOW;
+
+SELECT wp_variadic(n, t, t) OVER () FROM wp ORDER BY n;
+
 DROP FUNCTION wp_show, wp_prev, wp_current, wp_frame, wp_out_of_range,
               wp_negative, wp_coerced, wp_throwing_argno, wp_any, wp_any_acc,
-              wp_any_plain;
+              wp_any_plain, wp_variadic;
 DROP TABLE wp;
