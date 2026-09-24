@@ -657,6 +657,28 @@ static void setup_start_proc(JSContext *ctx) {
 }
 
 /**
+ * @brief Resolves a declared argument type against the call being made.
+ *
+ * Polymorphic types and `"any"` only name a concrete type at the call site.
+ * `IsPolymorphicType()` covers the anyelement family but excludes `"any"`.
+ *
+ * @param fcinfo #FunctionCallInfo - the call in progress, may be NULL
+ * @param argtype #Oid - the argument's declared type
+ * @param argno @c int - which argument
+ * @returns #Oid of the type the datum actually has
+ */
+static Oid pljs_resolve_argtype(FunctionCallInfo fcinfo, Oid argtype,
+                                int argno) {
+  if (fcinfo == NULL || !(IsPolymorphicType(argtype) || argtype == ANYOID)) {
+    return argtype;
+  }
+
+  Oid resolved = get_fn_expr_argtype(fcinfo->flinfo, argno);
+
+  return OidIsValid(resolved) ? resolved : argtype;
+}
+
+/**
  * @brief Converts all function call arguments from postgres to Javascript.
  *
  * Allocates and creates an array of arguments as Javascript values.
@@ -685,9 +707,12 @@ static JSValueConst *convert_arguments_to_javascript(FunctionCallInfo fcinfo,
     for (int i = 0; i < nargs; i++) {
       bool is_null;
       Datum arg = WinGetFuncArgCurrent(window_obj, i, &is_null);
+
+      Oid argtype = pljs_resolve_argtype(fcinfo, argtypes[i], i);
+
       // Window functions: expand_composite=false (skip composite expansion)
       argv[i] =
-          pljs_datum_to_jsvalue(argtypes[i], arg, is_null, false, context->ctx);
+          pljs_datum_to_jsvalue(argtype, arg, is_null, false, context->ctx);
     }
   } else {
     for (int i = 0; i < nargs; i++) {
@@ -703,10 +728,8 @@ static JSValueConst *convert_arguments_to_javascript(FunctionCallInfo fcinfo,
         continue;
       }
 
-      /* Resolve polymorphic types, if this is an actual call context. */
-      if (fcinfo && IsPolymorphicType(argtype)) {
-        argtype = get_fn_expr_argtype(fcinfo->flinfo, i);
-      }
+      argtype = pljs_resolve_argtype(fcinfo, argtype, i);
+
       bool is_null = (fcinfo->args[inargs].isnull == 1);
       // Regular functions: expand_composite=true (expand composite types)
       argv[inargs] = pljs_datum_to_jsvalue(argtype, fcinfo->args[inargs].value,
