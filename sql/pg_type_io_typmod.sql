@@ -1,0 +1,122 @@
+-- Length and precision modifiers on values built from JavaScript.
+--
+-- A typmod -- the (2) in char(2), the (5,2) in numeric(5,2) -- was never
+-- applied to a value coming from JavaScript.  A domain's was discarded along
+-- with the domain when it was resolved to its base type, and a column's was
+-- never passed along at all, so char(2) accepted 'Texas', numeric(5,2) kept
+-- 3.14159 and bit(8) stored three bits.  The executor does not re-check a
+-- value a trigger puts in NEW, or a composite a function returns, so those
+-- values reached the table.
+--
+-- A type pljs converts through its text input function now gets the typmod
+-- from that function, as PL/Perl and PL/Python do.  A type with a case of its
+-- own -- varchar, bpchar, numeric, timestamp -- gets its length coercion
+-- function, the one an assignment cast uses, so a value is rounded, padded or
+-- rejected exactly as an INSERT or a PL/pgSQL assignment would do it.
+CREATE EXTENSION IF NOT EXISTS pljs;
+
+SET DateStyle = 'ISO, MDY';
+
+-- 1) A domain's typmod.
+CREATE DOMAIN tt_char2 AS char(2);
+CREATE FUNCTION tt_char2_ret(s text) RETURNS tt_char2 LANGUAGE pljs AS $$ return s; $$;
+SELECT '[' || tt_char2_ret('T')::text || ']' AS padded, octet_length(tt_char2_ret('T')) AS octets;
+SELECT tt_char2_ret('Tx   ') AS trailing_spaces_dropped;
+SELECT tt_char2_ret('Texas');
+
+CREATE DOMAIN tt_varchar3 AS varchar(3);
+CREATE FUNCTION tt_varchar3_ret(s text) RETURNS tt_varchar3 LANGUAGE pljs AS $$ return s; $$;
+SELECT tt_varchar3_ret('abc');
+SELECT tt_varchar3_ret('abcdef');
+
+CREATE DOMAIN tt_numeric52 AS numeric(5,2);
+CREATE FUNCTION tt_numeric52_ret(x float8) RETURNS tt_numeric52 LANGUAGE pljs AS $$ return x; $$;
+SELECT tt_numeric52_ret(3.14159);
+SELECT tt_numeric52_ret(12345.6);
+
+CREATE DOMAIN tt_ts0 AS timestamp(0);
+CREATE FUNCTION tt_ts0_ret() RETURNS tt_ts0 LANGUAGE pljs AS $$
+  return new Date(Date.UTC(2021, 0, 2, 3, 4, 5, 678));
+$$;
+SELECT tt_ts0_ret();
+
+-- An array domain's typmod applies to each element.
+CREATE DOMAIN tt_varchar2s AS varchar(2)[];
+CREATE FUNCTION tt_varchar2s_ret(a text[]) RETURNS tt_varchar2s LANGUAGE pljs AS $$
+  return a;
+$$;
+SELECT tt_varchar2s_ret('{ab,cd}');
+SELECT tt_varchar2s_ret('{ab,cde}');
+
+-- Types without a case of their own go through domain_in(), which applies the
+-- domain's typmod itself.
+CREATE DOMAIN tt_bit8 AS bit(8);
+CREATE FUNCTION tt_bit8_ret(s text) RETURNS tt_bit8 LANGUAGE pljs AS $$ return s; $$;
+SELECT tt_bit8_ret('10110011');
+SELECT tt_bit8_ret('101');
+
+CREATE DOMAIN tt_time0 AS time(0);
+CREATE FUNCTION tt_time0_ret(s text) RETURNS tt_time0 LANGUAGE pljs AS $$ return s; $$;
+SELECT tt_time0_ret('12:34:56.789');
+
+-- 2) A column's typmod, through a trigger's NEW.  The trigger copies each
+-- value from the JSON in src.
+CREATE TABLE tt_tbl (
+  id int4,
+  src text,
+  c char(3),
+  v varchar(3),
+  n numeric(5,2),
+  b bit(4),
+  t time(0),
+  ts timestamp(0),
+  vs varchar(2)[]
+);
+
+CREATE FUNCTION tt_tbl_trig() RETURNS trigger LANGUAGE pljs AS $$
+  const row = JSON.parse(NEW.src);
+  NEW.c = row.c;
+  NEW.v = row.v;
+  NEW.n = row.n;
+  NEW.b = row.b;
+  NEW.t = row.t;
+  NEW.ts = row.ts === undefined ? null : new Date(row.ts);
+  NEW.vs = row.vs;
+  return NEW;
+$$;
+CREATE TRIGGER tt_tbl_trig BEFORE INSERT ON tt_tbl
+  FOR EACH ROW EXECUTE FUNCTION tt_tbl_trig();
+
+INSERT INTO tt_tbl (id, src) VALUES (1, '{"c": "a", "v": "abc", "n": 3.14159,
+  "b": "1010", "t": "12:34:56.789", "ts": 1609556645678, "vs": ["ab", "c"]}');
+SELECT id, '[' || c::text || ']' AS c, octet_length(c) AS c_octets, v, n, b, t, ts, vs
+  FROM tt_tbl;
+
+-- Each of these is too long for its column.
+INSERT INTO tt_tbl (id, src) VALUES (2, '{"c": "abcd"}');
+INSERT INTO tt_tbl (id, src) VALUES (2, '{"v": "abcd"}');
+INSERT INTO tt_tbl (id, src) VALUES (2, '{"n": 1234.5}');
+INSERT INTO tt_tbl (id, src) VALUES (2, '{"b": "101"}');
+INSERT INTO tt_tbl (id, src) VALUES (2, '{"vs": ["abc"]}');
+SELECT count(*) AS rows_stored FROM tt_tbl;
+
+-- 3) A column's typmod, through a composite return and return_next().
+CREATE TYPE tt_row AS (c char(3), n numeric(5,2), b bit(4));
+CREATE FUNCTION tt_row_ret() RETURNS tt_row LANGUAGE pljs AS $$
+  return {c: 'a', n: 3.14159, b: '1010'};
+$$;
+SELECT tt_row_ret();
+
+CREATE FUNCTION tt_row_set() RETURNS SETOF tt_row LANGUAGE pljs AS $$
+  pljs.return_next({c: 'b', n: 2.71828, b: '0101'});
+  pljs.return_next({c: 'b', n: 2.71828, b: '01'});
+$$;
+SELECT * FROM tt_row_set();
+
+DROP TABLE tt_tbl;
+DROP FUNCTION tt_char2_ret(text), tt_varchar3_ret(text), tt_numeric52_ret(float8), tt_ts0_ret(),
+              tt_varchar2s_ret(text[]), tt_bit8_ret(text), tt_time0_ret(text), tt_tbl_trig(),
+              tt_row_ret(), tt_row_set();
+DROP TYPE tt_row;
+DROP DOMAIN tt_char2, tt_varchar3, tt_numeric52, tt_ts0, tt_varchar2s, tt_bit8,
+            tt_time0;

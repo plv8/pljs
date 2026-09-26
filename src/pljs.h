@@ -215,8 +215,7 @@ JSValue pljs_tuple_to_jsvalue(TupleDesc, HeapTuple, JSContext *ctx);
 JSValue pljs_spi_result_to_jsvalue(int, JSContext *);
 
 // To Postgres
-Datum pljs_jsvalue_to_array(pljs_type *, JSValue, JSContext *,
-                            FunctionCallInfo);
+Datum pljs_jsvalue_to_array(pljs_type *, JSValue, JSContext *, int32);
 Datum pljs_jsvalue_to_datum(Oid rettype, JSValue val, bool *is_null,
                             JSContext *ctx, FunctionCallInfo fcinfo);
 Datum pljs_jsvalue_to_record(pljs_type *type, JSValue val, bool *is_null,
@@ -227,6 +226,7 @@ Datum *pljs_jsvalue_to_datums(pljs_type *type, JSValue val, bool **is_null,
 // Utility
 uint32_t pljs_js_array_length(JSValue, JSContext *);
 void pljs_type_fill(pljs_type *, Oid);
+Oid pljs_type_base(Oid);
 bool pljs_jsvalue_object_contains_all_column_names(JSValue val, JSContext *ctx,
                                                    TupleDesc tupdesc,
                                                    char **missing_colname,

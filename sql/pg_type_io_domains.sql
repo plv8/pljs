@@ -1,0 +1,254 @@
+-- Domains: which way each one is converted, and that its constraints hold on
+-- every path a value can take.
+--
+-- A domain over a type pljs has a case for -- int4, boolean, jsonb, bytea,
+-- timestamp, an array, a composite -- is built as that base type and then
+-- checked with domain_check(); pg_fallback_type_io covers that route.
+--
+-- A domain over any other type goes the way plv8 converts every domain:
+-- through the domain's own input function, domain_in(), which parses with the
+-- base type's input function and the domain's typmod, then checks the
+-- constraints.  domain_check() could not be used there: it looks up the base
+-- type's *binary* receive function, and not every type has one.
+--
+-- NULLs never reach a conversion function -- arrays, composites, triggers and
+-- return values all short-circuit them -- so each of those paths checks a NULL
+-- against the domain explicitly.  They used to skip it, and a NOT NULL domain
+-- accepted NULL from all of them.
+--
+-- The state both routes need is built once per type and cached.  It used to be
+-- rebuilt for every value, in whatever memory context was current, and a
+-- return_next() loop over a domain with a CHECK constraint grew the backend by
+-- about 10kB per row.
+CREATE EXTENSION IF NOT EXISTS pljs;
+
+SET DateStyle = 'ISO, MDY';
+
+-- 1) A domain over a type without a case of its own.
+CREATE DOMAIN tid_uuid AS uuid
+  CHECK (VALUE <> '00000000-0000-0000-0000-000000000000');
+
+-- It reaches JavaScript as text...
+CREATE FUNCTION tid_uuid_seen(v tid_uuid) RETURNS text LANGUAGE pljs AS $$
+  return typeof v + ':' + v;
+$$;
+SELECT tid_uuid_seen('0192f1c2-3a4b-7c5d-8e6f-0a1b2c3d4e5f');
+
+-- ...and goes back through domain_in(), which parses and checks it.
+CREATE FUNCTION tid_uuid_ret(s text) RETURNS tid_uuid LANGUAGE pljs AS $$
+  return s;
+$$;
+SELECT tid_uuid_ret('0192f1c2-3a4b-7c5d-8e6f-0a1b2c3d4e5f');
+SELECT tid_uuid_ret('00000000-0000-0000-0000-000000000000');
+SELECT tid_uuid_ret('not-a-uuid');
+
+-- A chain of domains checks every level.
+CREATE DOMAIN tid_uuid_0192 AS tid_uuid CHECK (VALUE::text LIKE '0192%');
+CREATE FUNCTION tid_uuid_0192_ret(s text) RETURNS tid_uuid_0192 LANGUAGE pljs AS $$
+  return s;
+$$;
+SELECT tid_uuid_0192_ret('0192f1c2-3a4b-7c5d-8e6f-0a1b2c3d4e5f');
+SELECT tid_uuid_0192_ret('ffffffff-3a4b-7c5d-8e6f-0a1b2c3d4e5f');
+SELECT tid_uuid_0192_ret('00000000-0000-0000-0000-000000000000');
+
+-- An enum: the label is what JavaScript sees, and what the domain checks.
+CREATE TYPE tid_mood AS ENUM ('sad', 'ok', 'happy');
+CREATE DOMAIN tid_good_mood AS tid_mood CHECK (VALUE <> 'sad');
+CREATE FUNCTION tid_mood_ret(s text) RETURNS tid_good_mood LANGUAGE pljs AS $$
+  return s;
+$$;
+SELECT tid_mood_ret('happy');
+SELECT tid_mood_ret('sad');
+SELECT tid_mood_ret('furious');
+
+-- aclitem has no binary receive function.  domain_check() raised "no binary
+-- input function available for type aclitem" for every value of a domain over
+-- it, valid or not.
+CREATE DOMAIN tid_acl AS aclitem;
+CREATE FUNCTION tid_acl_echo(v tid_acl) RETURNS tid_acl LANGUAGE pljs AS $$
+  return v;
+$$;
+SELECT tid_acl_echo(a)::text = a::text AS round_tripped
+  FROM (SELECT makeaclitem(0, current_user::regrole, 'SELECT', false)::tid_acl AS a) s;
+
+-- 2) A domain over a type with a case of its own, through SPI.
+CREATE DOMAIN tid_pos AS int4 CHECK (VALUE > 0);
+
+-- A result column arrives as its base type...
+DO $$
+  const r = pljs.execute("SELECT 5::tid_pos AS v")[0];
+  pljs.elog(NOTICE, typeof r.v + ':' + r.v);
+$$ LANGUAGE pljs;
+
+-- ...and a parameter of the domain type is checked as the domain.  Inserting
+-- into a column of the domain infers the parameter as the domain itself, so
+-- the executor adds no check of its own: this conversion is the only one.
+CREATE TABLE tid_spi (v tid_pos);
+DO $$
+  pljs.execute("INSERT INTO tid_spi VALUES ($1)", [3]);
+  try {
+    pljs.execute("INSERT INTO tid_spi VALUES ($1)", [-3]);
+    pljs.elog(NOTICE, 'unexpectedly accepted -3');
+  } catch (e) {
+    pljs.elog(NOTICE, 'rejected: ' + e.message);
+  }
+$$ LANGUAGE pljs;
+SELECT * FROM tid_spi;
+
+-- A domain over an array, both ways.
+CREATE DOMAIN tid_ints AS int4[] CHECK (cardinality(VALUE) > 0);
+CREATE FUNCTION tid_ints_push(v tid_ints) RETURNS tid_ints LANGUAGE pljs AS $$
+  return Array.isArray(v) ? v.concat([9]) : 'not an array';
+$$;
+SELECT tid_ints_push('{1,2}');
+CREATE FUNCTION tid_ints_empty() RETURNS tid_ints LANGUAGE pljs AS $$ return []; $$;
+SELECT tid_ints_empty();
+
+-- A domain over a composite, both ways.
+CREATE TYPE tid_pair AS (a int4, b text);
+CREATE DOMAIN tid_pos_pair AS tid_pair CHECK ((VALUE).a > 0);
+CREATE FUNCTION tid_pair_bump(v tid_pos_pair) RETURNS tid_pos_pair LANGUAGE pljs AS $$
+  v.a = v.a + 1;
+  return v;
+$$;
+SELECT tid_pair_bump(ROW(1, 'x')::tid_pair::tid_pos_pair);
+CREATE FUNCTION tid_pair_bad() RETURNS tid_pos_pair LANGUAGE pljs AS $$
+  return {a: -1, b: 'x'};
+$$;
+SELECT tid_pair_bad();
+
+-- 3) NULL is checked against the domain wherever it appears.
+CREATE DOMAIN tid_nn AS int4 NOT NULL;
+CREATE DOMAIN tid_nn_uuid AS uuid NOT NULL;
+
+-- As the result, for both routes.
+CREATE FUNCTION tid_nn_uuid_null() RETURNS tid_nn_uuid LANGUAGE pljs AS $$
+  return null;
+$$;
+SELECT tid_nn_uuid_null();
+
+-- The fallback's {is_null: true} is a NULL too.
+CREATE FUNCTION tid_nn_uuid_sentinel() RETURNS tid_nn_uuid LANGUAGE pljs AS $$
+  return {is_null: true};
+$$;
+SELECT tid_nn_uuid_sentinel();
+
+-- A value the base type turns into NULL -- an invalid Date -- is checked too.
+CREATE DOMAIN tid_nn_ts AS timestamp NOT NULL;
+CREATE FUNCTION tid_nn_ts_nan() RETURNS tid_nn_ts LANGUAGE pljs AS $$
+  return new Date(NaN);
+$$;
+SELECT tid_nn_ts_nan();
+
+-- As an array element, whether null or undefined.
+CREATE FUNCTION tid_nn_array(which text) RETURNS tid_nn[] LANGUAGE pljs AS $$
+  return which === 'null' ? [1, null] : [1, undefined, 3];
+$$;
+SELECT tid_nn_array('null');
+SELECT tid_nn_array('undefined');
+
+-- A domain that allows NULL still gets one.
+CREATE FUNCTION tid_pos_array() RETURNS tid_pos[] LANGUAGE pljs AS $$
+  return [1, null];
+$$;
+SELECT tid_pos_array();
+
+-- As a composite column, whether null or missing.
+CREATE TYPE tid_row AS (id int4, v tid_nn);
+CREATE FUNCTION tid_row_ret(which text) RETURNS tid_row LANGUAGE pljs AS $$
+  return which === 'null' ? {id: 1, v: null} : {id: 1};
+$$;
+SELECT tid_row_ret('null');
+SELECT tid_row_ret('missing');
+
+-- Through return_next().
+CREATE FUNCTION tid_row_set() RETURNS SETOF tid_row LANGUAGE pljs AS $$
+  pljs.return_next({id: 1, v: 1});
+  pljs.return_next({id: 2, v: null});
+$$;
+SELECT * FROM tid_row_set();
+
+-- Through a trigger's NEW, which the executor does not check again.
+CREATE TABLE tid_tbl (id int4, v tid_nn);
+CREATE FUNCTION tid_tbl_trig() RETURNS trigger LANGUAGE pljs AS $$
+  NEW.v = null;
+  return NEW;
+$$;
+CREATE TRIGGER tid_tbl_trig BEFORE INSERT ON tid_tbl
+  FOR EACH ROW EXECUTE FUNCTION tid_tbl_trig();
+INSERT INTO tid_tbl VALUES (1, 5);
+SELECT count(*) AS rows_stored FROM tid_tbl;
+
+-- 4) return_next() with a single column of a domain over an object-shaped
+-- type.  The column is not a row object, so the object is the value itself.
+CREATE DOMAIN tid_jsonb AS jsonb;
+CREATE FUNCTION tid_jsonb_set() RETURNS SETOF tid_jsonb LANGUAGE pljs AS $$
+  pljs.return_next({a: 1});
+  pljs.return_next({a: 1, b: 2});
+$$;
+SELECT * FROM tid_jsonb_set();
+
+-- A domain over an array accepts both the value and the row object.
+CREATE FUNCTION tid_ints_set() RETURNS SETOF tid_ints LANGUAGE pljs AS $$
+  pljs.return_next([1, 2]);
+  pljs.return_next({tid_ints_set: [3, 4]});
+$$;
+SELECT * FROM tid_ints_set();
+
+-- 5) The cached state stays current when the domain changes.
+CREATE DOMAIN tid_later AS int4;
+CREATE FUNCTION tid_later_ret(i int4) RETURNS tid_later LANGUAGE pljs AS $$
+  return i;
+$$;
+CREATE FUNCTION tid_later_null() RETURNS tid_later LANGUAGE pljs AS $$
+  return null;
+$$;
+SELECT tid_later_ret(-1), tid_later_null();
+ALTER DOMAIN tid_later ADD CONSTRAINT tid_later_pos CHECK (VALUE > 0);
+SELECT tid_later_ret(-1);
+ALTER DOMAIN tid_later SET NOT NULL;
+SELECT tid_later_null();
+-- Renaming rewrites the domain's pg_type row, which drops the cached entry.
+ALTER DOMAIN tid_later RENAME TO tid_later_renamed;
+SELECT tid_later_ret(-1);
+SELECT tid_later_ret(7);
+
+-- The same for a domain converted through domain_in().
+CREATE DOMAIN tid_later_uuid AS uuid;
+CREATE FUNCTION tid_later_uuid_ret(s text) RETURNS tid_later_uuid LANGUAGE pljs AS $$
+  return s;
+$$;
+SELECT tid_later_uuid_ret('00000000-0000-0000-0000-000000000000');
+ALTER DOMAIN tid_later_uuid ADD CONSTRAINT tid_later_uuid_nonzero
+  CHECK (VALUE <> '00000000-0000-0000-0000-000000000000');
+SELECT tid_later_uuid_ret('00000000-0000-0000-0000-000000000000');
+
+-- 6) The domain's checking state is built once per type, not once per value.
+CREATE FUNCTION tid_mem(n int4) RETURNS SETOF tid_pos LANGUAGE pljs AS $$
+  const used = () => Number(pljs.execute(
+    "SELECT sum(total_bytes) AS b FROM pg_backend_memory_contexts")[0].b);
+
+  for (let i = 1; i <= 1000; i++) pljs.return_next(i);
+
+  const before = used();
+
+  for (let i = 1; i <= n; i++) pljs.return_next(i);
+
+  const grew_mb = (used() - before) / (1024 * 1024);
+
+  pljs.elog(NOTICE, 'grew by less than 16MB: ' + (grew_mb < 16));
+$$;
+SELECT count(*) FROM tid_mem(50000);
+
+DROP TABLE tid_tbl, tid_spi;
+DROP FUNCTION tid_uuid_seen, tid_uuid_ret, tid_uuid_0192_ret, tid_mood_ret,
+              tid_acl_echo, tid_ints_push, tid_ints_empty, tid_pair_bump,
+              tid_pair_bad, tid_nn_uuid_null, tid_nn_uuid_sentinel,
+              tid_nn_ts_nan, tid_nn_array, tid_pos_array, tid_row_ret,
+              tid_row_set, tid_tbl_trig, tid_jsonb_set, tid_ints_set,
+              tid_later_ret, tid_later_null, tid_later_uuid_ret, tid_mem;
+DROP TYPE tid_row;
+DROP DOMAIN tid_uuid_0192, tid_uuid, tid_good_mood, tid_acl, tid_pos,
+            tid_ints, tid_pos_pair, tid_nn, tid_nn_uuid, tid_nn_ts, tid_jsonb,
+            tid_later_renamed, tid_later_uuid;
+DROP TYPE tid_mood, tid_pair;

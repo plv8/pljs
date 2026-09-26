@@ -1648,10 +1648,13 @@ static JSValue pljs_return_next_internal(JSContext *ctx, JSValueConst this_val,
      * object (a brand check, so a Date for a timestamp, a typed array for a
      * bytea and an Array for an array type are still values, not row objects)
      * and only when the column type is not itself object-shaped: a json/jsonb
-     * or composite column takes an object as its legitimate value.
+     * or composite column takes an object as its legitimate value.  So does a
+     * domain over one, so look through a domain to its base type.
      */
-    if (pljs_jsvalue_is_plain_object(argv[0]) && coltype != JSONOID &&
-        coltype != JSONBOID) {
+    Oid colbase = pljs_type_base(coltype);
+
+    if (pljs_jsvalue_is_plain_object(argv[0]) && colbase != JSONOID &&
+        colbase != JSONBOID) {
       pljs_type coltype_info;
 
       pljs_type_fill(&coltype_info, coltype);
