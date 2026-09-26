@@ -142,8 +142,8 @@ SELECT fb_null(NULL) IS NULL AS returned_null;
 -- for a domain over int4, so `return v + 1` would answer "51", and "f" for a
 -- domain over boolean, which is truthy.  Dispatching on the base type fixes
 -- that; running domain_check() afterwards is what keeps the constraints.
-CREATE DOMAIN fb_even_uuid AS uuid CHECK (VALUE IS NOT NULL);
-CREATE FUNCTION fb_domain(v fb_even_uuid) RETURNS fb_even_uuid LANGUAGE pljs AS $$ return v; $$;
+CREATE DOMAIN fb_nn_uuid AS uuid CHECK (VALUE IS NOT NULL);
+CREATE FUNCTION fb_domain(v fb_nn_uuid) RETURNS fb_nn_uuid LANGUAGE pljs AS $$ return v; $$;
 SELECT fb_domain('0192f1c2-3a4b-7c5d-8e6f-0a1b2c3d4e5f');
 
 -- A domain over a type with a case of its own keeps that case's JavaScript
@@ -256,8 +256,13 @@ SELECT fb_composite(ROW('0192f1c2-3a4b-7c5d-8e6f-0a1b2c3d4e5f',
 
 -- 9) A toasted value.  The old code detoasted by hand; the output function does
 -- it itself, so a value long enough to be pushed out of line still reads back.
+-- A repetitive value would be compressed inline instead, so store the column
+-- out of line, uncompressed, and check that the value really went there.
 CREATE TABLE fb_toast (v varbit);
+ALTER TABLE fb_toast ALTER COLUMN v SET STORAGE EXTERNAL;
 INSERT INTO fb_toast SELECT repeat('1011', 40000)::varbit;
+SELECT pg_relation_size(reltoastrelid) > 0 AS stored_out_of_line
+  FROM pg_class WHERE relname = 'fb_toast';
 CREATE FUNCTION fb_len(v varbit) RETURNS int LANGUAGE pljs AS $$ return v.length; $$;
 SELECT length(v) AS stored_bits, fb_len(v) AS seen_by_js FROM fb_toast;
 
@@ -279,7 +284,7 @@ DROP FUNCTION fb_uuid, fb_uuid_seen, fb_trig, fb_inet, fb_cidr, fb_interval,
               fb_dnn_null, fb_nested, fb_dbytea_ret, fb_dts_seen, fb_dts_ret,
               fb_dint_array, fb_dpos_array, fb_dcomp_seen;
 DROP TYPE fb_dcomp;
-DROP DOMAIN fb_even_uuid, fb_dbool, fb_djsonb, fb_dint8,
+DROP DOMAIN fb_nn_uuid, fb_dbool, fb_djsonb, fb_dint8,
             fb_dpos_small, fb_dpos, fb_dnn, fb_dbytea, fb_dts, fb_dint;
 DROP TYPE fb_comp;
 DROP TYPE fb_mood;
