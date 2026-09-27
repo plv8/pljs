@@ -77,7 +77,7 @@ If at compile time, garbage collection exposure is enabled, then this function i
 
 `pljs.prepare(sql [, typenames])`
 
-Opens or creates a prepared statement. The `typename` parameter is an `array` for each `bind` parameter. Returned value is an object of the `PreparedPlan` type. This object must be freed by `plan.free()` before leaving the function.
+Opens or creates a prepared statement. The `typenames` parameter is an `array` with the type of each `bind` parameter, and values passed to the plan are converted to those types. Without `typenames`, the parameters' types are inferred from the query, as they are for `pljs.execute()`. Returned value is an object of the `PreparedPlan` type. This object must be freed by `plan.free()` before leaving the function.
 
 ```
 var plan = pljs.prepare('SELECT * FROM tbl WHERE col = $1', [ 'int' ]);

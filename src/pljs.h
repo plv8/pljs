@@ -142,6 +142,7 @@ typedef struct pljs_storage {
   FunctionCallInfo fcinfo;
   WindowObject window_object;
   MemoryContext execution_memory_context;
+  bool converting_result; // the function's result is being converted
 } pljs_storage;
 
 typedef struct pljs_window_storage {

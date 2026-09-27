@@ -1489,13 +1489,13 @@ static Datum call_trigger(FunctionCallInfo fcinfo, pljs_context *context) {
   JSValue ret =
       JS_Call(context->ctx, context->js_function, JS_UNDEFINED, 10, argv);
 
-  /*
-   * Before the exception check, as in call_function(): the report below does
-   * not return, so an SPI_finish() after it would never run.
-   */
-  SPI_finish();
-
   if (JS_IsException(ret)) {
+    /*
+     * Before the report, as in call_function(): it does not return, so an
+     * SPI_finish() after it would never run.
+     */
+    SPI_finish();
+
     /*
      * Same order as call_function(): extract, release, then report.  The
      * JS_FreeValue() below used to sit *after* the report, which never returns,
@@ -1515,6 +1515,9 @@ static Datum call_trigger(FunctionCallInfo fcinfo, pljs_context *context) {
                           "execution error");
   }
 
+  /* Convert NEW while the SPI connection is open; see call_function(). */
+  MemoryContextSwitchTo(execution_context);
+
   if (JS_IsNull(ret) || !TRIGGER_FIRED_FOR_ROW(event)) {
     result = PointerGetDatum(NULL);
   } else if (!JS_IsUndefined(ret)) {
@@ -1531,6 +1534,8 @@ static Datum call_trigger(FunctionCallInfo fcinfo, pljs_context *context) {
   }
 
   JS_FreeValue(context->ctx, ret);
+
+  SPI_finish();
 
   MemoryContextSwitchTo(old_context);
   return result;
@@ -1589,9 +1594,10 @@ static Datum call_function(FunctionCallInfo fcinfo, pljs_context *context,
   JSValue ret = JS_Call(context->ctx, context->js_function, JS_UNDEFINED,
                         context->function->inargs, argv);
 
-  SPI_finish();
-
   if (JS_IsException(ret)) {
+    /* Before the report, which does not return. */
+    SPI_finish();
+
     char *message = NULL, *pg_detail = NULL, *sqlstate = NULL;
     char *error_message =
         dump_error(context->ctx, &message, &pg_detail, &sqlstate);
@@ -1607,7 +1613,23 @@ static Datum call_function(FunctionCallInfo fcinfo, pljs_context *context,
     /* Shuts up the compiler, since ereports of ERROR stop execution. */
     return (Datum)0;
   } else {
+    pljs_storage *storage = pljs_storage_for_context(context->ctx);
     Datum datum = 0;
+
+    /*
+     * Convert the result while this call's SPI connection is still open, as
+     * PL/pgSQL does.  The conversion can run JavaScript -- a getter, or
+     * toString(), on what the function returned -- and that can call
+     * pljs.execute() or pljs.commit().  After SPI_finish() those ran with no
+     * connection, where pljs.commit() crashed the backend, or on the caller's,
+     * such as that of the PL/pgSQL function whose query called this one.
+     *
+     * The result has to outlive SPI_finish(), so it is built in this call's
+     * own context rather than SPI's.  A procedure still cannot end its
+     * transaction from here; see pljs_commit().
+     */
+    MemoryContextSwitchTo(execution_context);
+    storage->converting_result = true;
 
     if (rettype == RECORDOID) {
       TupleDesc tupdesc;
@@ -1651,7 +1673,11 @@ static Datum call_function(FunctionCallInfo fcinfo, pljs_context *context,
           pljs_jsvalue_to_datum(rettype, ret, &is_null, context->ctx, fcinfo);
     }
 
+    storage->converting_result = false;
+
     JS_FreeValue(context->ctx, ret);
+
+    SPI_finish();
 
     MemoryContextSwitchTo(old_context);
 
@@ -1757,9 +1783,10 @@ static Datum call_srf_function(FunctionCallInfo fcinfo, pljs_context *context,
   JSValue ret = JS_Call(context->ctx, context->js_function, JS_UNDEFINED,
                         context->function->inargs, argv);
 
-  SPI_finish();
-
   if (JS_IsException(ret)) {
+    /* Before the report, which does not return. */
+    SPI_finish();
+
     /* Surface a pending cancel/terminate as the real PostgreSQL error. */
     CHECK_FOR_INTERRUPTS();
 
@@ -1775,7 +1802,10 @@ static Datum call_srf_function(FunctionCallInfo fcinfo, pljs_context *context,
     /* Shuts up the compiler, since ereports of ERROR stop execution. */
     return (Datum)0;
   } else {
-    // Check to see if we have any values to append
+    /*
+     * Rows the function returned rather than passed to return_next() are
+     * converted while the SPI connection is open; see call_function().
+     */
     if (!JS_IsUndefined(ret) && !JS_IsNull(ret)) {
       MemoryContextSwitchTo(rsinfo->econtext->ecxt_per_query_memory);
 
@@ -1848,6 +1878,8 @@ static Datum call_srf_function(FunctionCallInfo fcinfo, pljs_context *context,
   }
 
   JS_FreeValue(context->ctx, ret);
+
+  SPI_finish();
 
   // Switch back the original context
   MemoryContextSwitchTo(old_context);

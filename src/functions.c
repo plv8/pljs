@@ -641,9 +641,10 @@ static JSValue pljs_plan_execute(JSContext *ctx, JSValueConst this_val,
       JSValue param = JS_GetPropertyUint32(ctx, params, i);
       bool is_null;
 
-      values[i] = pljs_jsvalue_to_datum(
-          plan->parstate ? plan->parstate->param_types[i] : 0, param, &is_null,
-          ctx, NULL);
+      values[i] = pljs_jsvalue_to_datum(plan->parstate
+                                            ? plan->parstate->param_types[i]
+                                            : SPI_getargtypeid(plan->plan, i),
+                                        param, &is_null, ctx, NULL);
       nulls[i] = is_null ? 'n' : ' ';
 
       JS_FreeValue(ctx, param);
@@ -829,18 +830,6 @@ static JSValue pljs_prepare(JSContext *ctx, JSValueConst this_val, int argc,
     types = palloc(sizeof(Oid) * nparams);
   }
 
-  for (int i = 0; i < nparams; i++) {
-    JSValue param = JS_GetPropertyUint32(ctx, params, i);
-    size_t plen;
-    const char *str = JS_ToCStringLen(ctx, &plen, param);
-    int32 typemod;
-
-    parseTypeString(str, &types[i], &typemod, false);
-
-    JS_FreeCString(ctx, str);
-    JS_FreeValue(ctx, param);
-  }
-
   sql = JS_ToCString(ctx, argv[0]);
 
   /*
@@ -852,8 +841,14 @@ static JSValue pljs_prepare(JSContext *ctx, JSValueConst this_val, int argc,
    * across the longjmp), and so the PG_CATCH branch can free it: because it
    * lives in the permanent CacheMemoryContext, a failed SPI_prepare would
    * otherwise leak it (and its param_types) for the life of the backend.
+   *
+   * Only a plan prepared without type names has the parser infer its
+   * parameters' types, as plv8 does.  This was the other way round: type names
+   * were parsed and then ignored, so `pljs.prepare('SELECT $1 AS x', ['int4'])`
+   * bound $1 as text, and a parameter declared as a domain was never checked
+   * against it.
    */
-  if (argc > 1) {
+  if (argc < 2) {
     parstate =
         MemoryContextAllocZero(CacheMemoryContext, sizeof(pljs_param_state));
     parstate->memory_context = CacheMemoryContext;
@@ -863,6 +858,32 @@ static JSValue pljs_prepare(JSContext *ctx, JSValueConst this_val, int argc,
 
   PG_TRY();
   {
+    /*
+     * Inside the PG_TRY: an unknown type name raises, and an error escaping a
+     * function QuickJS called unwinds past the interpreter's live frames.
+     */
+    for (int i = 0; i < nparams; i++) {
+      JSValue param = JS_GetPropertyUint32(ctx, params, i);
+      const char *str = JS_ToCString(ctx, param);
+      int32 typemod;
+
+      JS_FreeValue(ctx, param);
+
+      if (str == NULL) {
+        elog(ERROR, "could not convert a type name to a string");
+      }
+
+      PG_TRY();
+      {
+        parseTypeString(str, &types[i], &typemod, false);
+      }
+      PG_FINALLY();
+      {
+        JS_FreeCString(ctx, str);
+      }
+      PG_END_TRY();
+    }
+
     if (parstate) {
       initial = SPI_prepare_params(sql, pljs_variable_param_setup, parstate, 0);
     } else {
@@ -888,7 +909,13 @@ static JSValue pljs_prepare(JSContext *ctx, JSValueConst this_val, int argc,
      * ERRORDATA_STACK_SIZE slots and the sixth PANICs the backend.
      */
     MemoryContextSwitchTo(m_mcontext);
+
+    /* Report what went wrong -- an unknown type name, say. */
+    ErrorData *edata = CopyErrorData();
+    JSValue error = js_throw_error_data(edata, ctx);
+
     FlushErrorState();
+    FreeErrorData(edata);
 
     if (parstate) {
       if (parstate->param_types) {
@@ -906,7 +933,7 @@ static JSValue pljs_prepare(JSContext *ctx, JSValueConst this_val, int argc,
     }
 
     JS_FreeCString(ctx, sql);
-    return js_throw("Unable to prepare parameters", ctx);
+    return error;
   }
 
   PG_END_TRY();
@@ -1059,9 +1086,10 @@ static JSValue pljs_plan_cursor(JSContext *ctx, JSValueConst this_val, int argc,
       JSValue param = JS_GetPropertyUint32(ctx, params, i);
       bool is_null;
 
-      values[i] = pljs_jsvalue_to_datum(
-          plan->parstate ? plan->parstate->param_types[i] : 0, param, &is_null,
-          ctx, NULL);
+      values[i] = pljs_jsvalue_to_datum(plan->parstate
+                                            ? plan->parstate->param_types[i]
+                                            : SPI_getargtypeid(plan->plan, i),
+                                        param, &is_null, ctx, NULL);
       nulls[i] = is_null ? 'n' : ' ';
 
       JS_FreeValue(ctx, param);
@@ -1387,6 +1415,24 @@ static JSValue pljs_plan_to_string(JSContext *ctx, JSValueConst this_val,
 }
 
 /**
+ * @brief Whether a procedure's result is being converted.
+ *
+ * Converting it can run JavaScript -- a getter, or toString(), on what the
+ * procedure returned -- and while it does, the conversion holds resources of
+ * the transaction it started in, such as a composite column's pinned row
+ * type.  Ending that transaction under it is not safe, so pljs_commit() and
+ * pljs_rollback() refuse to; PL/pgSQL runs no user code at that point at all.
+ *
+ * @param ctx #JSContext - the Javascript context
+ * @returns @c bool - whether transaction control has to be refused
+ */
+static bool pljs_converting_result(JSContext *ctx) {
+  pljs_storage *storage = pljs_storage_for_context(ctx);
+
+  return storage != NULL && storage->converting_result;
+}
+
+/**
  * @brief Javascript function `pljs.commit`.
  *
  * Javascript function that commits the current transaction.
@@ -1400,6 +1446,13 @@ static JSValue pljs_commit(JSContext *ctx, JSValueConst this_val, int argc,
 
   PG_TRY();
   {
+    if (pljs_converting_result(ctx)) {
+      ereport(ERROR,
+              (errcode(ERRCODE_INVALID_TRANSACTION_TERMINATION),
+               errmsg("cannot commit while a procedure's result is being "
+                      "converted")));
+    }
+
     // HoldPinnedPortals();
     SPI_commit();
     SPI_start_transaction();
@@ -1449,6 +1502,13 @@ static JSValue pljs_rollback(JSContext *ctx, JSValueConst this_val, int argc,
 
   PG_TRY();
   {
+    if (pljs_converting_result(ctx)) {
+      ereport(ERROR,
+              (errcode(ERRCODE_INVALID_TRANSACTION_TERMINATION),
+               errmsg("cannot roll back while a procedure's result is being "
+                      "converted")));
+    }
+
     // HoldPinnedPortals();
     SPI_rollback();
     SPI_start_transaction();

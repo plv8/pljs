@@ -2501,7 +2501,14 @@ JSValue pljs_values_to_array(JSValue *array, int argc, int start,
 
   uint32_t current = 0;
   for (int i = start; i < argc; i++) {
-    JS_SetPropertyUint32(ctx, ret, current, array[i]);
+    /*
+     * JS_SetPropertyUint32() takes ownership of the value, and these are the
+     * caller's arguments, borrowed from QuickJS.  Without the dup, freeing the
+     * array released references it never held: `pljs.prepare(sql, 'int8')`
+     * freed a string constant of the calling function, and the backend
+     * crashed when that function's bytecode was freed.
+     */
+    JS_SetPropertyUint32(ctx, ret, current, JS_DupValue(ctx, array[i]));
     current++;
   }
 
