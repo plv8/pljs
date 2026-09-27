@@ -1,7 +1,11 @@
 #include "postgres.h"
 
 #include "access/htup_details.h"
+#include "catalog/pg_language.h"
+#include "catalog/pg_proc.h"
+#include "miscadmin.h"
 #include "utils/memutils.h"
+#include "utils/syscache.h"
 
 #include "pljs.h"
 
@@ -60,43 +64,13 @@ void pljs_cache_init(void) {
 }
 
 /**
- * @brief Drain leaked reference counts on a JSValue down to a target.
- *
- * Repeatedly calls #JS_FreeValue until the internal reference count
- * reaches @p target.  This is used during context teardown to release
- * references that would otherwise prevent the #JSContext from being
- * freed.  Only operates on heap-allocated values (tag >= JS_TAG_FIRST);
- * immediates (ints, bools, etc.) are ignored.
- *
- * @param ctx  The #JSContext that owns @p val.
- * @param val  The #JSValue whose reference count should be drained.
- * @param target  The desired reference count to drain to.
- */
-static void drain_refs(JSContext *ctx, JSValue val, int target) {
-  if (JS_VALUE_GET_TAG(val) < JS_TAG_FIRST)
-    return;
-  JSRefCountHeader *p = (JSRefCountHeader *)JS_VALUE_GET_PTR(val);
-  while (p->ref_count > target)
-    JS_FreeValue(ctx, val);
-}
-
-/**
  * @brief Fully tear down a cached JavaScript context.
  *
- * Performs a complete cleanup of a #JSContext associated with a cache
- * entry.  The steps are:
- *
- *  1. Free all cached function #JSValue references in the entry's
- *     function hash table.
- *  2. Overwrite all own properties on the global object and the
- *     @c pljs namespace with @c undefined to release held values.
- *     SetProperty is used instead of DeleteProperty because global
- *     function declarations create non-configurable properties.
- *  3. Run garbage collection to free bytecode objects (each holds a
- *     @c JS_DupContext ref via @c b->realm).
- *  4. Drain any remaining leaked references on the @c pljs and global
- *     objects.
- *  5. Free the #JSContext.
+ * Releases all cached function #JSValue references in the entry's
+ * function hash table and drops the cache's #JSContext reference via
+ * #JS_FreeContext.  Any remaining internal realm cycles (e.g. from
+ * global functions or loaded ES modules) are collected by QuickJS's
+ * cycle collector during #JS_FreeRuntime.
  *
  * This function is called by #pljs_cache_free_all during extension
  * reset.
@@ -106,8 +80,6 @@ static void drain_refs(JSContext *ctx, JSValue val, int target) {
  */
 static void pljs_cleanup_context(pljs_context_cache_value *cache_entry) {
   JSContext *ctx = cache_entry->ctx;
-  JSValue global_obj = JS_GetGlobalObject(ctx);
-  JSValue pljs = JS_GetPropertyStr(ctx, global_obj, "pljs");
 
   /* Free all cached function JSValues for this context. */
   if (cache_entry->function_hash_table != NULL) {
@@ -121,62 +93,25 @@ static void pljs_cleanup_context(pljs_context_cache_value *cache_entry) {
     }
   }
 
-  /*
-   * Overwrite all own properties on global and pljs with undefined.
-   * We use SetProperty instead of DeleteProperty because global function
-   * declarations create non-configurable properties that can't be deleted.
-   * Setting to undefined releases the old value (and its JS_DupContext ref).
-   */
-  JSPropertyEnum *tab;
-  uint32_t len;
-  if (JS_GetOwnPropertyNames(ctx, &tab, &len, global_obj,
-                              JS_GPN_STRING_MASK | JS_GPN_SYMBOL_MASK) == 0) {
-    for (uint32_t i = 0; i < len; i++) {
-      JS_SetProperty(ctx, global_obj, tab[i].atom, JS_UNDEFINED);
-      JS_FreeAtom(ctx, tab[i].atom);
-    }
-    js_free(ctx, tab);
-  }
-
-  if (!JS_IsUndefined(pljs) && !JS_IsNull(pljs) &&
-      JS_GetOwnPropertyNames(ctx, &tab, &len, pljs,
-                              JS_GPN_STRING_MASK | JS_GPN_SYMBOL_MASK) == 0) {
-    for (uint32_t i = 0; i < len; i++) {
-      JS_SetProperty(ctx, pljs, tab[i].atom, JS_UNDEFINED);
-      JS_FreeAtom(ctx, tab[i].atom);
-    }
-    js_free(ctx, tab);
-  }
-
-  /*
-   * Run GC now to free bytecode objects.  Each function bytecode holds
-   * a JS_DupContext ref (b->realm) that is released when the bytecode
-   * is freed.  We must GC before draining context refs so the bytecode
-   * realm refs are already released.
-   */
-  JS_RunGC(JS_GetRuntime(ctx));
-
-  /* Drain leaked refs on pljs and global. */
-  drain_refs(ctx, pljs, 1);
-  JS_FreeValue(ctx, pljs);
-  drain_refs(ctx, global_obj, 1);
-
   JS_FreeContext(ctx);
 }
 
 /**
- * @brief Drops the cached compiled form of one function, in every user's cache.
+ * @brief Drops the cached compiled form of one function (and any downstream
+ * functions transpiled through it as a custom language handler), in every
+ * user's cache.
  *
- * Used when a function is created or replaced, so the next call recompiles it.
+ * Used when a function is created or replaced, so the next call recompiles it
+ * and any downstream functions whose source was transpiled by it.
  *
  * The alternative -- pljs_cache_reset() -- destroys every per-user JSContext
  * and rebuilds it on the next call.  JS_FreeContext() will not free a context
  * that still has live references into it, so the old one is not necessarily
- * reclaimed, and a backend doing repeated DDL grows without bound.  Removing a
- * single entry keeps every JSContext alive and owned, so nothing is orphaned
- * and nothing dangles -- including when the DDL is executed from inside a
- * running pljs function via pljs.execute(), where freeing the context we are
- * executing in would be fatal.
+ * reclaimed, and a backend doing repeated DDL grows without bound.  Removing
+ * individual entries keeps every JSContext alive and owned, so nothing is
+ * orphaned and nothing dangles -- including when the DDL is executed from
+ * inside a running pljs function via pljs.execute(), where freeing the context
+ * we are executing in would be fatal.
  *
  * @param fn_oid #Oid - the function whose compiled form is now stale
  */
@@ -192,32 +127,44 @@ void pljs_cache_function_remove(Oid fn_oid) {
 
   while ((ctx_hvalue = (pljs_context_cache_value *)hash_seq_search(&status)) !=
          NULL) {
-    bool found = false;
+    HASH_SEQ_STATUS fstatus;
     pljs_function_cache_value *value;
 
     if (ctx_hvalue->function_hash_table == NULL) {
       continue;
     }
 
-    value = (pljs_function_cache_value *)hash_search(
-        ctx_hvalue->function_hash_table, &fn_oid, HASH_FIND, &found);
+    hash_seq_init(&fstatus, ctx_hvalue->function_hash_table);
 
-    if (!found || value == NULL) {
-      continue;
+    while ((value = (pljs_function_cache_value *)hash_seq_search(&fstatus)) !=
+           NULL) {
+      bool should_remove = (value->fn_oid == fn_oid);
+
+      for (int i = 0; !should_remove && i < value->nhandlers; i++) {
+        if (value->handlers[i].fn_oid == fn_oid) {
+          should_remove = true;
+        }
+      }
+
+      if (!should_remove) {
+        continue;
+      }
+
+      /*
+       * Drop our reference to the compiled function before the entry goes away;
+       * this is its only owner, so otherwise it leaks on the QuickJS heap.
+       */
+      JS_FreeValue(value->ctx, value->fn);
+
+      if (value->prosrc != NULL) {
+        pfree(value->prosrc);
+        value->prosrc = NULL;
+      }
+
+      Oid entry_oid = value->fn_oid;
+      hash_search(ctx_hvalue->function_hash_table, &entry_oid, HASH_REMOVE,
+                  NULL);
     }
-
-    /*
-     * Drop our reference to the compiled function before the entry goes away;
-     * this is its only owner, so otherwise it leaks on the QuickJS heap.
-     */
-    JS_FreeValue(value->ctx, value->fn);
-
-    if (value->prosrc != NULL) {
-      pfree(value->prosrc);
-      value->prosrc = NULL;
-    }
-
-    hash_search(ctx_hvalue->function_hash_table, &fn_oid, HASH_REMOVE, NULL);
   }
 }
 
@@ -451,23 +398,121 @@ void pljs_cache_function_add(pljs_context *context) {
       ctx_hvalue->function_hash_table, &context->function->fn_oid, HASH_ENTER,
       &found);
 
-  // If we found one, then we already have an entry for this function
-  // and something has gone wrong, we should error out.
+  // If an entry already exists for this OID (for example, if a custom language
+  // handler re-entrantly compiled the same function while transpiling it),
+  // release the previous entry's QuickJS reference and prosrc copy before
+  // overwriting it.
   if (found) {
-    ereport(ERROR, errcode(ERRCODE_INTERNAL_ERROR),
-            errmsg("function cache entry already exists for oid %d",
-                   context->function->fn_oid));
+    JS_FreeValue(hvalue->ctx, hvalue->fn);
+    hvalue->fn = JS_UNDEFINED;
+    if (hvalue->prosrc != NULL) {
+      pfree(hvalue->prosrc);
+      hvalue->prosrc = NULL;
+    }
+  } else {
+    hvalue->ctx = NULL;
+    hvalue->fn = JS_UNDEFINED;
+    hvalue->prosrc = NULL;
   }
 
   // Switch to the cache memory context for this javascript context.
   MemoryContext old_memory_context =
       MemoryContextSwitchTo(ctx_hvalue->function_memory_context);
 
-  // Fill the cache entry with the values in the context.
-  pljs_context_to_function_cache(hvalue, context);
+  PG_TRY();
+  {
+    // Fill the cache entry with the values in the context.
+    pljs_context_to_function_cache(hvalue, context);
+  }
+  PG_CATCH();
+  {
+    hash_search(ctx_hvalue->function_hash_table, &context->function->fn_oid,
+                HASH_REMOVE, NULL);
+    MemoryContextSwitchTo(old_memory_context);
+    PG_RE_THROW();
+  }
+  PG_END_TRY();
 
   // Switch back to the calling memory context.
   MemoryContextSwitchTo(old_memory_context);
+}
+
+/**
+ * @brief Checks whether every language handler recorded in a cached function's
+ * dependency chain still matches the current catalog state.
+ *
+ * When a custom language handler (or any upstream handler in a chained
+ * language hierarchy) is replaced via CREATE OR REPLACE FUNCTION in the same
+ * or another backend, its pg_proc tuple's (xmin, tid) changes while the
+ * downstream function's own pg_proc tuple remains untouched.  Walking the
+ * recorded handler chain ensures the downstream function is invalidated and
+ * re-transpiled on the next lookup.
+ *
+ * @param value Cached function entry to validate
+ * @param proctuple Current pg_proc tuple of the downstream function
+ * @param stale_handler_oid Set to the OID of the first stale handler found,
+ *                          or InvalidOid if the language structure itself
+ *                          changed
+ * @returns true if all handlers in the chain are still valid, false otherwise
+ */
+static bool pljs_cache_handlers_valid(pljs_function_cache_value *value,
+                                      HeapTuple proctuple,
+                                      Oid *stale_handler_oid) {
+  *stale_handler_oid = InvalidOid;
+
+  if (value->nhandlers <= 0) {
+    return true;
+  }
+
+  if (!HeapTupleIsValid(proctuple)) {
+    return false;
+  }
+
+  Oid current_lang_oid = ((Form_pg_proc)GETSTRUCT(proctuple))->prolang;
+
+  for (int i = 0; i < value->nhandlers; i++) {
+    CHECK_FOR_INTERRUPTS();
+
+    if (!OidIsValid(current_lang_oid)) {
+      return false;
+    }
+
+    HeapTuple langtuple =
+        SearchSysCache1(LANGOID, ObjectIdGetDatum(current_lang_oid));
+    if (!HeapTupleIsValid(langtuple)) {
+      return false;
+    }
+
+    Form_pg_language langstruct = (Form_pg_language)GETSTRUCT(langtuple);
+    Oid handler_oid = langstruct->lanplcallfoid;
+    ReleaseSysCache(langtuple);
+
+    if (handler_oid != value->handlers[i].fn_oid) {
+      *stale_handler_oid = value->handlers[i].fn_oid;
+      return false;
+    }
+
+    HeapTuple htuple = SearchSysCache1(PROCOID, ObjectIdGetDatum(handler_oid));
+    if (!HeapTupleIsValid(htuple)) {
+      *stale_handler_oid = handler_oid;
+      return false;
+    }
+
+    TransactionId h_xmin = HeapTupleHeaderGetRawXmin(htuple->t_data);
+    ItemPointerData h_tid = htuple->t_self;
+    Oid next_lang_oid = ((Form_pg_proc)GETSTRUCT(htuple))->prolang;
+    ReleaseSysCache(htuple);
+
+    if (h_xmin != value->handlers[i].fn_xmin ||
+        !ItemPointerEquals(&h_tid, &value->handlers[i].fn_tid)) {
+      *stale_handler_oid = handler_oid;
+      return false;
+    }
+
+    current_lang_oid = next_lang_oid;
+  }
+
+  return true;
 }
 
 /**
@@ -497,6 +542,12 @@ pljs_function_cache_value *pljs_cache_function_find(Oid user_id, Oid fn_oid,
   }
 
   // Search for the function inside of the context.
+  // TODO: figure out how to not cache in case of anonymous inline block or
+  // language handler without oid using something other than this hack.
+  if (!OidIsValid(fn_oid)) {
+    return NULL;
+  }
+
   pljs_function_cache_value *value = (pljs_function_cache_value *)hash_search(
       ctx_hvalue->function_hash_table, &fn_oid, HASH_FIND, &found);
 
@@ -537,6 +588,22 @@ pljs_function_cache_value *pljs_cache_function_find(Oid user_id, Oid fn_oid,
     return NULL;
   }
 
+  /*
+   * Also verify that every custom language handler in the function's
+   * transpilation chain (if any) still matches its current pg_proc tuple.
+   * If any handler in the chain was replaced (in this backend with
+   * check_function_bodies = off, or in another backend), evict the stale
+   * handler and all functions depending on it so they re-transpile.
+   */
+  Oid stale_handler_oid = InvalidOid;
+  if (!pljs_cache_handlers_valid(value, proctuple, &stale_handler_oid)) {
+    if (OidIsValid(stale_handler_oid)) {
+      pljs_cache_function_remove(stale_handler_oid);
+    }
+    pljs_cache_function_remove(fn_oid);
+    return NULL;
+  }
+
   return value;
 }
 
@@ -568,6 +635,13 @@ void pljs_function_cache_to_context(pljs_context *context,
   context->function->is_srf = function_entry->is_srf;
   context->function->module_generation = function_entry->module_generation;
 
+  context->function->fn_xmin = function_entry->fn_xmin;
+  context->function->fn_tid = function_entry->fn_tid;
+  context->function->nhandlers = function_entry->nhandlers;
+  for (int i = 0; i < function_entry->nhandlers; i++) {
+    context->function->handlers[i] = function_entry->handlers[i];
+  }
+
   context->js_function = function_entry->fn;
 
   context->function->inargs = function_entry->nargs;
@@ -579,12 +653,10 @@ void pljs_function_cache_to_context(pljs_context *context,
   memcpy(context->function->proname, function_entry->proname, NAMEDATALEN);
 
   /*
-   * prosrc is the (variable-length) function body, not a NAMEDATALEN name.
-   * Copying a fixed NAMEDATALEN bytes truncated bodies longer than 63 chars
-   * and over-read the source allocation for shorter ones.  pstrdup copies
-   * exactly the right length now that the cached copy is NUL-terminated.
+   * Borrow the cached NUL-terminated prosrc pointer rather than copying a
+   * potentially multi-hundred-KB transpiled source string on every row call.
    */
-  context->function->prosrc = pstrdup(function_entry->prosrc);
+  context->function->prosrc = function_entry->prosrc;
 }
 
 /**
@@ -616,6 +688,10 @@ void pljs_context_to_function_cache(pljs_function_cache_value *function_entry,
   function_entry->fn_xmin = context->function->fn_xmin;
   function_entry->fn_tid = context->function->fn_tid;
   function_entry->module_generation = context->function->module_generation;
+  function_entry->nhandlers = context->function->nhandlers;
+  for (int i = 0; i < context->function->nhandlers; i++) {
+    function_entry->handlers[i] = context->function->handlers[i];
+  }
 
   function_entry->fn = context->js_function;
   function_entry->nargs = context->function->inargs;

@@ -30,9 +30,18 @@
 #endif
 
 #define STORAGE_HASH_LEN 32
+#define PLJS_MAX_LANG_HANDLER_DEPTH 32
 #ifndef PLJS_VERSION
 #define PLJS_VERSION "unknown"
 #endif
+
+// Snapshot of a language handler in a function's transpilation chain,
+// used to invalidate downstream cached functions when any handler changes.
+typedef struct pljs_handler_dep {
+  Oid fn_oid;
+  TransactionId fn_xmin;
+  ItemPointerData fn_tid;
+} pljs_handler_dep;
 
 // pljs current runtime configuration.
 typedef struct pljs_configuration {
@@ -102,6 +111,13 @@ typedef struct pljs_function_cache_value {
    * modules have changed.
    */
   uint64 module_generation;
+
+  /*
+   * Chain of custom language handler functions (from immediate handler up to
+   * the base pljs handler) used when transpiling this function.
+   */
+  int nhandlers;
+  pljs_handler_dep handlers[PLJS_MAX_LANG_HANDLER_DEPTH];
 } pljs_function_cache_value;
 
 typedef struct pljs_param_state {
@@ -168,6 +184,9 @@ typedef struct pljs_func {
   // The module generation it was compiled against, if it imports modules, or
   // 0; see pljs_modules_generation().
   uint64 module_generation;
+
+  int nhandlers;
+  pljs_handler_dep handlers[PLJS_MAX_LANG_HANDLER_DEPTH];
 
   bool trigger;
   bool is_srf;                  // are we a set returning function?
