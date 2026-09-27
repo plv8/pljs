@@ -1651,10 +1651,15 @@ static JSValue pljs_return_next_internal(JSContext *ctx, JSValueConst this_val,
      * or composite column takes an object as its legitimate value.  So does a
      * domain over one, so look through a domain to its base type.
      */
-    Oid colbase = pljs_type_base(coltype);
+    bool row_object = pljs_jsvalue_is_plain_object(argv[0]);
 
-    if (pljs_jsvalue_is_plain_object(argv[0]) && colbase != JSONOID &&
-        colbase != JSONBOID) {
+    if (row_object) {
+      Oid colbase = pljs_type_base(coltype);
+
+      row_object = colbase != JSONOID && colbase != JSONBOID;
+    }
+
+    if (row_object) {
       pljs_type coltype_info;
 
       pljs_type_fill(&coltype_info, coltype);

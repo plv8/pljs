@@ -47,7 +47,38 @@ DO $$
   pljs.elog(NOTICE, 'nulls: ' + (r.r === null) + ' ' + (r.u === null) + ' ' + (r.e === null));
 $$ LANGUAGE pljs;
 
+-- A void function returns void, not NULL, whatever it returned.  void is a
+-- pseudotype, which was converted as a composite: `return;` came back as
+-- NULL, and any other value raised "type void is not composite".
+CREATE FUNCTION pnr_void() RETURNS void LANGUAGE pljs AS $$ return; $$;
+CREATE FUNCTION pnr_void_value() RETURNS void LANGUAGE pljs AS $$ return 5; $$;
+SELECT pnr_void() IS NULL AS is_null, pnr_void_value() IS NULL AS value_is_null;
+
+-- A function returning record, or with OUT parameters, gave the record
+-- conversion nowhere to report a NULL, and crashed the backend.
+CREATE FUNCTION pnr_record_null() RETURNS record LANGUAGE pljs AS $$
+  return null;
+$$;
+SELECT * FROM pnr_record_null() AS t(a int4, b text);
+CREATE FUNCTION pnr_out_null(OUT a int4, OUT b text) LANGUAGE pljs AS $$
+  return null;
+$$;
+SELECT * FROM pnr_out_null();
+SELECT pnr_out_null() IS NULL AS is_null;
+
+-- An array type raised "value is not an Array" for a NULL, returned or bound.
+CREATE FUNCTION pnr_array_null() RETURNS int4[] LANGUAGE pljs AS $$
+  return null;
+$$;
+SELECT pnr_array_null() IS NULL AS is_null;
+DO $$
+  const r = pljs.execute("SELECT $1::int4[] IS NULL AS n", [null])[0];
+  pljs.elog(NOTICE, 'bound null array is null: ' + r.n);
+$$ LANGUAGE pljs;
+
 DROP FUNCTION pnr_row_null(), pnr_row_undefined(), pnr_row_d_null(),
-              pnr_uuid_sentinel(), pnr_enum_sentinel();
+              pnr_uuid_sentinel(), pnr_enum_sentinel(), pnr_void(),
+              pnr_void_value(), pnr_record_null(), pnr_out_null(),
+              pnr_array_null();
 DROP DOMAIN pnr_row_d;
 DROP TYPE pnr_row, pnr_mood;

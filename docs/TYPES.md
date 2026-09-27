@@ -99,6 +99,25 @@ SELECT negate(1);
 -- ERROR:  value for domain positive violates check constraint "positive_check"
 ```
 
+The exception is a generated column in a `BEFORE` trigger's `NEW`, which is
+`NULL` until the executor computes it after the trigger, and is not checked.
+
+### Upgrading
+
+A domain used to be converted from its internal representation, whatever its
+base type. For most base types that was wrong — a domain over `timestamp`
+arrived as a truncated integer, one over `jsonb` as its binary storage — but
+two worked, and code written against them needs updating:
+
+- A domain over `json` arrived as the JSON text, and JSON text returned for one
+  was stored as that JSON. It is now converted as `json` is: an argument
+  arrives as the parsed value, so `JSON.parse()` on it throws, and a returned
+  string is stored as a JSON string, so `return JSON.stringify({a: 1})` stores
+  `"{\"a\":1}"` rather than `{"a": 1}`. Use the value as it arrives, and return
+  the object itself.
+- A domain over `boolean` arrived as the `Number` `0` or `1`, and now arrives
+  as `false` or `true`.
+
 ## Length and precision
 
 A type modifier — the `(2)` in `char(2)`, the `(5,2)` in `numeric(5,2)` — is

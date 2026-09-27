@@ -142,17 +142,20 @@ static Datum pljs_jsvalue_to_datum_via_io(struct pljs_type_io *io,
  * current. In a return_next() loop that context lives for the whole call, and
  * 200,000 rows of a domain with a CHECK constraint grew the backend by 2GB.
  *
- * The state here lives in a context of its own per type, so it is built once
- * and reused. A change to the type's pg_type row -- or its base type's --
- * marks the entry stale and it is rebuilt on next use. Constraint changes need
- * nothing from us: domain_check() and domain_in() re-validate their constraint
- * list through the typcache on every call.
+ * The state here is built once per type and reused. A change to the type's
+ * pg_type row -- or its base type's -- marks the entry stale and it is rebuilt
+ * on next use; an entry still stale when the transaction ends, such as one for
+ * a dropped type, is removed then. A constraint change marks every domain's
+ * checking state stale; see pljs_domain_check().
  */
 typedef struct pljs_type_io {
   Oid typid; /* hash key */
   bool valid;
 
-  /* Owns every allocation below; replaced wholesale when the entry is stale. */
+  /*
+   * Owns every allocation below.  Created on first use, since most types need
+   * none, and replaced wholesale when the entry is rebuilt.
+   */
   MemoryContext mcxt;
   uint32 hashvalue;      /* TYPEOID syscache hash of typid */
   uint32 base_hashvalue; /* ...and of basetype */
@@ -173,6 +176,21 @@ typedef struct pljs_type_io {
   /* The type has a dedicated case in the conversion switches. */
   bool has_js_case;
 
+  /*
+   * What pljs_type_fill() reports: the type's own category and storage, and
+   * for an array, or a domain over one, its element type's.  None of these
+   * can change for an existing type.
+   */
+  char category;
+  int16 length;
+  bool byval;
+  char align;
+  Oid elemtype;
+  bool elem_is_composite;
+  int16 elem_length;
+  bool elem_byval;
+  char elem_align;
+
   /* Looked up on first use. */
   bool have_input;
   FmgrInfo input;
@@ -188,9 +206,21 @@ typedef struct pljs_type_io {
 
   /* domain_check()'s cached state. */
   void *domain_extra;
+
+  /* A constraint has changed since the domain's checking state was built. */
+  bool domain_stale;
+
+  /* A check further up the stack is using the domain's checking state. */
+  bool domain_busy;
 } pljs_type_io;
 
 static HTAB *pljs_type_io_hash = NULL;
+
+/* Bumped by every pg_type invalidation; see pljs_type_io_lookup(). */
+static uint64 pljs_type_io_invalidations = 0;
+
+/* Some entry has gone stale since the last transaction ended. */
+static bool pljs_type_io_have_stale = false;
 
 /**
  * @brief Whether pljs has a dedicated conversion for a (non-domain) type.
@@ -231,11 +261,13 @@ static bool pljs_type_has_js_case(Oid typid) {
  *
  * Only marks; never frees.  This can run in the middle of a conversion that is
  * using the entry, so the memory is released by pljs_type_io_lookup() when it
- * rebuilds the entry instead.
+ * rebuilds the entry, or by pljs_type_io_xact_callback() if it never does.
  */
 static void pljs_type_io_invalidate(Datum arg, int cacheid, uint32 hashvalue) {
   HASH_SEQ_STATUS status;
   pljs_type_io *entry;
+
+  pljs_type_io_invalidations++;
 
   if (pljs_type_io_hash == NULL) {
     return;
@@ -247,8 +279,90 @@ static void pljs_type_io_invalidate(Datum arg, int cacheid, uint32 hashvalue) {
     if (hashvalue == 0 || entry->hashvalue == hashvalue ||
         entry->base_hashvalue == hashvalue) {
       entry->valid = false;
+      pljs_type_io_have_stale = true;
     }
   }
+}
+
+/**
+ * @brief Syscache callback: a constraint changed, so mark every domain's
+ * checking state stale.
+ *
+ * The hash of a pg_constraint row does not say which domain, if any, it
+ * belongs to; the typcache marks every domain for the same reason.
+ */
+static void pljs_type_io_invalidate_constraints(Datum arg, int cacheid,
+                                                uint32 hashvalue) {
+  HASH_SEQ_STATUS status;
+  pljs_type_io *entry;
+
+  if (pljs_type_io_hash == NULL) {
+    return;
+  }
+
+  hash_seq_init(&status, pljs_type_io_hash);
+
+  while ((entry = (pljs_type_io *)hash_seq_search(&status)) != NULL) {
+    if (entry->is_domain) {
+      entry->domain_stale = true;
+    }
+  }
+}
+
+/**
+ * @brief Transaction callback: remove the entries that went stale.
+ *
+ * A stale entry is rebuilt only when its type is looked up again, which a
+ * dropped type never is, so each one -- every temporary table's row type, for
+ * instance -- kept its entry and its memory for the life of the backend.  No
+ * conversion spans the end of a transaction, so nothing can still be using
+ * one here.
+ */
+static void pljs_type_io_xact_callback(XactEvent event, void *arg) {
+  HASH_SEQ_STATUS status;
+  pljs_type_io *entry;
+
+  switch (event) {
+  case XACT_EVENT_COMMIT:
+  case XACT_EVENT_PARALLEL_COMMIT:
+  case XACT_EVENT_ABORT:
+  case XACT_EVENT_PARALLEL_ABORT:
+  case XACT_EVENT_PREPARE:
+    break;
+  default:
+    return;
+  }
+
+  if (!pljs_type_io_have_stale || pljs_type_io_hash == NULL) {
+    return;
+  }
+
+  pljs_type_io_have_stale = false;
+
+  hash_seq_init(&status, pljs_type_io_hash);
+
+  while ((entry = (pljs_type_io *)hash_seq_search(&status)) != NULL) {
+    if (!entry->valid) {
+      if (entry->mcxt != NULL) {
+        MemoryContextDelete(entry->mcxt);
+      }
+
+      /* Removing the entry just returned is allowed during a scan. */
+      hash_search(pljs_type_io_hash, &entry->typid, HASH_REMOVE, NULL);
+    }
+  }
+}
+
+/**
+ * @brief Forgets everything a cached type looked up on first use.
+ */
+static void pljs_type_io_forget_state(pljs_type_io *io) {
+  io->have_input = false;
+  io->have_output = false;
+  io->have_coercion = false;
+  io->coercion_valid = false;
+  io->domain_extra = NULL;
+  io->domain_stale = false;
 }
 
 /**
@@ -263,8 +377,9 @@ static pljs_type_io *pljs_type_io_lookup(Oid typid) {
   pljs_type_io *entry;
   bool found;
   char typtype;
-  char category;
+  char base_category;
   bool is_preferred;
+  uint64 invalidations;
 
   if (pljs_type_io_hash == NULL) {
     HASHCTL ctl = {0};
@@ -277,6 +392,9 @@ static pljs_type_io *pljs_type_io_lookup(Oid typid) {
                                     HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
 
     CacheRegisterSyscacheCallback(TYPEOID, pljs_type_io_invalidate, (Datum)0);
+    CacheRegisterSyscacheCallback(
+        CONSTROID, pljs_type_io_invalidate_constraints, (Datum)0);
+    RegisterXactCallback(pljs_type_io_xact_callback, NULL);
   }
 
   entry = (pljs_type_io *)hash_search(pljs_type_io_hash, &typid, HASH_ENTER,
@@ -304,15 +422,20 @@ static pljs_type_io *pljs_type_io_lookup(Oid typid) {
     entry->mcxt = NULL;
   }
 
+  /* Until the build below succeeds; an error leaves it for the sweep. */
   entry->valid = false;
-  entry->have_input = false;
-  entry->have_output = false;
-  entry->have_coercion = false;
-  entry->coercion_valid = false;
-  entry->domain_extra = NULL;
+  pljs_type_io_have_stale = true;
 
-  entry->mcxt = AllocSetContextCreate(TopMemoryContext, "PLJS Type I/O",
-                                      ALLOCSET_SMALL_SIZES);
+  entry->domain_busy = false;
+  pljs_type_io_forget_state(entry);
+
+  /*
+   * The catalog lookups below can process invalidations, and one for this
+   * type processed after its row was read would be lost if the entry were
+   * then simply marked valid.  Count them instead: if any arrive, the entry
+   * is still returned, but left stale to be rebuilt on its next use.
+   */
+  invalidations = pljs_type_io_invalidations;
 
   typtype = get_typtype(typid);
 
@@ -332,16 +455,52 @@ static pljs_type_io *pljs_type_io_lookup(Oid typid) {
 
   entry->has_js_case = pljs_type_has_js_case(entry->basetype);
 
-  get_type_category_preferred(entry->basetype, &category, &is_preferred);
+  get_type_category_preferred(typid, &entry->category, &is_preferred);
+  get_typlenbyvalalign(typid, &entry->length, &entry->byval, &entry->align);
+
+  entry->elemtype = InvalidOid;
+  entry->elem_is_composite = false;
+
+  if (entry->category == TYPCATEGORY_ARRAY) {
+    /*
+     * A domain over an array has the array's category but no element type of
+     * its own, so look through it to the array it is a domain over.
+     */
+    entry->elemtype = get_element_type(entry->basetype);
+
+    if (OidIsValid(entry->elemtype)) {
+      entry->elem_is_composite =
+          (TypeCategory(entry->elemtype) == TYPCATEGORY_COMPOSITE);
+      get_typlenbyvalalign(entry->elemtype, &entry->elem_length,
+                           &entry->elem_byval, &entry->elem_align);
+    }
+  }
+
+  if (entry->is_domain) {
+    get_type_category_preferred(entry->basetype, &base_category, &is_preferred);
+  } else {
+    base_category = entry->category;
+  }
 
   entry->domain_via_input = entry->is_domain && !entry->has_js_case &&
-                            category != TYPCATEGORY_ARRAY &&
-                            category != TYPCATEGORY_COMPOSITE &&
-                            !type_is_rowtype(entry->basetype);
+                            base_category != TYPCATEGORY_ARRAY &&
+                            base_category != TYPCATEGORY_COMPOSITE;
 
-  entry->valid = true;
+  entry->valid = (pljs_type_io_invalidations == invalidations);
 
   return entry;
+}
+
+/**
+ * @brief Returns a cached type's memory context, creating it on first use.
+ */
+static MemoryContext pljs_type_io_mcxt(pljs_type_io *io) {
+  if (io->mcxt == NULL) {
+    io->mcxt = AllocSetContextCreate(TopMemoryContext, "PLJS Type I/O",
+                                     ALLOCSET_SMALL_SIZES);
+  }
+
+  return io->mcxt;
 }
 
 /**
@@ -352,7 +511,7 @@ static FmgrInfo *pljs_type_io_input(pljs_type_io *io) {
     Oid typinput;
 
     getTypeInputInfo(io->typid, &typinput, &io->ioparam);
-    fmgr_info_cxt(typinput, &io->input, io->mcxt);
+    fmgr_info_cxt(typinput, &io->input, pljs_type_io_mcxt(io));
     io->have_input = true;
   }
 
@@ -368,7 +527,7 @@ static FmgrInfo *pljs_type_io_output(pljs_type_io *io) {
     bool typisvarlena;
 
     getTypeOutputInfo(io->typid, &typoutput, &typisvarlena);
-    fmgr_info_cxt(typoutput, &io->output, io->mcxt);
+    fmgr_info_cxt(typoutput, &io->output, pljs_type_io_mcxt(io));
     io->have_output = true;
   }
 
@@ -410,7 +569,7 @@ static Datum pljs_apply_typmod(pljs_type_io *io, Datum value, int32 typmod) {
 
     if (find_typmod_coercion_function(io->typid, &funcid) ==
         COERCION_PATH_FUNC) {
-      fmgr_info_cxt(funcid, &io->coercion, io->mcxt);
+      fmgr_info_cxt(funcid, &io->coercion, pljs_type_io_mcxt(io));
       io->coercion_nargs = get_func_nargs(funcid);
       io->coercion_valid = true;
     }
@@ -432,24 +591,117 @@ static Datum pljs_apply_typmod(pljs_type_io *io, Datum value, int32 typmod) {
 }
 
 /**
+ * @brief Checks a value against a domain's constraints.
+ *
+ * A domain converted through its input function (domain_via_input) has @p str
+ * parsed and checked by domain_in(), and the parsed value is returned; @p str
+ * is NULL for a SQL NULL.  Any other domain has @p value, already built as its
+ * base type, checked by domain_check() and returned unchanged.  domain_check()
+ * needs the base type's binary receive function, which every type pljs builds
+ * itself has.
+ *
+ * Both functions keep their state -- the constraints' ExprStates and the
+ * ExprContext they run in -- in the entry's memory context, and two things
+ * about that state need care:
+ *
+ *   - A check further up the stack may be using it.  A CHECK constraint can
+ *     call a function that converts a value of the same domain, and the
+ *     nested check then overwrote the value the outer one's expression reads
+ *     as VALUE and reset the memory it was evaluating in: with
+ *     `CHECK (f(VALUE) AND VALUE < 1000)`, where f() converts 5 to the same
+ *     domain, 2000 passed.  A nested check gets state of its own, built and
+ *     freed around that one call.
+ *
+ *   - When a constraint changes, both rebuild the constraints' ExprStates in
+ *     that context and never free the old ones, since PostgreSQL expects the
+ *     context to be short-lived.  This one lives as long as the backend, and
+ *     every constraint change anywhere -- a temporary table's CHECK included
+ *     -- grew it by another copy of every cached domain's constraints.  So a
+ *     constraint change marks the state stale, and it is freed here, to be
+ *     built again.
+ *
+ * @param io #pljs_type_io - the domain
+ * @param str @c char* - the text to parse, or NULL; for a domain_via_input
+ * domain
+ * @param value #Datum - the value to check; for any other domain
+ * @param isnull @c bool - whether @p value is SQL NULL
+ * @returns #Datum of the domain
+ */
+static Datum pljs_domain_check(pljs_type_io *io, char *str, Datum value,
+                               bool isnull) {
+  MemoryContext nested = NULL;
+  MemoryContext mcxt;
+  FmgrInfo nested_input;
+  FmgrInfo *input = NULL;
+  Oid ioparam = InvalidOid;
+  void *nested_extra = NULL;
+  void **extra;
+  Datum ret = value;
+
+  if (io->domain_busy) {
+    nested = AllocSetContextCreate(
+        CurrentMemoryContext, "PLJS Nested Domain Check", ALLOCSET_SMALL_SIZES);
+    mcxt = nested;
+    extra = &nested_extra;
+
+    if (io->domain_via_input) {
+      Oid typinput;
+
+      getTypeInputInfo(io->typid, &typinput, &ioparam);
+      fmgr_info_cxt(typinput, &nested_input, nested);
+      input = &nested_input;
+    }
+  } else {
+    if (io->domain_stale && io->mcxt != NULL) {
+      MemoryContextReset(io->mcxt);
+      pljs_type_io_forget_state(io);
+    }
+
+    io->domain_stale = false;
+    mcxt = pljs_type_io_mcxt(io);
+    extra = &io->domain_extra;
+
+    if (io->domain_via_input) {
+      input = pljs_type_io_input(io);
+      ioparam = io->ioparam;
+    }
+
+    io->domain_busy = true;
+  }
+
+  PG_TRY();
+  {
+    if (io->domain_via_input) {
+      ret = InputFunctionCall(input, str, ioparam, -1);
+    } else {
+      domain_check(value, isnull, io->typid, extra, mcxt);
+    }
+  }
+  PG_FINALLY();
+  {
+    if (nested != NULL) {
+      MemoryContextDelete(nested);
+    } else {
+      io->domain_busy = false;
+    }
+  }
+  PG_END_TRY();
+
+  return ret;
+}
+
+/**
  * @brief Enforces a domain's constraints on a SQL NULL.
  *
- * A NULL never reaches a conversion function -- the array, composite and
- * return paths all short-circuit it -- so without this a domain declared NOT
- * NULL, or with a CHECK that rejects NULL, accepted one from JavaScript.
- * domain_in() with a NULL string is how PostgreSQL itself checks that; unlike
- * domain_check(), it needs only the base type's text input function, which
- * every type has.
+ * NOT NULL, or a CHECK that rejects NULL, has to hold for a NULL from
+ * JavaScript as much as for any other value.
  *
- * @param typid #Oid - the type being assigned NULL; a no-op unless a domain
+ * @param io #pljs_type_io - the type being assigned NULL; a no-op unless a
+ * domain
  */
-static void pljs_domain_check_null(Oid typid) {
-  pljs_type_io *io = pljs_type_io_lookup(typid);
-
+static void pljs_domain_check_null(pljs_type_io *io) {
   if (io->is_domain) {
-    FmgrInfo *input = pljs_type_io_input(io);
-
-    InputFunctionCall(input, NULL, io->ioparam, -1);
+    pljs_domain_check(io, NULL, (Datum)0, true);
   }
 }
 
@@ -647,6 +899,36 @@ uint32_t pljs_js_array_length(JSValueConst obj, JSContext *ctx) {
 }
 
 /**
+ * @brief Fills a `pljs_type` from a type's cached conversion state.
+ *
+ * @param type #pljs_type - the location to store the type data
+ * @param io #pljs_type_io - the Postgres type to decode
+ */
+static void pljs_type_fill_io(pljs_type *type, pljs_type_io *io) {
+  type->typid = io->typid;
+  type->category = io->category;
+  type->is_composite = (io->category == TYPCATEGORY_COMPOSITE);
+  type->length = io->length;
+  type->byval = io->byval;
+  type->align = io->align;
+
+  if (io->category == TYPCATEGORY_ARRAY) {
+    if (!OidIsValid(io->elemtype)) {
+      ereport(ERROR, (errmsg("cannot determine element type of array: %u",
+                             io->typid)));
+    }
+
+    type->typid = io->elemtype;
+    type->is_composite = io->elem_is_composite;
+    type->length = io->elem_length;
+    type->byval = io->elem_byval;
+    type->align = io->elem_align;
+  } else if (io->category == TYPCATEGORY_PSEUDOTYPE) {
+    type->is_composite = true;
+  }
+}
+
+/**
  * @brief Converts an `Oid` into `pljs_type`.
  *
  * Takes an input of a pointer to `pljs_type` and an `Oid`,
@@ -657,34 +939,7 @@ uint32_t pljs_js_array_length(JSValueConst obj, JSContext *ctx) {
  * @param typid #Oid - the Postgres type to decode
  */
 void pljs_type_fill(pljs_type *type, Oid typid) {
-  bool is_preferred;
-  type->typid = typid;
-
-  get_type_category_preferred(typid, &type->category, &is_preferred);
-
-  type->is_composite = (type->category == TYPCATEGORY_COMPOSITE);
-
-  get_typlenbyvalalign(typid, &type->length, &type->byval, &type->align);
-
-  if (type->category == TYPCATEGORY_ARRAY) {
-    /*
-     * A domain over an array has the array's category but no element type of
-     * its own, so look through it to the array it is a domain over.
-     */
-    Oid elemid = get_element_type(pljs_type_base(typid));
-
-    if (elemid == InvalidOid) {
-      ereport(ERROR,
-              (errmsg("cannot determine element type of array: %u", typid)));
-    }
-
-    type->typid = elemid;
-    type->is_composite = (TypeCategory(elemid) == TYPCATEGORY_COMPOSITE);
-    get_typlenbyvalalign(type->typid, &type->length, &type->byval,
-                         &type->align);
-  } else if (type->category == TYPCATEGORY_PSEUDOTYPE) {
-    type->is_composite = true;
-  }
+  pljs_type_fill_io(type, pljs_type_io_lookup(typid));
 }
 
 /**
@@ -950,7 +1205,7 @@ JSValue pljs_datum_to_jsvalue(Oid argtype, Datum arg, bool is_null,
   }
 
   pljs_type type;
-  pljs_type_fill(&type, argtype);
+  pljs_type_fill_io(&type, io);
 
   if (type.category == TYPCATEGORY_ARRAY) {
     return pljs_datum_to_array(&type, arg, ctx);
@@ -1121,24 +1376,18 @@ Datum pljs_jsvalue_to_array(pljs_type *type, JSValue val, JSContext *ctx,
   for (int i = 0; i < array_length; i++) {
     JSValue elem = JS_GetPropertyUint32(ctx, val, i);
 
-    if (JS_IsNull(elem) || JS_IsUndefined(elem)) {
-      /* An element of a domain type must still satisfy the domain. */
-      pljs_domain_check_null(type->typid);
-      nulls[i] = true;
-    } else {
-      /*
-       * Pass NULL rather than fcinfo: an element is not the function's result.
-       * Every path in pljs_jsvalue_to_datum() that signals SQL NULL does it
-       * through pljs_null_datum(), which sets fcinfo->isnull when it has an
-       * fcinfo -- and that flag marks the *whole array* as SQL NULL. So one
-       * null-producing element discarded every other element: [1, undefined, 4]
-       * came back as NULL instead of {1,NULL,4}, as did a date[] holding an
-       * invalid Date. With NULL fcinfo the null is reported through the
-       * per-element is_null out-parameter, which is what nulls[i] is for.
-       */
-      values[i] = pljs_jsvalue_to_datum_typmod(type->typid, typmod, elem,
-                                               &nulls[i], ctx, NULL);
-    }
+    /*
+     * Pass NULL rather than fcinfo: an element is not the function's result.
+     * Every path in pljs_jsvalue_to_datum() that signals SQL NULL does it
+     * through pljs_null_datum(), which sets fcinfo->isnull when it has an
+     * fcinfo -- and that flag marks the *whole array* as SQL NULL. So one
+     * null-producing element discarded every other element: [1, undefined, 4]
+     * came back as NULL instead of {1,NULL,4}, as did a date[] holding an
+     * invalid Date. With NULL fcinfo the null is reported through the
+     * per-element is_null out-parameter, which is what nulls[i] is for.
+     */
+    values[i] = pljs_jsvalue_to_datum_typmod(type->typid, typmod, elem,
+                                             &nulls[i], ctx, NULL);
 
     /* JS_GetPropertyUint32() returns an owned reference. */
     JS_FreeValue(ctx, elem);
@@ -1318,24 +1567,6 @@ Datum *pljs_jsvalue_to_datums(pljs_type *type, JSValue val, bool **is_null,
 
     JSValue o = JS_GetPropertyStr(ctx, val, colname);
 
-    /*
-     * JS_GetPropertyStr() returns an owned reference, so it has to be released
-     * on every path out of this iteration -- including the null/undefined
-     * short-circuit below.  Leaking it costs one QuickJS reference per column
-     * per row, on every composite return and every return_next() of a row
-     * object, which is the hottest allocation path in the extension.  Because
-     * QuickJS runs on the libc allocator the loss is invisible to
-     * pg_backend_memory_contexts; it counts against pljs.memory_limit and is
-     * not returned until the backend exits.
-     */
-    if (JS_IsNull(o) || JS_IsUndefined(o)) {
-      JS_FreeValue(ctx, o);
-      /* A column of a domain type must still satisfy the domain. */
-      pljs_domain_check_null(TupleDescAttr(tupdesc, c)->atttypid);
-      (*is_null)[c] = true;
-      continue;
-    }
-
     // Set the value of each Datum, or set the `is_null` flag if it is
     // considered `NULL`.  The column's typmod applies: a trigger's NEW, or a
     // composite with a varchar(n) or bit(n) column, is not re-checked by the
@@ -1344,6 +1575,15 @@ Datum *pljs_jsvalue_to_datums(pljs_type *type, JSValue val, bool **is_null,
         TupleDescAttr(tupdesc, c)->atttypid,
         TupleDescAttr(tupdesc, c)->atttypmod, o, &(*is_null)[c], ctx, NULL);
 
+    /*
+     * JS_GetPropertyStr() returns an owned reference, so it has to be released
+     * whatever the column's value.  Leaking it costs one QuickJS reference per
+     * column per row, on every composite return and every return_next() of a
+     * row object, which is the hottest allocation path in the extension.
+     * Because QuickJS runs on the libc allocator the loss is invisible to
+     * pg_backend_memory_contexts; it counts against pljs.memory_limit and is
+     * not returned until the backend exits.
+     */
     JS_FreeValue(ctx, o);
   }
 
@@ -1397,10 +1637,15 @@ Datum pljs_jsvalue_to_record(pljs_type *type, JSValue val, bool *is_null,
 
     /* Owned reference: release it on both paths.  See pljs_jsvalue_to_datums().
      */
-    if (JS_IsNull(o) || JS_IsUndefined(o)) {
+    if (TupleDescAttr(tupdesc, c)->attgenerated != '\0' &&
+        (JS_IsNull(o) || JS_IsUndefined(o))) {
+      /*
+       * A generated column is NULL in a BEFORE trigger's NEW, since the
+       * executor computes it after the trigger has run.  That NULL is not a
+       * value to check against the column's domain: a NOT NULL domain
+       * rejected it, so a trigger that returned NEW failed on every row.
+       */
       JS_FreeValue(ctx, o);
-      /* A column of a domain type must still satisfy the domain. */
-      pljs_domain_check_null(TupleDescAttr(tupdesc, c)->atttypid);
       nulls[c] = true;
       continue;
     }
@@ -1536,8 +1781,12 @@ static Datum pljs_jsvalue_to_datum_via_io(pljs_type_io *io, JSValueConst val,
 
   PG_TRY();
   {
-    input = pljs_type_io_input(io);
-    ret = InputFunctionCall(input, (char *)str, io->ioparam, typmod);
+    if (io->is_domain) {
+      ret = pljs_domain_check(io, (char *)str, (Datum)0, false);
+    } else {
+      input = pljs_type_io_input(io);
+      ret = InputFunctionCall(input, (char *)str, io->ioparam, typmod);
+    }
   }
   PG_CATCH();
   {
@@ -1672,7 +1921,7 @@ static int64 pljs_bigint_to_int64_checked(JSContext *ctx, JSValueConst val,
  * Called with the base type for a domain; see pljs_jsvalue_to_datum_typmod(),
  * which resolves the domain and then validates what this builds.
  *
- * @param rettype #Oid - type information for the record
+ * @param io #pljs_type_io - cached conversion state for the target type
  * @param typmod @c int32 - passed to an array's elements and to the fallback's
  * input function; a type with a case of its own has it applied afterwards, by
  * pljs_jsvalue_to_datum_typmod()
@@ -1682,10 +1931,12 @@ static int64 pljs_bigint_to_int64_checked(JSContext *ctx, JSValueConst val,
  * @param fcinfo #FunctionCallInfo - optional, can be NULL
  * @returns #Datum of the Postgres value
  */
-static Datum pljs_jsvalue_to_datum_internal(Oid rettype, int32 typmod,
+static Datum pljs_jsvalue_to_datum_internal(pljs_type_io *io, int32 typmod,
                                             JSValue val, bool *is_null,
                                             JSContext *ctx,
                                             FunctionCallInfo fcinfo) {
+  Oid rettype = io->typid;
+
   // Initialize is_null to false
   if (is_null) {
     *is_null = false;
@@ -1693,7 +1944,7 @@ static Datum pljs_jsvalue_to_datum_internal(Oid rettype, int32 typmod,
 
   pljs_type type;
 
-  pljs_type_fill(&type, rettype);
+  pljs_type_fill_io(&type, io);
 
   /*
    * Decide "build a SQL array" or "build a JSON array" from the SQL type's
@@ -2175,8 +2426,7 @@ static Datum pljs_jsvalue_to_datum_internal(Oid rettype, int32 typmod,
     }
 
   default:
-    return pljs_jsvalue_to_datum_fallback(
-        val, is_null, pljs_type_io_lookup(rettype), typmod, ctx);
+    return pljs_jsvalue_to_datum_fallback(val, is_null, io, typmod, ctx);
   }
 
   /*
@@ -2206,7 +2456,7 @@ static Datum pljs_jsvalue_to_datum_internal(Oid rettype, int32 typmod,
 static Datum pljs_jsvalue_to_base(pljs_type_io *io, int32 typmod, JSValue val,
                                   bool *isnull, JSContext *ctx) {
   Datum ret =
-      pljs_jsvalue_to_datum_internal(io->typid, typmod, val, isnull, ctx, NULL);
+      pljs_jsvalue_to_datum_internal(io, typmod, val, isnull, ctx, NULL);
 
   if (!*isnull && io->has_js_case) {
     ret = pljs_apply_typmod(io, ret, typmod);
@@ -2234,7 +2484,10 @@ static Datum pljs_jsvalue_to_base(pljs_type_io *io, int32 typmod, JSValue val,
  *     constraints, and unlike domain_check() it needs no binary receive
  *     function, which not every type has.
  *
- * Either way a SQL NULL is checked against the domain as well.
+ * A SQL NULL -- JavaScript's null or undefined -- is checked against a domain
+ * too, and is handled here for every type, so no caller needs a null path of
+ * its own.  An array type used to see a NULL result as "value is not an
+ * Array".
  *
  * The result's nullness is always reported through both @p is_null and
  * @p fcinfo.  A composite, or the fallback's `{is_null: true}`, reported it
@@ -2253,26 +2506,46 @@ static Datum pljs_jsvalue_to_base(pljs_type_io *io, int32 typmod, JSValue val,
 static Datum pljs_jsvalue_to_datum_typmod(Oid typid, int32 typmod, JSValue val,
                                           bool *is_null, JSContext *ctx,
                                           FunctionCallInfo fcinfo) {
-  pljs_type_io *io = pljs_type_io_lookup(typid);
+  pljs_type_io *io;
   bool isnull = false;
   Datum ret = (Datum)0;
 
+  /*
+   * A void function returns void, never NULL, whatever it returned.  void is
+   * a pseudotype, which the conversion treats as a composite: `return;` came
+   * back as SQL NULL, and any other value raised "type void is not
+   * composite".
+   */
+  if (typid == VOIDOID) {
+    if (is_null != NULL) {
+      *is_null = false;
+    }
+
+    return (Datum)0;
+  }
+
+  io = pljs_type_io_lookup(typid);
+
+  if (JS_IsNull(val) || JS_IsUndefined(val)) {
+    pljs_domain_check_null(io);
+
+    return pljs_null_datum(is_null, fcinfo);
+  }
+
   if (!io->is_domain) {
     ret = pljs_jsvalue_to_base(io, typmod, val, &isnull, ctx);
-  } else if (JS_IsNull(val) || JS_IsUndefined(val)) {
-    pljs_domain_check_null(typid);
-    isnull = true;
   } else if (io->domain_via_input) {
+    /* A non-null value is parsed and checked by domain_in(). */
     ret = pljs_jsvalue_to_datum_fallback(val, &isnull, io, -1, ctx);
 
     if (isnull) {
-      pljs_domain_check_null(typid);
+      pljs_domain_check_null(io);
     }
   } else {
     ret = pljs_jsvalue_to_base(pljs_type_io_lookup(io->basetype),
                                io->basetypmod, val, &isnull, ctx);
 
-    domain_check(ret, isnull, typid, &io->domain_extra, io->mcxt);
+    pljs_domain_check(io, NULL, ret, isnull);
   }
 
   if (isnull) {

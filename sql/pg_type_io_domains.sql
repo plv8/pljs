@@ -240,15 +240,111 @@ CREATE FUNCTION tid_mem(n int4) RETURNS SETOF tid_pos LANGUAGE pljs AS $$
 $$;
 SELECT count(*) FROM tid_mem(50000);
 
-DROP TABLE tid_tbl, tid_spi;
+-- 7) A generated column is NULL in a BEFORE trigger's NEW until the executor
+-- computes it, so it is not checked against its domain.  A NOT NULL domain
+-- rejected it, and a trigger returning NEW failed on every row.
+CREATE TABLE tid_gen (a int4, b tid_nn GENERATED ALWAYS AS (a * 2) STORED);
+CREATE FUNCTION tid_gen_trig() RETURNS trigger LANGUAGE pljs AS $$
+  return NEW;
+$$;
+CREATE TRIGGER tid_gen_trig BEFORE INSERT OR UPDATE ON tid_gen
+  FOR EACH ROW EXECUTE FUNCTION tid_gen_trig();
+INSERT INTO tid_gen (a) VALUES (1);
+UPDATE tid_gen SET a = 5;
+SELECT * FROM tid_gen;
+
+-- 8) A CHECK constraint that converts a value of its own domain.  The nested
+-- check shared the outer one's state and overwrote the VALUE the outer one
+-- was checking, so 2000 passed.
+CREATE FUNCTION tid_nest_chk(v int4) RETURNS bool LANGUAGE pljs AS $$
+  if (v >= 1000) pljs.execute('SELECT $1::tid_nest AS x', [5]);
+  return true;
+$$;
+CREATE DOMAIN tid_nest AS int4 CHECK (tid_nest_chk(VALUE) AND VALUE < 1000);
+CREATE FUNCTION tid_nest_ret(i int4) RETURNS tid_nest LANGUAGE pljs AS $$
+  return i;
+$$;
+SELECT 2000::tid_nest;
+SELECT tid_nest_ret(2000);
+SELECT tid_nest_ret(20);
+
+-- The same through domain_in().
+CREATE FUNCTION tid_nest_uuid_chk(v uuid) RETURNS bool LANGUAGE pljs AS $$
+  if (v !== '00000000-0000-0000-0000-000000000005') {
+    pljs.execute('SELECT $1::tid_nest_uuid AS x',
+                 ['00000000-0000-0000-0000-000000000005']);
+  }
+  return true;
+$$;
+CREATE DOMAIN tid_nest_uuid AS uuid
+  CHECK (tid_nest_uuid_chk(VALUE) AND
+         VALUE = '00000000-0000-0000-0000-000000000005');
+CREATE FUNCTION tid_nest_uuid_ret(s text) RETURNS tid_nest_uuid
+  LANGUAGE pljs AS $$
+  return s;
+$$;
+SELECT tid_nest_uuid_ret('00000000-0000-0000-0000-000000000009');
+SELECT tid_nest_uuid_ret('00000000-0000-0000-0000-000000000005');
+
+-- 9) Any constraint change -- even a temporary table's CHECK -- makes every
+-- cached domain rebuild its constraints.  They were rebuilt in the cache's
+-- memory without the old ones being freed, so the cache grew with every
+-- such change for the life of the backend.
+CREATE FUNCTION tid_pos_ret(i int4) RETURNS tid_pos LANGUAGE pljs AS $$
+  return i;
+$$;
+SELECT tid_pos_ret(1), tid_uuid_ret('0192f1c2-3a4b-7c5d-8e6f-0a1b2c3d4e5f');
+SELECT coalesce(sum(total_bytes), 0) AS before_bytes
+  FROM pg_backend_memory_contexts WHERE name = 'PLJS Type I/O' \gset
+DO $$
+BEGIN
+  FOR i IN 1..300 LOOP
+    CREATE TEMP TABLE tid_churn (x int4 CHECK (x > 0));
+    DROP TABLE tid_churn;
+    PERFORM tid_pos_ret(1),
+            tid_uuid_ret('0192f1c2-3a4b-7c5d-8e6f-0a1b2c3d4e5f');
+  END LOOP;
+END $$;
+SELECT coalesce(sum(total_bytes), 0) - :before_bytes < 65536
+         AS grew_by_less_than_64kb
+  FROM pg_backend_memory_contexts WHERE name = 'PLJS Type I/O';
+
+-- 10) The entry for a type that is dropped is freed.  A stale entry was only
+-- freed when its type was looked up again, which a dropped type never is, so
+-- every temporary table's row type stayed cached.
+CREATE FUNCTION tid_rowarg(r anyelement) RETURNS int4 LANGUAGE pljs AS $$
+  return 1;
+$$;
+CREATE PROCEDURE tid_row_churn(n int4) LANGUAGE plpgsql AS $$
+BEGIN
+  FOR i IN 1..n LOOP
+    CREATE TEMP TABLE tid_churn_row (x int4);
+    INSERT INTO tid_churn_row VALUES (1);
+    PERFORM tid_rowarg(t) FROM tid_churn_row t;
+    DROP TABLE tid_churn_row;
+    COMMIT;
+  END LOOP;
+END $$;
+CALL tid_row_churn(50);
+SELECT total_bytes AS before_bytes
+  FROM pg_backend_memory_contexts WHERE name = 'PLJS Type I/O Cache' \gset
+CALL tid_row_churn(1000);
+SELECT total_bytes - :before_bytes < 16384 AS cache_did_not_grow
+  FROM pg_backend_memory_contexts WHERE name = 'PLJS Type I/O Cache';
+
+DROP TABLE tid_tbl, tid_spi, tid_gen;
+DROP PROCEDURE tid_row_churn;
 DROP FUNCTION tid_uuid_seen, tid_uuid_ret, tid_uuid_0192_ret, tid_mood_ret,
               tid_acl_echo, tid_ints_push, tid_ints_empty, tid_pair_bump,
               tid_pair_bad, tid_nn_uuid_null, tid_nn_uuid_sentinel,
               tid_nn_ts_nan, tid_nn_array, tid_pos_array, tid_row_ret,
               tid_row_set, tid_tbl_trig, tid_jsonb_set, tid_ints_set,
-              tid_later_ret, tid_later_null, tid_later_uuid_ret, tid_mem;
+              tid_later_ret, tid_later_null, tid_later_uuid_ret, tid_mem,
+              tid_gen_trig, tid_nest_ret, tid_nest_uuid_ret, tid_pos_ret,
+              tid_rowarg;
 DROP TYPE tid_row;
 DROP DOMAIN tid_uuid_0192, tid_uuid, tid_good_mood, tid_acl, tid_pos,
             tid_ints, tid_pos_pair, tid_nn, tid_nn_uuid, tid_nn_ts, tid_jsonb,
-            tid_later_renamed, tid_later_uuid;
+            tid_later_renamed, tid_later_uuid, tid_nest, tid_nest_uuid;
+DROP FUNCTION tid_nest_chk, tid_nest_uuid_chk;
 DROP TYPE tid_mood, tid_pair;

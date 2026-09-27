@@ -1586,9 +1586,21 @@ static Datum call_function(FunctionCallInfo fcinfo, pljs_context *context,
       }
 
       pljs_type type;
+      bool is_null = false;
+
       pljs_type_fill(&type, rettype);
 
-      datum = pljs_jsvalue_to_record(&type, ret, NULL, tupdesc, context->ctx);
+      /*
+       * pljs_jsvalue_to_record() reports a null or undefined result through
+       * is_null, and was handed NULL for it: `return null` from a function
+       * returning record, or with OUT parameters, crashed the backend.
+       */
+      datum =
+          pljs_jsvalue_to_record(&type, ret, &is_null, tupdesc, context->ctx);
+
+      if (is_null) {
+        fcinfo->isnull = true;
+      }
     } else {
       bool is_null;
       datum =
