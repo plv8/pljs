@@ -1,6 +1,5 @@
 #include "postgres.h"
 
-#include "access/xact.h"
 #include "catalog/pg_type_d.h"
 #include "executor/spi.h"
 #include "fmgr.h"
@@ -9,12 +8,10 @@
 #include "utils/array.h"
 #include "utils/builtins.h"
 #include "utils/date.h"
-#include "utils/inval.h"
 #include "utils/jsonb.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/palloc.h"
-#include "utils/syscache.h"
 #include "utils/timestamp.h"
 #include "utils/typcache.h"
 
@@ -131,7 +128,7 @@ static Datum pljs_jsvalue_to_datum_via_io(struct pljs_type_io *io,
                                           JSContext *ctx);
 
 /**
- * @brief What pljs needs to convert one type, looked up once per backend.
+ * @brief What pljs needs to convert one type.
  *
  * plv8 keeps a type's input and output FmgrInfo on its type descriptor, so the
  * catalog lookups and fmgr_info() happen once rather than per value. pljs
@@ -142,23 +139,15 @@ static Datum pljs_jsvalue_to_datum_via_io(struct pljs_type_io *io,
  * current. In a return_next() loop that context lives for the whole call, and
  * 200,000 rows of a domain with a CHECK constraint grew the backend by 2GB.
  *
- * The state here is built once per type and reused. A change to the type's
- * pg_type row -- or its base type's -- marks the entry stale and it is rebuilt
- * on next use; an entry still stale when the transaction ends, such as one for
- * a dropped type, is removed then. A constraint change marks every domain's
- * checking state stale; see pljs_domain_check().
+ * The state here is built once per type and reused for as long as the pljs
+ * function being called keeps its FmgrInfo; see pljs_type_io_enter().
  */
 typedef struct pljs_type_io {
-  Oid typid; /* hash key */
-  bool valid;
+  Oid typid;
+  struct pljs_type_io *next;
 
-  /*
-   * Owns every allocation below.  Created on first use, since most types need
-   * none, and replaced wholesale when the entry is rebuilt.
-   */
+  /* The function's cache context, which owns everything below. */
   MemoryContext mcxt;
-  uint32 hashvalue;      /* TYPEOID syscache hash of typid */
-  uint32 base_hashvalue; /* ...and of basetype */
 
   /* typid itself unless it is a domain, in which case its concrete base. */
   Oid basetype;
@@ -204,23 +193,34 @@ typedef struct pljs_type_io {
   FmgrInfo coercion;
   int coercion_nargs;
 
-  /* domain_check()'s cached state. */
+  /*
+   * A domain's checking state: domain_check()'s, or for a domain_via_input
+   * domain domain_in()'s, which keeps it in its FmgrInfo.  Built on first use
+   * in a context of its own, and again whenever the typcache has rebuilt the
+   * domain's constraints; see pljs_domain_check().
+   */
+  MemoryContext domain_mcxt;
   void *domain_extra;
-
-  /* A constraint has changed since the domain's checking state was built. */
-  bool domain_stale;
+  FmgrInfo domain_in;
+  DomainConstraintCache *domain_constraints;
 
   /* A check further up the stack is using the domain's checking state. */
   bool domain_busy;
 } pljs_type_io;
 
-static HTAB *pljs_type_io_hash = NULL;
+/*
+ * A pljs function's type cache, kept in its FmgrInfo's fn_extra; see
+ * pljs_type_io_enter().
+ */
+struct pljs_type_io_cache {
+  MemoryContext mcxt;
 
-/* Bumped by every pg_type invalidation; see pljs_type_io_lookup(). */
-static uint64 pljs_type_io_invalidations = 0;
+  /* A function converts a handful of types, so a list does. */
+  pljs_type_io *types;
+};
 
-/* Some entry has gone stale since the last transaction ended. */
-static bool pljs_type_io_have_stale = false;
+/* The cache of the pljs function running now, or NULL outside of one. */
+static pljs_type_io_cache *pljs_type_io_current = NULL;
 
 /**
  * @brief Whether pljs has a dedicated conversion for a (non-domain) type.
@@ -257,209 +257,98 @@ static bool pljs_type_has_js_case(Oid typid) {
 }
 
 /**
- * @brief Syscache callback: mark cached entries for a changed type stale.
+ * @brief Makes a pljs function's type cache the one conversions use.
  *
- * Only marks; never frees.  This can run in the middle of a conversion that is
- * using the entry, so the memory is released by pljs_type_io_lookup() when it
- * rebuilds the entry, or by pljs_type_io_xact_callback() if it never does.
- */
-static void pljs_type_io_invalidate(Datum arg, int cacheid, uint32 hashvalue) {
-  HASH_SEQ_STATUS status;
-  pljs_type_io *entry;
-
-  pljs_type_io_invalidations++;
-
-  if (pljs_type_io_hash == NULL) {
-    return;
-  }
-
-  hash_seq_init(&status, pljs_type_io_hash);
-
-  while ((entry = (pljs_type_io *)hash_seq_search(&status)) != NULL) {
-    if (hashvalue == 0 || entry->hashvalue == hashvalue ||
-        entry->base_hashvalue == hashvalue) {
-      entry->valid = false;
-      pljs_type_io_have_stale = true;
-    }
-  }
-}
-
-/**
- * @brief Syscache callback: a constraint changed, so mark every domain's
- * checking state stale.
+ * A pljs function keeps its types' conversion state in its FmgrInfo's
+ * fn_extra, allocated in fn_mcxt, which is where PostgreSQL's own I/O
+ * functions keep theirs and where plv8 keeps its type descriptors.  It is
+ * built as each type is first converted, and lasts as long as the FmgrInfo:
+ * the query calling the function, or for a CALL or a DO block the whole call,
+ * COMMITs included.
  *
- * The hash of a pg_constraint row does not say which domain, if any, it
- * belongs to; the typcache marks every domain for the same reason.
- */
-static void pljs_type_io_invalidate_constraints(Datum arg, int cacheid,
-                                                uint32 hashvalue) {
-  HASH_SEQ_STATUS status;
-  pljs_type_io *entry;
-
-  if (pljs_type_io_hash == NULL) {
-    return;
-  }
-
-  hash_seq_init(&status, pljs_type_io_hash);
-
-  while ((entry = (pljs_type_io *)hash_seq_search(&status)) != NULL) {
-    if (entry->is_domain) {
-      entry->domain_stale = true;
-    }
-  }
-}
-
-/**
- * @brief Transaction callback: remove the entries that went stale.
+ * Nothing frees any of it before then.  A conversion can run JavaScript -- a
+ * getter, or toString() -- which can COMMIT, or call a function that converts
+ * the same type, and the conversion further up the stack still holds its entry
+ * when that returns.  A cache kept for the life of the backend has to notice
+ * changes and free what they made stale, and every place it did so could free
+ * an entry that was still in use.  Here nothing goes stale: an entry holds
+ * only what cannot change for an existing type, read through the typcache,
+ * and a domain's constraints are checked against the typcache on every use.
+ * A nested pljs call converts with its own function's cache.
  *
- * A stale entry is rebuilt only when its type is looked up again, which a
- * dropped type never is, so each one -- every temporary table's row type, for
- * instance -- kept its entry and its memory for the life of the backend.  No
- * conversion spans the end of a transaction, so nothing can still be using
- * one here.
+ * Every entry point that can run JavaScript, and so convert, calls this, and
+ * restores the cache it returns with pljs_type_io_exit() however it leaves.
+ *
+ * @param flinfo #FmgrInfo - the pljs function being called
+ * @returns #pljs_type_io_cache - the cache to restore afterwards
  */
-static void pljs_type_io_xact_callback(XactEvent event, void *arg) {
-  HASH_SEQ_STATUS status;
-  pljs_type_io *entry;
+pljs_type_io_cache *pljs_type_io_enter(FmgrInfo *flinfo) {
+  pljs_type_io_cache *previous = pljs_type_io_current;
+  pljs_type_io_cache *cache = (pljs_type_io_cache *)flinfo->fn_extra;
 
-  switch (event) {
-  case XACT_EVENT_COMMIT:
-  case XACT_EVENT_PARALLEL_COMMIT:
-  case XACT_EVENT_ABORT:
-  case XACT_EVENT_PARALLEL_ABORT:
-  case XACT_EVENT_PREPARE:
-    break;
-  default:
-    return;
+  if (cache == NULL) {
+    MemoryContext mcxt = AllocSetContextCreate(flinfo->fn_mcxt, "PLJS Type I/O",
+                                               ALLOCSET_SMALL_SIZES);
+
+    cache = MemoryContextAllocZero(mcxt, sizeof(pljs_type_io_cache));
+    cache->mcxt = mcxt;
+    flinfo->fn_extra = cache;
   }
 
-  if (!pljs_type_io_have_stale || pljs_type_io_hash == NULL) {
-    return;
-  }
+  pljs_type_io_current = cache;
 
-  pljs_type_io_have_stale = false;
-
-  hash_seq_init(&status, pljs_type_io_hash);
-
-  while ((entry = (pljs_type_io *)hash_seq_search(&status)) != NULL) {
-    if (!entry->valid) {
-      if (entry->mcxt != NULL) {
-        MemoryContextDelete(entry->mcxt);
-      }
-
-      /* Removing the entry just returned is allowed during a scan. */
-      hash_search(pljs_type_io_hash, &entry->typid, HASH_REMOVE, NULL);
-    }
-  }
+  return previous;
 }
 
 /**
- * @brief Forgets everything a cached type looked up on first use.
+ * @brief Restores the type cache that pljs_type_io_enter() replaced.
+ *
+ * @param previous #pljs_type_io_cache - what pljs_type_io_enter() returned
  */
-static void pljs_type_io_forget_state(pljs_type_io *io) {
-  io->have_input = false;
-  io->have_output = false;
-  io->have_coercion = false;
-  io->coercion_valid = false;
-  io->domain_extra = NULL;
-  io->domain_stale = false;
+void pljs_type_io_exit(pljs_type_io_cache *previous) {
+  pljs_type_io_current = previous;
 }
 
 /**
- * @brief Returns the cached conversion state for a type, building it if needed.
+ * @brief Returns the conversion state for a type, building it if needed.
  *
  * @param typid #Oid - the type
- * @returns #pljs_type_io - owned by the cache; valid until the next lookup
- * that finds it stale, and never freed while a caller up the stack could
- * still be using it
+ * @returns #pljs_type_io - owned by the running function's cache, and valid
+ * for as long as that is
  */
 static pljs_type_io *pljs_type_io_lookup(Oid typid) {
+  pljs_type_io_cache *cache = pljs_type_io_current;
   pljs_type_io *entry;
-  bool found;
-  char typtype;
+  TypeCacheEntry *typentry;
   char base_category;
   bool is_preferred;
-  uint64 invalidations;
 
-  if (pljs_type_io_hash == NULL) {
-    HASHCTL ctl = {0};
-
-    ctl.keysize = sizeof(Oid);
-    ctl.entrysize = sizeof(pljs_type_io);
-    ctl.hcxt = TopMemoryContext;
-
-    pljs_type_io_hash = hash_create("PLJS Type I/O Cache", 64, &ctl,
-                                    HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
-
-    CacheRegisterSyscacheCallback(TYPEOID, pljs_type_io_invalidate, (Datum)0);
-    CacheRegisterSyscacheCallback(
-        CONSTROID, pljs_type_io_invalidate_constraints, (Datum)0);
-    RegisterXactCallback(pljs_type_io_xact_callback, NULL);
+  if (cache == NULL) {
+    elog(ERROR, "pljs type conversion outside of a function call");
   }
 
-  entry = (pljs_type_io *)hash_search(pljs_type_io_hash, &typid, HASH_ENTER,
-                                      &found);
-
-  if (found && entry->valid) {
-    return entry;
-  }
-
-  if (!found) {
-    entry->mcxt = NULL;
-  } else if (entry->mcxt != NULL) {
-    /*
-     * A conversion further up the stack may still hold this entry's FmgrInfo
-     * or domain_check() state -- a CHECK constraint can call a pljs function
-     * that converts a value of the same domain.  So do not free the old state
-     * here: hand it to the transaction, which frees it when it ends.
-     */
-    if (IsTransactionState()) {
-      MemoryContextSetParent(entry->mcxt, TopTransactionContext);
-    } else {
-      MemoryContextDelete(entry->mcxt);
+  for (entry = cache->types; entry != NULL; entry = entry->next) {
+    if (entry->typid == typid) {
+      return entry;
     }
-
-    entry->mcxt = NULL;
   }
 
-  /* Until the build below succeeds; an error leaves it for the sweep. */
-  entry->valid = false;
-  pljs_type_io_have_stale = true;
+  entry = MemoryContextAllocZero(cache->mcxt, sizeof(pljs_type_io));
+  entry->typid = typid;
+  entry->mcxt = cache->mcxt;
 
-  entry->domain_busy = false;
-  pljs_type_io_forget_state(entry);
+  typentry = lookup_type_cache(typid, TYPECACHE_DOMAIN_BASE_INFO);
 
-  /*
-   * The catalog lookups below can process invalidations, and one for this
-   * type processed after its row was read would be lost if the entry were
-   * then simply marked valid.  Count them instead: if any arrive, the entry
-   * is still returned, but left stale to be rebuilt on its next use.
-   */
-  invalidations = pljs_type_io_invalidations;
-
-  typtype = get_typtype(typid);
-
-  if (typtype == '\0') {
-    elog(ERROR, "cache lookup failed for type %u", typid);
-  }
-
-  entry->is_domain = (typtype == TYPTYPE_DOMAIN);
-  entry->basetypmod = -1;
-  entry->basetype = entry->is_domain
-                        ? getBaseTypeAndTypmod(typid, &entry->basetypmod)
-                        : typid;
-
-  entry->hashvalue = GetSysCacheHashValue1(TYPEOID, ObjectIdGetDatum(typid));
-  entry->base_hashvalue =
-      GetSysCacheHashValue1(TYPEOID, ObjectIdGetDatum(entry->basetype));
+  entry->is_domain = (typentry->typtype == TYPTYPE_DOMAIN);
+  entry->basetype = entry->is_domain ? typentry->domainBaseType : typid;
+  entry->basetypmod = entry->is_domain ? typentry->domainBaseTypmod : -1;
+  entry->length = typentry->typlen;
+  entry->byval = typentry->typbyval;
+  entry->align = typentry->typalign;
 
   entry->has_js_case = pljs_type_has_js_case(entry->basetype);
 
   get_type_category_preferred(typid, &entry->category, &is_preferred);
-  get_typlenbyvalalign(typid, &entry->length, &entry->byval, &entry->align);
-
-  entry->elemtype = InvalidOid;
-  entry->elem_is_composite = false;
 
   if (entry->category == TYPCATEGORY_ARRAY) {
     /*
@@ -469,10 +358,13 @@ static pljs_type_io *pljs_type_io_lookup(Oid typid) {
     entry->elemtype = get_element_type(entry->basetype);
 
     if (OidIsValid(entry->elemtype)) {
+      TypeCacheEntry *elementry = lookup_type_cache(entry->elemtype, 0);
+
       entry->elem_is_composite =
           (TypeCategory(entry->elemtype) == TYPCATEGORY_COMPOSITE);
-      get_typlenbyvalalign(entry->elemtype, &entry->elem_length,
-                           &entry->elem_byval, &entry->elem_align);
+      entry->elem_length = elementry->typlen;
+      entry->elem_byval = elementry->typbyval;
+      entry->elem_align = elementry->typalign;
     }
   }
 
@@ -486,21 +378,11 @@ static pljs_type_io *pljs_type_io_lookup(Oid typid) {
                             base_category != TYPCATEGORY_ARRAY &&
                             base_category != TYPCATEGORY_COMPOSITE;
 
-  entry->valid = (pljs_type_io_invalidations == invalidations);
+  /* Linked only once built, so a build that raised leaves nothing half done. */
+  entry->next = cache->types;
+  cache->types = entry;
 
   return entry;
-}
-
-/**
- * @brief Returns a cached type's memory context, creating it on first use.
- */
-static MemoryContext pljs_type_io_mcxt(pljs_type_io *io) {
-  if (io->mcxt == NULL) {
-    io->mcxt = AllocSetContextCreate(TopMemoryContext, "PLJS Type I/O",
-                                     ALLOCSET_SMALL_SIZES);
-  }
-
-  return io->mcxt;
 }
 
 /**
@@ -511,7 +393,7 @@ static FmgrInfo *pljs_type_io_input(pljs_type_io *io) {
     Oid typinput;
 
     getTypeInputInfo(io->typid, &typinput, &io->ioparam);
-    fmgr_info_cxt(typinput, &io->input, pljs_type_io_mcxt(io));
+    fmgr_info_cxt(typinput, &io->input, io->mcxt);
     io->have_input = true;
   }
 
@@ -527,7 +409,7 @@ static FmgrInfo *pljs_type_io_output(pljs_type_io *io) {
     bool typisvarlena;
 
     getTypeOutputInfo(io->typid, &typoutput, &typisvarlena);
-    fmgr_info_cxt(typoutput, &io->output, pljs_type_io_mcxt(io));
+    fmgr_info_cxt(typoutput, &io->output, io->mcxt);
     io->have_output = true;
   }
 
@@ -569,7 +451,7 @@ static Datum pljs_apply_typmod(pljs_type_io *io, Datum value, int32 typmod) {
 
     if (find_typmod_coercion_function(io->typid, &funcid) ==
         COERCION_PATH_FUNC) {
-      fmgr_info_cxt(funcid, &io->coercion, pljs_type_io_mcxt(io));
+      fmgr_info_cxt(funcid, &io->coercion, io->mcxt);
       io->coercion_nargs = get_func_nargs(funcid);
       io->coercion_valid = true;
     }
@@ -601,24 +483,27 @@ static Datum pljs_apply_typmod(pljs_type_io *io, Datum value, int32 typmod) {
  * itself has.
  *
  * Both functions keep their state -- the constraints' ExprStates and the
- * ExprContext they run in -- in the entry's memory context, and two things
- * about that state need care:
+ * ExprContext they run in -- in the entry's domain_mcxt, and two things about
+ * that state need care:
  *
  *   - A check further up the stack may be using it.  A CHECK constraint can
- *     call a function that converts a value of the same domain, and the
- *     nested check then overwrote the value the outer one's expression reads
- *     as VALUE and reset the memory it was evaluating in: with
- *     `CHECK (f(VALUE) AND VALUE < 1000)`, where f() converts 5 to the same
- *     domain, 2000 passed.  A nested check gets state of its own, built and
+ *     call a function that converts a value of the same domain, and when that
+ *     shared this state the nested check overwrote the value the outer one's
+ *     expression reads as VALUE and reset the memory it was evaluating in:
+ *     with `CHECK (f(VALUE) AND VALUE < 1000)`, where f() converts 5 to the
+ *     same domain, 2000 passed.  A pljs f() converts with its own function's
+ *     cache, but nothing stops the same FmgrInfo being called again from
+ *     inside a check, so a nested check still gets state of its own, built and
  *     freed around that one call.
  *
- *   - When a constraint changes, both rebuild the constraints' ExprStates in
- *     that context and never free the old ones, since PostgreSQL expects the
- *     context to be short-lived.  This one lives as long as the backend, and
- *     every constraint change anywhere -- a temporary table's CHECK included
- *     -- grew it by another copy of every cached domain's constraints.  So a
- *     constraint change marks the state stale, and it is freed here, to be
- *     built again.
+ *   - The typcache rebuilds a domain's constraints after any constraint change
+ *     anywhere -- a temporary table's CHECK included -- and both functions
+ *     then build their ExprStates again in the memory they were given without
+ *     freeing the old ones, since PostgreSQL expects that memory to be
+ *     short-lived.  This lasts as long as the function's FmgrInfo, which can
+ *     be a whole procedure or a long return_next() loop, so once the typcache
+ *     has rebuilt the domain's constraints the state is freed here and built
+ *     again.
  *
  * @param io #pljs_type_io - the domain
  * @param str @c char* - the text to parse, or NULL; for a domain_via_input
@@ -652,19 +537,40 @@ static Datum pljs_domain_check(pljs_type_io *io, char *str, Datum value,
       input = &nested_input;
     }
   } else {
-    if (io->domain_stale && io->mcxt != NULL) {
-      MemoryContextReset(io->mcxt);
-      pljs_type_io_forget_state(io);
+    TypeCacheEntry *typentry =
+        lookup_type_cache(io->typid, TYPECACHE_DOMAIN_CONSTR_INFO);
+
+    /*
+     * The typcache has rebuilt the domain's constraints since the state was
+     * built.  The state holds a reference to the ones it was built from, so
+     * a new set cannot turn up at the same address.
+     */
+    if (io->domain_mcxt != NULL &&
+        io->domain_constraints != typentry->domainData) {
+      MemoryContextDelete(io->domain_mcxt);
+      io->domain_mcxt = NULL;
     }
 
-    io->domain_stale = false;
-    mcxt = pljs_type_io_mcxt(io);
+    if (io->domain_mcxt == NULL) {
+      MemoryContext domain_mcxt = AllocSetContextCreate(
+          io->mcxt, "PLJS Domain Check", ALLOCSET_SMALL_SIZES);
+
+      if (io->domain_via_input) {
+        Oid typinput;
+
+        getTypeInputInfo(io->typid, &typinput, &io->ioparam);
+        fmgr_info_cxt(typinput, &io->domain_in, domain_mcxt);
+      }
+
+      io->domain_extra = NULL;
+      io->domain_constraints = typentry->domainData;
+      io->domain_mcxt = domain_mcxt;
+    }
+
+    mcxt = io->domain_mcxt;
     extra = &io->domain_extra;
-
-    if (io->domain_via_input) {
-      input = pljs_type_io_input(io);
-      ioparam = io->ioparam;
-    }
+    input = &io->domain_in;
+    ioparam = io->ioparam;
 
     io->domain_busy = true;
   }

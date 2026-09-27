@@ -384,41 +384,45 @@ SELECT tid_nest_uuid_ret('00000000-0000-0000-0000-000000000005');
  00000000-0000-0000-0000-000000000005
 (1 row)
 
--- 9) Any constraint change -- even a temporary table's CHECK -- makes every
--- cached domain rebuild its constraints.  They were rebuilt in the cache's
--- memory without the old ones being freed, so the cache grew with every
--- such change for the life of the backend.
-CREATE FUNCTION tid_pos_ret(i int4) RETURNS tid_pos LANGUAGE pljs AS $$
-  return i;
+-- 9) Any constraint change -- even a temporary table's CHECK -- makes the
+-- typcache rebuild every domain's constraints, and domain_check() and
+-- domain_in() then build them again without freeing the old ones.  A
+-- function keeps its domains' checking state for its whole call, so a long
+-- call that kept changing constraints grew with every change.
+CREATE FUNCTION tid_churn(n int4) RETURNS SETOF tid_pos LANGUAGE pljs AS $$
+  const used = () => Number(pljs.execute(
+    "SELECT sum(total_bytes) AS b FROM pg_backend_memory_contexts " +
+    "WHERE name IN ('PLJS Type I/O', 'PLJS Domain Check')")[0].b);
+  const plan = pljs.prepare('SELECT $1 AS x', ['tid_uuid']);
+  const churn = (count) => {
+    for (let i = 0; i < count; i++) {
+      pljs.execute('CREATE TEMP TABLE tid_churn (x int4 CHECK (x > 0))');
+      pljs.execute('DROP TABLE tid_churn');
+      pljs.return_next(1);
+      plan.execute(['0192f1c2-3a4b-7c5d-8e6f-0a1b2c3d4e5f']);
+    }
+  };
+
+  churn(10);
+
+  const before = used();
+
+  churn(n);
+
+  pljs.elog(NOTICE, 'grew by less than 64kB: ' + (used() - before < 65536));
+  plan.free();
 $$;
-SELECT tid_pos_ret(1), tid_uuid_ret('0192f1c2-3a4b-7c5d-8e6f-0a1b2c3d4e5f');
- tid_pos_ret |             tid_uuid_ret             
--------------+--------------------------------------
-           1 | 0192f1c2-3a4b-7c5d-8e6f-0a1b2c3d4e5f
+SELECT count(*) FROM tid_churn(300);
+NOTICE:  grew by less than 64kB: true
+ count 
+-------
+   310
 (1 row)
 
-SELECT coalesce(sum(total_bytes), 0) AS before_bytes
-  FROM pg_backend_memory_contexts WHERE name = 'PLJS Type I/O' \gset
-DO $$
-BEGIN
-  FOR i IN 1..300 LOOP
-    CREATE TEMP TABLE tid_churn (x int4 CHECK (x > 0));
-    DROP TABLE tid_churn;
-    PERFORM tid_pos_ret(1),
-            tid_uuid_ret('0192f1c2-3a4b-7c5d-8e6f-0a1b2c3d4e5f');
-  END LOOP;
-END $$;
-SELECT coalesce(sum(total_bytes), 0) - :before_bytes < 65536
-         AS grew_by_less_than_64kb
-  FROM pg_backend_memory_contexts WHERE name = 'PLJS Type I/O';
- grew_by_less_than_64kb 
-------------------------
- t
-(1 row)
-
--- 10) The entry for a type that is dropped is freed.  A stale entry was only
--- freed when its type was looked up again, which a dropped type never is, so
--- every temporary table's row type stayed cached.
+-- 10) A function's type state lives in its FmgrInfo, so none of it outlives
+-- the query that called the function.  A cache kept for the life of the
+-- backend had to find and free the entries for types that were dropped, such
+-- as every temporary table's row type.
 CREATE FUNCTION tid_rowarg(r anyelement) RETURNS int4 LANGUAGE pljs AS $$
   return 1;
 $$;
@@ -432,30 +436,59 @@ BEGIN
     COMMIT;
   END LOOP;
 END $$;
-CALL tid_row_churn(50);
-SELECT total_bytes AS before_bytes
-  FROM pg_backend_memory_contexts WHERE name = 'PLJS Type I/O Cache' \gset
-CALL tid_row_churn(1000);
-SELECT total_bytes - :before_bytes < 16384 AS cache_did_not_grow
-  FROM pg_backend_memory_contexts WHERE name = 'PLJS Type I/O Cache';
- cache_did_not_grow 
---------------------
- t
+CALL tid_row_churn(100);
+SELECT count(*) AS type_state_left FROM pg_backend_memory_contexts
+ WHERE name IN ('PLJS Type I/O', 'PLJS Domain Check');
+ type_state_left 
+-----------------
+               0
 (1 row)
 
+-- 11) A procedure keeps its type state across COMMIT, and a constraint added
+-- to a domain in one of its transactions applies in the next.
+CREATE DOMAIN tid_txn_uuid AS uuid;
+CREATE DOMAIN tid_txn_int AS int4;
+CREATE PROCEDURE tid_txn() LANGUAGE pljs AS $$
+  const zero = '00000000-0000-0000-0000-000000000000';
+  const convert = () => {
+    for (const [type, value] of [['tid_txn_uuid', zero], ['tid_txn_int', 0]]) {
+      try {
+        const x = pljs.execute('SELECT $1::' + type + ' AS x', [value])[0].x;
+        pljs.elog(NOTICE, 'accepted ' + x);
+      } catch (e) {
+        pljs.elog(NOTICE, e.message);
+      }
+    }
+  };
+
+  convert();
+  pljs.commit();
+  pljs.execute("ALTER DOMAIN tid_txn_uuid ADD CONSTRAINT tid_txn_uuid_nonzero " +
+               "CHECK (VALUE <> '" + zero + "')");
+  pljs.execute('ALTER DOMAIN tid_txn_int ADD CONSTRAINT tid_txn_int_pos ' +
+               'CHECK (VALUE > 0)');
+  pljs.commit();
+  convert();
+$$;
+CALL tid_txn();
+NOTICE:  accepted 00000000-0000-0000-0000-000000000000
+NOTICE:  accepted 0
+NOTICE:  value for domain tid_txn_uuid violates check constraint "tid_txn_uuid_nonzero"
+NOTICE:  value for domain tid_txn_int violates check constraint "tid_txn_int_pos"
 DROP TABLE tid_tbl, tid_spi, tid_gen;
-DROP PROCEDURE tid_row_churn;
+DROP PROCEDURE tid_row_churn, tid_txn;
 DROP FUNCTION tid_uuid_seen, tid_uuid_ret, tid_uuid_0192_ret, tid_mood_ret,
               tid_acl_echo, tid_ints_push, tid_ints_empty, tid_pair_bump,
               tid_pair_bad, tid_nn_uuid_null, tid_nn_uuid_sentinel,
               tid_nn_ts_nan, tid_nn_array, tid_pos_array, tid_row_ret,
               tid_row_set, tid_tbl_trig, tid_jsonb_set, tid_ints_set,
               tid_later_ret, tid_later_null, tid_later_uuid_ret, tid_mem,
-              tid_gen_trig, tid_nest_ret, tid_nest_uuid_ret, tid_pos_ret,
+              tid_gen_trig, tid_nest_ret, tid_nest_uuid_ret, tid_churn,
               tid_rowarg;
 DROP TYPE tid_row;
 DROP DOMAIN tid_uuid_0192, tid_uuid, tid_good_mood, tid_acl, tid_pos,
             tid_ints, tid_pos_pair, tid_nn, tid_nn_uuid, tid_nn_ts, tid_jsonb,
-            tid_later_renamed, tid_later_uuid, tid_nest, tid_nest_uuid;
+            tid_later_renamed, tid_later_uuid, tid_nest, tid_nest_uuid,
+            tid_txn_uuid, tid_txn_int;
 DROP FUNCTION tid_nest_chk, tid_nest_uuid_chk;
 DROP TYPE tid_mood, tid_pair;

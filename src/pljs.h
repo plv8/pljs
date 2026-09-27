@@ -227,6 +227,11 @@ Datum *pljs_jsvalue_to_datums(pljs_type *type, JSValue val, bool **is_null,
 uint32_t pljs_js_array_length(JSValue, JSContext *);
 void pljs_type_fill(pljs_type *, Oid);
 Oid pljs_type_base(Oid);
+
+// Type conversion state for the pljs function being called
+typedef struct pljs_type_io_cache pljs_type_io_cache;
+pljs_type_io_cache *pljs_type_io_enter(FmgrInfo *);
+void pljs_type_io_exit(pljs_type_io_cache *);
 bool pljs_jsvalue_object_contains_all_column_names(JSValue val, JSContext *ctx,
                                                    TupleDesc tupdesc,
                                                    char **missing_colname,

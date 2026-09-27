@@ -41,6 +41,8 @@ static void pljs_build_function_source(StringInfoData *src,
                                        pljs_context *context, bool is_trigger);
 static void call_anonymous_function(const char *, JSContext *);
 static Datum call_trigger(FunctionCallInfo fcinfo, pljs_context *context);
+static Datum dispatch_call(FunctionCallInfo fcinfo);
+static void run_inline(FunctionCallInfo fcinfo);
 static int interrupt_handler(JSRuntime *rt, void *opaque);
 static void setup_storage_for_context(pljs_context *context,
                                       FunctionCallInfo fcinfo);
@@ -840,6 +842,29 @@ static void store_storage_in_context(pljs_context *context,
  * @returns #Datum of the result
  */
 Datum pljs_call_handler(PG_FUNCTION_ARGS) {
+  pljs_type_io_cache *types = pljs_type_io_enter(fcinfo->flinfo);
+  Datum retval;
+
+  PG_TRY();
+  {
+    retval = dispatch_call(fcinfo);
+  }
+  PG_FINALLY();
+  {
+    pljs_type_io_exit(types);
+  }
+  PG_END_TRY();
+
+  return retval;
+}
+
+/**
+ * @brief Calls a pljs function, procedure or trigger; see pljs_call_handler().
+ *
+ * @param fcinfo #FunctionCallInfo - the call
+ * @returns #Datum of the result
+ */
+static Datum dispatch_call(FunctionCallInfo fcinfo) {
   Oid fn_oid = fcinfo->flinfo->fn_oid;
   HeapTuple proctuple;
   JSContext *ctx;
@@ -998,6 +1023,27 @@ Datum pljs_call_handler(PG_FUNCTION_ARGS) {
  * @returns #Datum containing `VOID`
  */
 Datum pljs_inline_handler(PG_FUNCTION_ARGS) {
+  pljs_type_io_cache *types = pljs_type_io_enter(fcinfo->flinfo);
+
+  PG_TRY();
+  {
+    run_inline(fcinfo);
+  }
+  PG_FINALLY();
+  {
+    pljs_type_io_exit(types);
+  }
+  PG_END_TRY();
+
+  PG_RETURN_VOID();
+}
+
+/**
+ * @brief Runs a `DO` block; see pljs_inline_handler().
+ *
+ * @param fcinfo #FunctionCallInfo - the inline handler's call
+ */
+static void run_inline(FunctionCallInfo fcinfo) {
   pljs_context_cache_value *entry = pljs_cache_context_find(GetUserId());
 
   InlineCodeBlock *code_block =
@@ -1039,8 +1085,6 @@ Datum pljs_inline_handler(PG_FUNCTION_ARGS) {
   call_anonymous_function(sourcecode, ctx);
 
   SPI_finish();
-
-  PG_RETURN_VOID();
 }
 
 /**
