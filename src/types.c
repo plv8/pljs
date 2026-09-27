@@ -52,28 +52,37 @@ static JSClassID JS_CLASS_UINT32_ARRAY = 27;
 /**
  * Struct containing the type information for a catch-all*/
 // if given object is an array.
+/*
+ * The brand checks below compare the object's class id.  They used
+ * JS_GetOpaque(), which returns the class's payload rather than whether it
+ * has one: a typed array's or ArrayBuffer's is a pointer, so that happened to
+ * work, but a Date's is its time value, and the epoch's is all zero bits.  So
+ * `new Date(0)` was not a Date -- a date or timestamp column parsed its
+ * toString() instead, which fails outside UTC, and jsonb stored that string
+ * rather than an ISO timestamp.
+ */
 inline static bool Is_ArrayType(JSValueConst obj, JSClassID class_id) {
-  return NULL != JS_GetOpaque(obj, class_id);
+  return JS_GetClassID(obj) == class_id;
 }
 
 // if given object is array buffer.
 inline static bool Is_ArrayBuffer(JSValueConst obj) {
-  return NULL != JS_GetOpaque(obj, JS_CLASS_ARRAY_BUFFER);
+  return JS_GetClassID(obj) == JS_CLASS_ARRAY_BUFFER;
 }
 
 // if given object is shared array buffer.
 inline static bool Is_SharedArrayBuffer(JSValueConst obj) {
-  return NULL != JS_GetOpaque(obj, JS_CLASS_SHARED_ARRAY_BUFFER);
+  return JS_GetClassID(obj) == JS_CLASS_SHARED_ARRAY_BUFFER;
 }
 
 // if this is an actual object of any sort.
 inline static bool Is_Object(JSValueConst obj) {
-  return NULL != JS_GetOpaque(obj, JS_CLASS_OBJECT);
+  return JS_GetClassID(obj) == JS_CLASS_OBJECT;
 }
 
-// if given object is shared array buffer.
+// if given object is a date.
 inline static bool Is_Date(JSValueConst obj) {
-  return NULL != JS_GetOpaque(obj, JS_CLASS_DATE);
+  return JS_GetClassID(obj) == JS_CLASS_DATE;
 }
 
 /*
@@ -101,8 +110,8 @@ static void pljs_free_prop_enum(JSContext *ctx, JSPropertyEnum *tab,
  * @brief Whether a value is a plain JavaScript object -- `{...}` -- as opposed
  * to an Array, Date, ArrayBuffer, typed array or any other branded builtin.
  *
- * This is a real brand check (see the Is_Date note above): every builtin has
- * its own class id, so only a bare object literal / `new Object` matches.
+ * This is a real brand check (see the note on Is_Date() above): every builtin
+ * has its own class id, so only a bare object literal / `new Object` matches.
  * Callers use it to tell a `{column: value}` row object apart from a value that
  * legitimately *is* object-like (a Date for a timestamp, a typed array for a
  * bytea, an Array for an array type).
@@ -2899,27 +2908,6 @@ static JsonbValue *
 jsonb_array_from_array(JSValue array, JsonbBuildState *pstate, JSContext *ctx);
 
 /**
- * @brief Converts a Postgres time in milliseconds to a 8601 datetime string.
- *
- * @param millis @c double - Postgres time in milliseconds
- * @returns @c char * representation of the date and time
- */
-static char *time_as_8601(double millis) {
-  char tmp[100];
-  char *buf = (char *)palloc(25);
-
-  time_t t = (time_t)(millis / 1000);
-  strftime(tmp, 25, "%Y-%m-%dT%H:%M:%S", gmtime(&t));
-
-  double integral;
-  double fractional = modf(millis / 1000, &integral);
-
-  sprintf(buf, "%s.%03dZ", tmp, (int)(fractional * 1000));
-
-  return buf;
-}
-
-/**
  * @brief Converts a #JSValue into a `JSONB` value.
  *
  * @param pstate #JsonbBuildState - current state of the `JSONB` parsing
@@ -2977,19 +2965,50 @@ static JsonbValue *jsonb_from_value(JSValue value, JsonbBuildState *pstate,
           DirectFunctionCall1(float8_numeric, Float8GetDatum((float8)in)));
       val.type = jbvNumeric;
     } else if (Is_Date(value)) {
-      double in;
+      /*
+       * As JSON.stringify() writes a Date: its toJSON(), which is its
+       * toISOString(), or null for an invalid Date.
+       *
+       * Nothing reached this: every caller sent an object, a Date included,
+       * to jsonb_object_from_object(), and a Date has no properties of its
+       * own, so it was stored as {}.  The formatting it would have done was
+       * wrong besides -- a negative millisecond field before 1970, written one
+       * byte past the end of its buffer.
+       */
+      JSValue to_json = JS_GetPropertyStr(ctx, value, "toJSON");
+      JSValue json;
 
-      if (JS_ToFloat64(ctx, &in, value) < 0) {
+      if (JS_IsException(to_json)) {
         pljs_ereport_js_exception(ctx);
       }
 
-      if (isnan(in)) {
-        val.type = jbvNull;
-      } else {
-        val.val.string.val = time_as_8601(in);
-        val.val.string.len = 24;
-        val.type = jbvString;
+      json = JS_Call(ctx, to_json, value, 0, NULL);
+      JS_FreeValue(ctx, to_json);
+
+      if (JS_IsException(json)) {
+        pljs_ereport_js_exception(ctx);
       }
+
+      if (JS_IsString(json)) {
+        size_t len;
+        const char *v = JS_ToCStringLen(ctx, &len, json);
+
+        if (v == NULL) {
+          JS_FreeValue(ctx, json);
+          pljs_ereport_js_exception(ctx);
+        }
+
+        val.type = jbvString;
+        val.val.string.val = palloc(len);
+        memcpy(val.val.string.val, v, len);
+        val.val.string.len = len;
+
+        JS_FreeCString(ctx, v);
+      } else {
+        val.type = jbvNull;
+      }
+
+      JS_FreeValue(ctx, json);
     } else {
       val.type = jbvString;
       size_t len;
@@ -3043,7 +3062,7 @@ jsonb_array_from_array(JSValue array, JsonbBuildState *pstate, JSContext *ctx) {
     // For each type, set `value` to the result.
     if (JS_IsArray(ctx, elem)) {
       value = jsonb_array_from_array(elem, pstate, ctx);
-    } else if (JS_IsObject(elem)) {
+    } else if (JS_IsObject(elem) && !Is_Date(elem)) {
       value = jsonb_object_from_object(elem, pstate, ctx);
     } else {
       value = jsonb_from_value(elem, pstate, WJB_ELEM, ctx, NULL);
@@ -3109,7 +3128,7 @@ static JsonbValue *jsonb_object_from_object(JSValue object,
     // If the value is an `Array` the convert it.
     if (JS_IsArray(ctx, o)) {
       value = jsonb_array_from_array(o, pstate, ctx);
-    } else if (JS_IsObject(o)) {
+    } else if (JS_IsObject(o) && !Is_Date(o)) {
       // Or convert an `Object`.
       value = jsonb_object_from_object(o, pstate, ctx);
     } else {
@@ -3151,7 +3170,7 @@ static Jsonb *convert_object(JSValue object, JSContext *ctx) {
   // Check the type and get its value.
   if (JS_IsArray(ctx, object)) {
     value = jsonb_array_from_array(object, &parse_state, ctx);
-  } else if (JS_IsObject(object)) {
+  } else if (JS_IsObject(object) && !Is_Date(object)) {
     value = jsonb_object_from_object(object, &parse_state, ctx);
   } else {
     jsonb_push(&parse_state, WJB_BEGIN_ARRAY, NULL);

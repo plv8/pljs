@@ -87,6 +87,18 @@ CREATE FUNCTION cuc_date() RETURNS timestamptz LANGUAGE pljs AS $$
 $$;
 SELECT cuc_date();
 
+-- A Date converts through its own Symbol.toPrimitive when it has one.  It
+-- has to be defined: Date.prototype's is read-only, so assigning one does
+-- nothing, as in any JavaScript engine.
+CREATE FUNCTION cuc_date_to_primitive() RETURNS timestamptz LANGUAGE pljs AS $$
+  const d = new Date(1000);
+  Object.defineProperty(d, Symbol.toPrimitive, {
+    value: () => { throw new Error('date toPrimitive'); }
+  });
+  return d;
+$$;
+SELECT cuc_date_to_primitive();
+
 -- A PostgreSQL error raised from a getter keeps its SQLSTATE.
 CREATE FUNCTION cuc_getter_sql_error(OUT a int4, OUT b int4) LANGUAGE pljs AS $$
   return { get a() { return pljs.execute('SELECT 1 / 0 AS x')[0].x; }, b: 1 };
@@ -170,9 +182,36 @@ CREATE FUNCTION cuc_proto() RETURNS text LANGUAGE pljs AS $$
 $$;
 SELECT cuc_proto();
 
+-- 4) new Date(0) is a Date.  The brand check read the Date's time value as a
+-- pointer, and the epoch's is zero, so it was parsed from its toString(),
+-- which fails outside UTC.
+CREATE FUNCTION cuc_epoch() RETURNS TABLE (d date, t timestamptz)
+  LANGUAGE pljs AS $$
+  return [{ d: new Date(0), t: new Date(0) }];
+$$;
+SELECT * FROM cuc_epoch();
+
+-- 5) A Date in jsonb is written as JSON.stringify() writes it.  Every Date
+-- was stored as {}, and json already wrote the ISO string.
+CREATE FUNCTION cuc_jsonb_dates() RETURNS TABLE (j jsonb, s json)
+  LANGUAGE pljs AS $$
+  const v = { epoch: new Date(0), before: new Date(-1500),
+              list: [new Date(Date.UTC(2020, 1, 29, 12, 34, 56, 789))],
+              invalid: new Date(NaN) };
+  return [{ j: v, s: v }];
+$$;
+SELECT * FROM cuc_jsonb_dates();
+
+CREATE FUNCTION cuc_jsonb_date() RETURNS jsonb LANGUAGE pljs AS $$
+  return new Date(1000);
+$$;
+SELECT cuc_jsonb_date();
+
 DROP FUNCTION cuc_record, cuc_int4, cuc_float8, cuc_numeric, cuc_oid, cuc_text,
               cuc_uuid, cuc_uuid_is_null, cuc_json, cuc_jsonb,
               cuc_array_element, cuc_array_length, cuc_date,
+              cuc_date_to_primitive, cuc_epoch, cuc_jsonb_dates,
+              cuc_jsonb_date,
               cuc_getter_sql_error, cuc_rows, cuc_row, cuc_row_ambiguous,
               cuc_json_rows, cuc_install, cuc_uninstall, cuc_values, cuc_proto;
 DROP TYPE cuc_pair;
