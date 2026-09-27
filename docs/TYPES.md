@@ -23,7 +23,7 @@ In PLJS, types are converted between Postgres native types and JavaScript types.
 | `BPCHAR`         | `String`             |
 | `NAME`           | `String`             |
 | `XML`            | `String`             |
-| `BYTEA`          | `Array`              |
+| `BYTEA`          | `Uint8Array`         |
 | `DATE`           | `Date`               |
 | `TIMESTAMP`      | `Date`               |
 | `TIMESTAMPTZOID` | `Date`               |
@@ -65,6 +65,10 @@ Every pass-by-value type without a row above used to reach JavaScript as a
   `regoper`, `regoperator`, `regnamespace`, `regrole`, `regconfig`,
   `regdictionary` and `regcollation`, which now arrive as the name
   (`'pg_class'`) rather than the OID. Cast to `oid` in SQL to keep the number.
+  `regproc` and `regoper` arrive as a signature, as `regprocedure` and
+  `regoperator` do — `'abs(integer)'`, `'+(integer,integer)'` — because
+  the bare name of an overloaded function or operator cannot be read back.
+  A bare name, or an OID written as text, is still accepted in return.
 
 Arithmetic or comparisons written against the old values need updating.
 
@@ -77,6 +81,44 @@ would mean in SQL. Two types need care:
 - `money`: `1234.5` is parsed according to `lc_monetary`, where `.` may be the
   thousands separator rather than the decimal point. Return a string in the
   locale's format, or return `numeric` and cast in SQL.
+
+## `bytea`
+
+A `bytea` arrives as a `Uint8Array` of its bytes. A `bytea` can be returned as
+a typed array (`Uint8Array`, `Int8Array`, `Uint16Array`, `Int16Array`,
+`Uint32Array` or `Int32Array`), whose bytes are stored in the machine's byte
+order; as an `ArrayBuffer`; or as a `String`, which is stored as its UTF-8
+bytes.
+
+### Upgrading
+
+A `bytea` used to arrive as a `String`, made by reading its bytes as UTF-8.
+Every byte that was not part of a valid UTF-8 sequence was replaced, so a
+value that went back to PostgreSQL — `NEW` from a trigger, even one that
+changed some other column — was rewritten: `'\xdeadbeef'` was stored as
+`'\xdeadefbfbd'`. Code that treated the value as a string needs updating: for
+text stored as `bytea`, `String.fromCharCode(...value)` reads ASCII, and
+`convert_from(value, 'UTF8')` in SQL reads UTF-8.
+
+## `json` and `jsonb`
+
+A value is written to `json` and `jsonb` as `JSON.stringify()` writes it:
+
+- a property whose value is a function, `undefined` or a `Symbol` is left out,
+  and such an element of an array is `null`;
+- a value that has no JSON at all — a function or a `Symbol` — is SQL
+  `NULL`, as `undefined` is;
+- `NaN` and the infinities are `null`;
+- a `Date` is written through its `toJSON()`, as an ISO 8601 string, or
+  `null` for an invalid `Date`;
+- only an object's own enumerable properties are written.
+
+An object that contains itself raises "cannot convert a circular structure to
+jsonb", and a string or a key holding `"\u0000"` cannot be stored in `jsonb`,
+which raises as `jsonb_in()` does.
+
+An `xml` value is parsed by `xml`'s input function, so something that is not
+XML raises.
 
 ## Domains
 

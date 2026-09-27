@@ -65,7 +65,9 @@ var num_affected = pljs.execute('DELETE FROM tbl WHERE price > $1', [ 1000 ]);
 
 `pljs.return_next(arg)`
 
-Returns a value in the context of a [Set Returning Function](../INTEGRATION.md).
+Returns a value in the context of a [Set Returning Function](../INTEGRATION.md). Called anywhere else — a `DO` block, a trigger, or a function that does not return a set — it throws.
+
+A value that has to satisfy a domain — a set of a domain, or of a composite type with a domain column — is checked in a subtransaction, as `pljs.execute()` runs its query, so a `CHECK` constraint that fails leaves nothing behind when the exception is caught.
 
 ### `pljs.gc`
 
@@ -157,7 +159,7 @@ If one of the SQL execution in the subtransaction block fails, all of operations
 
 ## Window Function API
 
-You can define user-defined window functions with PLJS. It wraps the C-level window function API to support full functionality. To create one, first obtain a window object by calling `pljs.get_window_object()`, which provides the following interfaces:
+You can define user-defined window functions with PLJS. It wraps the C-level window function API to support full functionality. To create one, first obtain a window object by calling `pljs.get_window_object()`, which provides the following interfaces. They act on the window function call that is running, and throw outside of one.
 
 ### `WindowObject.get_current_position`
 

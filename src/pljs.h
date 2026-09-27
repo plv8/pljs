@@ -87,6 +87,8 @@ typedef struct pljs_return_state {
   TupleDesc tuple_desc;
   Oid rettype;
   bool is_composite;
+  bool is_domain; // rettype is a domain over the composite type of the rows
+  bool convert_in_subtransaction; // converting a row can run a domain's checks
 } pljs_return_state;
 
 // Expanded type definitions for pljs.
@@ -142,7 +144,6 @@ typedef struct pljs_storage {
   FunctionCallInfo fcinfo;
   WindowObject window_object;
   MemoryContext execution_memory_context;
-  bool converting_result; // the function's result is being converted
 } pljs_storage;
 
 typedef struct pljs_window_storage {
@@ -185,8 +186,13 @@ JSValue pljs_compile_function(pljs_context *context, bool is_trigger);
 JSValue pljs_find_js_function(Oid fn_oid, JSContext *ctx);
 JSValue pljs_single_column_value(JSContext *ctx, JSValueConst row,
                                  TupleDesc tupdesc, const char *caller);
+void pljs_put_domain_row(pljs_return_state *state, JSValueConst row,
+                         JSContext *ctx);
 bool pljs_has_permission_to_execute(const char *signature);
-pljs_storage *pljs_storage_for_context(JSContext *ctx);
+pljs_storage *pljs_current_storage(void);
+
+// Whether a function's result is being converted, anywhere up the stack
+extern bool pljs_converting_result;
 
 // cache.c
 
@@ -232,6 +238,7 @@ Datum *pljs_jsvalue_to_datums(pljs_type *type, JSValue val, bool **is_null,
 int32_t pljs_js_array_length(JSValue, JSContext *);
 void pljs_type_fill(pljs_type *, Oid);
 Oid pljs_type_base(Oid);
+bool pljs_type_may_check_domain(Oid);
 
 // Type conversion state for the pljs function being called
 typedef struct pljs_type_io_cache pljs_type_io_cache;

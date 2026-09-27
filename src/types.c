@@ -4,10 +4,14 @@
 #include "executor/spi.h"
 #include "fmgr.h"
 #include "funcapi.h"
+#include "mb/pg_wchar.h"
+#include "miscadmin.h"
+#include "nodes/pg_list.h"
 #include "parser/parse_coerce.h"
 #include "utils/array.h"
 #include "utils/builtins.h"
 #include "utils/date.h"
+#include "utils/datum.h"
 #include "utils/jsonb.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
@@ -226,6 +230,10 @@ struct pljs_type_io_cache {
 
   /* A function converts a handful of types, so a list does. */
   pljs_type_io *types;
+
+  /* See pljs_type_io_scratch_begin(). */
+  MemoryContext scratch;
+  bool scratch_busy;
 };
 
 /* The cache of the pljs function running now, or NULL outside of one. */
@@ -316,6 +324,54 @@ pljs_type_io_cache *pljs_type_io_enter(FmgrInfo *flinfo) {
  */
 void pljs_type_io_exit(pljs_type_io_cache *previous) {
   pljs_type_io_current = previous;
+}
+
+/**
+ * @brief Returns a context for what one call of a type's I/O function
+ * allocates.
+ *
+ * An I/O function frees at most the value it returns, and not what it
+ * allocated on the way there, so the text I/O fallback runs it in a context
+ * that is emptied once the value has been copied out; see
+ * pljs_datum_to_jsvalue_fallback().  The running function's cache keeps one
+ * for the purpose.  An input function can run a domain's CHECK constraints,
+ * which can call the same pljs function again, so a call made while that one
+ * is in use gets a context of its own.
+ *
+ * @returns #MemoryContext - to hand to pljs_type_io_scratch_end()
+ */
+static MemoryContext pljs_type_io_scratch_begin(void) {
+  pljs_type_io_cache *cache = pljs_type_io_current;
+
+  if (cache->scratch_busy) {
+    return AllocSetContextCreate(CurrentMemoryContext, "PLJS Type I/O",
+                                 ALLOCSET_DEFAULT_SIZES);
+  }
+
+  if (cache->scratch == NULL) {
+    cache->scratch = AllocSetContextCreate(cache->mcxt, "PLJS Type I/O",
+                                           ALLOCSET_DEFAULT_SIZES);
+  }
+
+  cache->scratch_busy = true;
+
+  return cache->scratch;
+}
+
+/**
+ * @brief Empties a context from pljs_type_io_scratch_begin().
+ *
+ * @param scratch #MemoryContext - what pljs_type_io_scratch_begin() returned
+ */
+static void pljs_type_io_scratch_end(MemoryContext scratch) {
+  pljs_type_io_cache *cache = pljs_type_io_current;
+
+  if (scratch == cache->scratch) {
+    MemoryContextReset(scratch);
+    cache->scratch_busy = false;
+  } else {
+    MemoryContextDelete(scratch);
+  }
 }
 
 /**
@@ -410,6 +466,100 @@ static FmgrInfo *pljs_type_io_input(pljs_type_io *io) {
 }
 
 /**
+ * @brief Returns the type whose output function converts a type to text.
+ *
+ * regproc and regoper are written as regprocedure and regoperator write them,
+ * as a signature -- `abs(integer)` -- rather than as the bare name their own
+ * output functions write.  Those are the same OIDs, and a bare name is not
+ * enough to read one back: regprocin() rejects the name of an overloaded
+ * function, so a trigger that returned NEW failed for every row of a table
+ * with a regproc column naming one.  pljs_signature_to_oid_text() reads the
+ * signature back.
+ *
+ * @param typid #Oid - the (non-domain) type
+ * @returns #Oid of the type to use the output function of
+ */
+static Oid pljs_output_type(Oid typid) {
+  switch (typid) {
+  case REGPROCOID:
+    return REGPROCEDUREOID;
+  case REGOPEROID:
+    return REGOPERATOROID;
+  default:
+    return typid;
+  }
+}
+
+/**
+ * @brief Reads back a regproc or regoper written as a signature.
+ *
+ * See pljs_output_type().  A signature is resolved to its OID, which the
+ * type's own input function, and a domain's, take as digits.  Anything else
+ * is left for them as it is.
+ *
+ * @param io #pljs_type_io - the target type
+ * @param str @c char* - the text to read
+ * @returns @c char* - the text to give the input function
+ */
+static char *pljs_signature_to_oid_text(pljs_type_io *io, char *str) {
+  Datum oid;
+
+  if ((io->basetype != REGPROCOID && io->basetype != REGOPEROID) ||
+      strchr(str, '(') == NULL) {
+    return str;
+  }
+
+  if (io->basetype == REGPROCOID) {
+    oid = DirectFunctionCall1(regprocedurein, CStringGetDatum(str));
+  } else {
+    oid = DirectFunctionCall1(regoperatorin, CStringGetDatum(str));
+  }
+
+  return psprintf("%u", DatumGetObjectId(oid));
+}
+
+/**
+ * @brief Converts text in the database's encoding to UTF-8, for QuickJS.
+ *
+ * QuickJS reads every C string as UTF-8, so the text a type's output function
+ * writes has to be converted when the database has another encoding: in a
+ * LATIN1 database, an enum label with an accented letter became U+FFFD, and
+ * its input function then rejected it.  SQL_ASCII has no encoding to convert
+ * from, so its bytes are passed as they are.
+ *
+ * @param str @c char* - the text
+ * @returns @c char* - @p str, or a palloc'd conversion of it
+ */
+static char *pljs_server_to_utf8(char *str) {
+  int encoding = GetDatabaseEncoding();
+
+  if (encoding == PG_UTF8 || encoding == PG_SQL_ASCII) {
+    return str;
+  }
+
+  return pg_server_to_any(str, strlen(str), PG_UTF8);
+}
+
+/**
+ * @brief Converts UTF-8 text from QuickJS to the database's encoding.
+ *
+ * The reverse of pljs_server_to_utf8().
+ *
+ * @param str @c char* - the text, which QuickJS owns
+ * @param len @c size_t - its length
+ * @returns @c char* - @p str, or a palloc'd conversion of it
+ */
+static char *pljs_utf8_to_server(const char *str, size_t len) {
+  int encoding = GetDatabaseEncoding();
+
+  if (encoding == PG_UTF8 || encoding == PG_SQL_ASCII) {
+    return (char *)str;
+  }
+
+  return pg_any_to_server(str, len, PG_UTF8);
+}
+
+/**
  * @brief Returns the output function for a cached type, looking it up once.
  */
 static FmgrInfo *pljs_type_io_output(pljs_type_io *io) {
@@ -417,7 +567,7 @@ static FmgrInfo *pljs_type_io_output(pljs_type_io *io) {
     Oid typoutput;
     bool typisvarlena;
 
-    getTypeOutputInfo(io->typid, &typoutput, &typisvarlena);
+    getTypeOutputInfo(pljs_output_type(io->typid), &typoutput, &typisvarlena);
     fmgr_info_cxt(typoutput, &io->output, io->mcxt);
     io->have_output = true;
   }
@@ -434,6 +584,46 @@ static FmgrInfo *pljs_type_io_output(pljs_type_io *io) {
  * @returns #Oid of the base type, or @p typid itself if it is not a domain
  */
 Oid pljs_type_base(Oid typid) { return pljs_type_io_lookup(typid)->basetype; }
+
+/**
+ * @brief Whether converting a value to a type can check a domain's
+ * constraints.
+ *
+ * A domain's CHECK constraints can call any function, so converting a value
+ * to one can run any SQL, which pljs_return_next() has to know.  That is a
+ * domain, or an array or composite type with one inside it.
+ *
+ * @param typid #Oid - the type
+ * @returns @c bool
+ */
+bool pljs_type_may_check_domain(Oid typid) {
+  pljs_type_io *io = pljs_type_io_lookup(typid);
+  bool found = false;
+
+  if (io->is_domain) {
+    return true;
+  }
+
+  if (io->category == TYPCATEGORY_ARRAY) {
+    return OidIsValid(io->elemtype) && pljs_type_may_check_domain(io->elemtype);
+  }
+
+  if (io->category == TYPCATEGORY_COMPOSITE) {
+    TupleDesc tupdesc = lookup_rowtype_tupdesc(typid, -1);
+
+    for (int i = 0; i < tupdesc->natts && !found; i++) {
+      Form_pg_attribute attr = TupleDescAttr(tupdesc, i);
+
+      if (!attr->attisdropped) {
+        found = pljs_type_may_check_domain(attr->atttypid);
+      }
+    }
+
+    ReleaseTupleDesc(tupdesc);
+  }
+
+  return found;
+}
 
 /**
  * @brief Applies a length/precision modifier to a value pljs has built itself.
@@ -1079,6 +1269,14 @@ JSValue pljs_datum_to_array(pljs_type *type, Datum arg, JSContext *ctx) {
  * The output function detoasts its own argument, so no detoasting is needed
  * here.  It is looked up once per type and cached, as plv8 does.
  *
+ * It runs in a context of its own, which is emptied once the text has been
+ * copied into JavaScript; see pljs_type_io_scratch_begin().  An output function
+ * frees at most the string it returns, if the caller does, and not what it
+ * allocated on the way there -- range_out()'s buffers, a detoasted copy of its
+ * argument -- so in the caller's context those piled up for as long as that
+ * lasted: 2kB for every tstzrange, and a pljs.execute() of 50,000 of them grew
+ * the backend by 112MB.
+ *
  * @param arg #Datum - Postgres datum to convert
  * @param io #pljs_type_io - cached conversion state for the datum's type
  * @param ctx #JSContext - Javascript context
@@ -1086,12 +1284,23 @@ JSValue pljs_datum_to_array(pljs_type *type, Datum arg, JSContext *ctx) {
  */
 static JSValue pljs_datum_to_jsvalue_fallback(Datum arg, pljs_type_io *io,
                                               JSContext *ctx) {
-  char *str;
+  FmgrInfo *output = pljs_type_io_output(io);
+  MemoryContext scratch = pljs_type_io_scratch_begin();
+  MemoryContext old_context = MemoryContextSwitchTo(scratch);
   JSValue ret;
 
-  str = OutputFunctionCall(pljs_type_io_output(io), arg);
-  ret = JS_NewString(ctx, str);
-  pfree(str);
+  PG_TRY();
+  {
+    char *str = pljs_server_to_utf8(OutputFunctionCall(output, arg));
+
+    ret = JS_NewString(ctx, str);
+  }
+  PG_FINALLY();
+  {
+    MemoryContextSwitchTo(old_context);
+    pljs_type_io_scratch_end(scratch);
+  }
+  PG_END_TRY();
 
   return ret;
 }
@@ -1251,16 +1460,35 @@ JSValue pljs_datum_to_jsvalue(Oid argtype, Datum arg, bool is_null,
   }
 
   case BYTEAOID: {
-    void *p = PG_DETOAST_DATUM_COPY(arg);
-    char *buf = palloc(VARSIZE_ANY_EXHDR(p) + 1);
+    /*
+     * A Uint8Array of the bytes, as plv8 gives, and which the reverse
+     * conversion takes back unchanged.  bytea arrived as a String built with
+     * JS_NewStringLen(), which reads its input as UTF-8: every invalid
+     * sequence became U+FFFD, and the byte after it was lost, so a value that
+     * went back to PostgreSQL -- NEW from a trigger, even one that changed
+     * some other column -- was rewritten.  '\xdeadbeef' was stored as
+     * '\xdeadefbfbd'.
+     */
+    bytea *value = DatumGetByteaPP(arg);
+    JSValue buffer = JS_NewArrayBufferCopy(
+        ctx, (const uint8_t *)VARDATA_ANY(value), VARSIZE_ANY_EXHDR(value));
 
-    memcpy(buf, VARDATA(p), VARSIZE_ANY_EXHDR(p));
+    pljs_free_if_detoasted(value, arg);
 
-    return_result = JS_NewStringLen(ctx, buf, VARSIZE_ANY_EXHDR(p));
-    pfree(buf);
+    if (JS_IsException(buffer)) {
+      return_result = buffer;
+      break;
+    }
 
-    // PG_DETOAST_DATUM_COPY always allocates, so this is never the original.
-    pfree(p);
+    /*
+     * new Uint8Array(buffer, undefined, undefined): the constructor reads its
+     * offset and length whatever argc says, as a JavaScript call pads them.
+     */
+    JSValueConst typed_array_args[3] = {buffer, JS_UNDEFINED, JS_UNDEFINED};
+
+    return_result =
+        JS_NewTypedArray(ctx, 3, typed_array_args, JS_TYPED_ARRAY_UINT8);
+    JS_FreeValue(ctx, buffer);
     break;
   }
 
@@ -1709,7 +1937,8 @@ static Datum pljs_jsvalue_to_datum_via_io(pljs_type_io *io, JSValueConst val,
                                           int32 typmod, JSContext *ctx) {
   size_t plen;
   const char *str = JS_ToCStringLen(ctx, &plen, val);
-  FmgrInfo *input;
+  MemoryContext caller_context = CurrentMemoryContext;
+  MemoryContext scratch;
   Datum ret;
 
   /* toString() threw, or QuickJS ran out of memory. */
@@ -1725,24 +1954,41 @@ static Datum pljs_jsvalue_to_datum_via_io(pljs_type_io *io, JSValueConst val,
                     format_type_be(io->typid))));
   }
 
+  /*
+   * The input function runs in a context of its own, and only the value it
+   * returns is copied out of it; see pljs_datum_to_jsvalue_fallback().
+   * range_in() leaves its parse state behind, and 500,000 rows of a daterange
+   * set grew the backend by more than a gigabyte.
+   */
+  scratch = pljs_type_io_scratch_begin();
+
   PG_TRY();
   {
+    char *text;
+
+    MemoryContextSwitchTo(scratch);
+
+    text = pljs_signature_to_oid_text(io, pljs_utf8_to_server(str, plen));
+
     if (io->is_domain) {
-      ret = pljs_domain_check(io, (char *)str, (Datum)0, false);
+      ret = pljs_domain_check(io, text, (Datum)0, false);
     } else {
-      input = pljs_type_io_input(io);
-      ret = InputFunctionCall(input, (char *)str, io->ioparam, typmod);
+      ret =
+          InputFunctionCall(pljs_type_io_input(io), text, io->ioparam, typmod);
     }
+
+    MemoryContextSwitchTo(caller_context);
+    ret = datumCopy(ret, io->byval, io->length);
   }
-  PG_CATCH();
+  PG_FINALLY();
   {
+    MemoryContextSwitchTo(caller_context);
+    pljs_type_io_scratch_end(scratch);
+
     /* Do not leak the QuickJS C-string when the input function rejects it. */
     JS_FreeCString(ctx, str);
-    PG_RE_THROW();
   }
   PG_END_TRY();
-
-  JS_FreeCString(ctx, str);
 
   return ret;
 }
@@ -2151,10 +2397,16 @@ static Datum pljs_jsvalue_to_datum_internal(pljs_type_io *io, int32 typmod,
     return ret;
   }
 
+  case XMLOID:
+    /*
+     * Parsed by xml's input function, which rejects what is not XML.  It was
+     * built the way text is, and stored whatever it was given.
+     */
+    return pljs_string_to_datum_via_input(XMLOID, val, ctx);
+
   case TEXTOID:
   case VARCHAROID:
-  case BPCHAROID:
-  case XMLOID: {
+  case BPCHAROID: {
     size_t plen;
     const char *str = JS_ToCStringLen(ctx, &plen, val);
 
@@ -2204,6 +2456,16 @@ static Datum pljs_jsvalue_to_datum_internal(pljs_type_io *io, int32 typmod,
       pljs_ereport_js_exception(ctx);
     }
 
+    /*
+     * JSON.stringify() has no JSON for a function or a Symbol, and returns
+     * undefined, which was stored as the text "undefined": not JSON, so the
+     * value broke json_typeof() and a cast to jsonb later.  It is SQL NULL, as
+     * undefined itself is.
+     */
+    if (JS_IsUndefined(js)) {
+      return pljs_null_datum(is_null, fcinfo);
+    }
+
     str = JS_ToCStringLen(ctx, &plen, js);
 
     if (str == NULL) {
@@ -2225,7 +2487,17 @@ static Datum pljs_jsvalue_to_datum_internal(pljs_type_io *io, int32 typmod,
     JSValueConst *argv = &val;
 #if JSONB_DIRECT_CONVERSION
     {
+      /* As JSONOID: JSON.stringify() has no JSON for these. */
+      if (JS_IsFunction(ctx, val) || JS_IsSymbol(val)) {
+        return pljs_null_datum(is_null, fcinfo);
+      }
+
       Jsonb *obj = convert_object(argv[0], ctx);
+
+      if (obj == NULL) {
+        return pljs_null_datum(is_null, fcinfo);
+      }
+
       PG_RETURN_JSONB_P(obj);
     }
 #else // JSONB_DIRECT_CONVERSION
@@ -2233,6 +2505,11 @@ static Datum pljs_jsvalue_to_datum_internal(pljs_type_io *io, int32 typmod,
 
     if (JS_IsException(js)) {
       pljs_ereport_js_exception(ctx);
+    }
+
+    /* See JSONOID. */
+    if (JS_IsUndefined(js)) {
+      return pljs_null_datum(is_null, fcinfo);
     }
 
     const char *str = JS_ToCString(ctx, js);
@@ -2256,88 +2533,43 @@ static Datum pljs_jsvalue_to_datum_internal(pljs_type_io *io, int32 typmod,
 
   case BYTEAOID: {
     size_t psize;
-    size_t pbytes_per_element = 0;
-
     uint8_t *buffer;
 
-    int32_t array_length = pljs_js_array_length(val, ctx);
-
-    if (array_length < 0) {
-      pljs_ereport_js_exception(ctx);
-    }
-
-    uint32_t length = (uint32_t)array_length;
-
     if (Is_ArrayType(val, JS_CLASS_UINT8_ARRAY) ||
-        Is_ArrayType(val, JS_CLASS_INT8_ARRAY)) {
-      pbytes_per_element = 1;
-      psize = pbytes_per_element * length;
+        Is_ArrayType(val, JS_CLASS_INT8_ARRAY) ||
+        Is_ArrayType(val, JS_CLASS_UINT16_ARRAY) ||
+        Is_ArrayType(val, JS_CLASS_INT16_ARRAY) ||
+        Is_ArrayType(val, JS_CLASS_UINT32_ARRAY) ||
+        Is_ArrayType(val, JS_CLASS_INT32_ARRAY)) {
+      /*
+       * The bytes the view covers, in the machine's byte order, as they were
+       * copied element by element.  A bytea now reaches JavaScript as a
+       * Uint8Array, so this is also the way back for every one read from the
+       * database, and reading it a property at a time cost a lookup per byte.
+       */
+      size_t offset, length;
+      JSValue array_buffer =
+          JS_GetTypedArrayBuffer(ctx, val, &offset, &length, NULL);
 
-      uint8_t *array_copy = palloc(pbytes_per_element * length);
-
-      for (size_t i = 0; i < length; i++) {
-        int32_t in;
-
-        JSValue jsval = JS_GetPropertyUint32(ctx, val, i);
-        JS_ToInt32(ctx, &in, jsval);
-        array_copy[i] = (uint8_t)in;
+      /* A detached buffer. */
+      if (JS_IsException(array_buffer)) {
+        pljs_ereport_js_exception(ctx);
       }
 
-      buffer = palloc(VARHDRSZ + psize);
+      uint8_t *data = JS_GetArrayBuffer(ctx, &psize, array_buffer);
 
-      SET_VARSIZE(buffer, psize + VARHDRSZ);
-      memcpy(VARDATA(buffer), array_copy, psize);
+      JS_FreeValue(ctx, array_buffer);
 
-      pfree(array_copy);
-
-      return PointerGetDatum(buffer);
-    } else if (Is_ArrayType(val, JS_CLASS_UINT16_ARRAY) ||
-               Is_ArrayType(val, JS_CLASS_INT16_ARRAY)) {
-      pbytes_per_element = 2;
-      psize = pbytes_per_element * length;
-
-      uint16_t *array_copy = palloc(pbytes_per_element * length);
-
-      for (size_t i = 0; i < length; i++) {
-        int32_t in;
-
-        JSValue jsval = JS_GetPropertyUint32(ctx, val, i);
-        JS_ToInt32(ctx, &in, jsval);
-        array_copy[i] = (uint16_t)in;
+      if (data == NULL) {
+        pljs_ereport_js_exception(ctx);
       }
 
-      buffer = palloc(VARHDRSZ + psize);
+      buffer = palloc(VARHDRSZ + length);
 
-      SET_VARSIZE(buffer, psize + VARHDRSZ);
-      memcpy(VARDATA(buffer), array_copy, psize);
-
-      pfree(array_copy);
+      SET_VARSIZE(buffer, length + VARHDRSZ);
+      memcpy(VARDATA(buffer), data + offset, length);
 
       return PointerGetDatum(buffer);
-    } else if (Is_ArrayType(val, JS_CLASS_UINT32_ARRAY) ||
-               Is_ArrayType(val, JS_CLASS_INT32_ARRAY)) {
-      pbytes_per_element = 4;
-      psize = pbytes_per_element * length;
-
-      uint32_t *array_copy = palloc(pbytes_per_element * length);
-
-      for (size_t i = 0; i < length; i++) {
-        int32_t in;
-
-        JSValue jsval = JS_GetPropertyUint32(ctx, val, i);
-        JS_ToInt32(ctx, &in, jsval);
-        array_copy[i] = (uint32_t)in;
-      }
-
-      buffer = palloc(VARHDRSZ + psize);
-
-      SET_VARSIZE(buffer, psize + VARHDRSZ);
-      memcpy(VARDATA(buffer), array_copy, psize);
-
-      pfree(array_copy);
-
-      return PointerGetDatum(buffer);
-
     } else if (Is_ArrayBuffer(val)) {
       uint8_t *array_copy = JS_GetArrayBuffer(ctx, &psize, val);
 
@@ -2363,14 +2595,6 @@ static Datum pljs_jsvalue_to_datum_internal(pljs_type_io *io, int32 typmod,
 
       return PointerGetDatum(buffer);
     } else {
-      elog(DEBUG3, "Unknown array type, tag: %lld", val.tag);
-      for (uint8_t i = 0; i < 255; i++) {
-        void *res = JS_GetOpaque(val, i);
-        if (res != NULL) {
-          elog(DEBUG3, "class_id: %d", i);
-        }
-      }
-
       /*
        * Not a string, ArrayBuffer, or typed array, so there is no byte
        * representation to store. This used to bind SQL NULL, which turns
@@ -2636,23 +2860,37 @@ JSValue pljs_tuple_to_jsvalue(TupleDesc tupledesc, HeapTuple heap_tuple,
                               JSContext *ctx) {
   JSValue obj = JS_NewObject(ctx);
 
-  for (int i = 0; i < tupledesc->natts; i++) {
-    FormData_pg_attribute *tuple_attrs = TupleDescAttr(tupledesc, i);
-    if (tuple_attrs->attisdropped) {
-      continue;
+  /*
+   * A column that cannot be converted raises, and pljs.execute() and the
+   * other builtins hand that to JavaScript, which can catch it and try again:
+   * release the row built so far rather than leave it in the runtime.
+   */
+  PG_TRY();
+  {
+    for (int i = 0; i < tupledesc->natts; i++) {
+      FormData_pg_attribute *tuple_attrs = TupleDescAttr(tupledesc, i);
+      if (tuple_attrs->attisdropped) {
+        continue;
+      }
+
+      bool isnull;
+      Datum datum = heap_getattr(heap_tuple, i + 1, tupledesc, &isnull);
+
+      char *name = NameStr(tuple_attrs->attname);
+
+      /* Defined, not set; see pljs_datum_to_object(). */
+      JS_DefinePropertyValueStr(ctx, obj, name,
+                                pljs_datum_to_jsvalue(tuple_attrs->atttypid,
+                                                      datum, isnull, true, ctx),
+                                JS_PROP_C_W_E);
     }
-
-    bool isnull;
-    Datum datum = heap_getattr(heap_tuple, i + 1, tupledesc, &isnull);
-
-    char *name = NameStr(tuple_attrs->attname);
-
-    /* Defined, not set; see pljs_datum_to_object(). */
-    JS_DefinePropertyValueStr(
-        ctx, obj, name,
-        pljs_datum_to_jsvalue(tuple_attrs->atttypid, datum, isnull, true, ctx),
-        JS_PROP_C_W_E);
   }
+  PG_CATCH();
+  {
+    JS_FreeValue(ctx, obj);
+    PG_RE_THROW();
+  }
+  PG_END_TRY();
 
   return obj;
 }
@@ -2689,12 +2927,22 @@ JSValue pljs_spi_result_to_jsvalue(int status, JSContext *ctx) {
 
     JSValue obj = JS_NewArray(ctx);
 
-    for (int r = 0; r < nrows; r++) {
-      JSValue value =
-          pljs_tuple_to_jsvalue(tupdesc, SPI_tuptable->vals[r], ctx);
+    /* Release the rows built so far; see pljs_tuple_to_jsvalue(). */
+    PG_TRY();
+    {
+      for (int r = 0; r < nrows; r++) {
+        JSValue value =
+            pljs_tuple_to_jsvalue(tupdesc, SPI_tuptable->vals[r], ctx);
 
-      JS_DefinePropertyValueUint32(ctx, obj, r, value, JS_PROP_C_W_E);
+        JS_DefinePropertyValueUint32(ctx, obj, r, value, JS_PROP_C_W_E);
+      }
     }
+    PG_CATCH();
+    {
+      JS_FreeValue(ctx, obj);
+      PG_RE_THROW();
+    }
+    PG_END_TRY();
 
     result = obj;
     break;
@@ -2903,9 +3151,37 @@ static JsonbValue *jsonb_push(JsonbBuildState *pstate, JsonbIteratorToken seq,
 // Forward declarations of the conversion functions.
 static JsonbValue *jsonb_object_from_object(JSValue object,
                                             JsonbBuildState *pstate,
-                                            JSContext *ctx);
-static JsonbValue *
-jsonb_array_from_array(JSValue array, JsonbBuildState *pstate, JSContext *ctx);
+                                            JSContext *ctx, List **path);
+static JsonbValue *jsonb_array_from_array(JSValue array,
+                                          JsonbBuildState *pstate,
+                                          JSContext *ctx, List **path);
+
+/**
+ * @brief Fills a #JsonbValue with a string, refusing a NUL character.
+ *
+ * jsonb cannot hold "\u0000" -- jsonb_in() rejects it -- and a value that
+ * held one anyway was stored, and then failed a cast to text, COPY and a
+ * restore.  The same error jsonb_in() raises is raised here.
+ *
+ * @param val #JsonbValue - the value to fill
+ * @param str @c char* - the string, which the caller frees unless this raises
+ * @param len @c size_t - its length
+ * @param ctx #JSContext - Javascript context that owns @p str
+ */
+static void jsonb_string_value(JsonbValue *val, const char *str, size_t len,
+                               JSContext *ctx) {
+  if (memchr(str, '\0', len) != NULL) {
+    JS_FreeCString(ctx, str);
+    ereport(ERROR, (errcode(ERRCODE_UNTRANSLATABLE_CHARACTER),
+                    errmsg("unsupported Unicode escape sequence"),
+                    errdetail("\\u0000 cannot be converted to text.")));
+  }
+
+  val->type = jbvString;
+  val->val.string.val = palloc(len);
+  memcpy(val->val.string.val, str, len);
+  val->val.string.len = len;
+}
 
 /**
  * @brief Converts a #JSValue into a `JSONB` value.
@@ -2917,117 +3193,169 @@ jsonb_array_from_array(JSValue array, JsonbBuildState *pstate, JSContext *ctx);
  * @returns #JsonbValue `JSONB` result from the conversion
  */
 static JsonbValue *jsonb_from_value(JSValue value, JsonbBuildState *pstate,
-                                    JsonbIteratorToken type, JSContext *ctx,
-                                    const char *key) {
+                                    JsonbIteratorToken type, JSContext *ctx) {
   JsonbValue val;
 
-  // If the token type is a key, the only valid value is `jbvString`.
-  if (type == WJB_KEY) {
-    val.type = jbvString;
-    size_t len = strlen(key);
+  // Make the conversion based on the #JSValue type.
+  if (JS_IsBool(value)) {
+    val.type = jbvBool;
+    val.val.boolean = JS_ToBool(ctx, value);
+  } else if (JS_IsNull(value)) {
+    val.type = jbvNull;
+  } else if (JS_IsString(value)) {
+    size_t len;
+    const char *v = JS_ToCStringLen(ctx, &len, value);
 
-    val.val.string.val = palloc(len);
-    memcpy(val.val.string.val, key, len);
-    val.val.string.len = len;
+    if (v == NULL) {
+      pljs_ereport_js_exception(ctx);
+    }
 
-    JS_FreeCString(ctx, key);
-  } else {
-    // Otherwise make the conversion based on the #JSValue type.
-    if (JS_IsBool(value)) {
-      val.type = jbvBool;
-      val.val.boolean = JS_ToBool(ctx, value);
-    } else if (JS_IsNull(value)) {
-      val.type = jbvNull;
-    } else if (JS_IsUndefined(value)) {
-      return NULL;
-    } else if (JS_IsString(value)) {
-      val.type = jbvString;
-      size_t len;
-      const char *v = JS_ToCStringLen(ctx, &len, value);
+    jsonb_string_value(&val, v, len, ctx);
+    JS_FreeCString(ctx, v);
+  } else if (JS_IsNumber(value)) {
+    double in;
 
-      if (v == NULL) {
-        pljs_ereport_js_exception(ctx);
-      }
+    if (JS_ToFloat64(ctx, &in, value) < 0) {
+      pljs_ereport_js_exception(ctx);
+    }
 
-      val.val.string.val = palloc(len);
-      memcpy(val.val.string.val, v, len);
-      val.val.string.len = len;
-
-      JS_FreeCString(ctx, v);
-    } else if (JS_IsNumber(value)) {
-      double in;
-
-      if (JS_ToFloat64(ctx, &in, value) < 0) {
-        pljs_ereport_js_exception(ctx);
-      }
-
+    /*
+     * NaN and the infinities are null, as JSON.stringify() writes them.  They
+     * were stored as numeric NaN and Infinity, which jsonb cannot otherwise
+     * hold: a cast to text and back, COPY and a restore all failed on them.
+     */
+    if (isfinite(in)) {
       val.val.numeric = DatumGetNumeric(
           DirectFunctionCall1(float8_numeric, Float8GetDatum((float8)in)));
       val.type = jbvNumeric;
-    } else if (Is_Date(value)) {
-      /*
-       * As JSON.stringify() writes a Date: its toJSON(), which is its
-       * toISOString(), or null for an invalid Date.
-       *
-       * Nothing reached this: every caller sent an object, a Date included,
-       * to jsonb_object_from_object(), and a Date has no properties of its
-       * own, so it was stored as {}.  The formatting it would have done was
-       * wrong besides -- a negative millisecond field before 1970, written one
-       * byte past the end of its buffer.
-       */
-      JSValue to_json = JS_GetPropertyStr(ctx, value, "toJSON");
-      JSValue json;
-
-      if (JS_IsException(to_json)) {
-        pljs_ereport_js_exception(ctx);
-      }
-
-      json = JS_Call(ctx, to_json, value, 0, NULL);
-      JS_FreeValue(ctx, to_json);
-
-      if (JS_IsException(json)) {
-        pljs_ereport_js_exception(ctx);
-      }
-
-      if (JS_IsString(json)) {
-        size_t len;
-        const char *v = JS_ToCStringLen(ctx, &len, json);
-
-        if (v == NULL) {
-          JS_FreeValue(ctx, json);
-          pljs_ereport_js_exception(ctx);
-        }
-
-        val.type = jbvString;
-        val.val.string.val = palloc(len);
-        memcpy(val.val.string.val, v, len);
-        val.val.string.len = len;
-
-        JS_FreeCString(ctx, v);
-      } else {
-        val.type = jbvNull;
-      }
-
-      JS_FreeValue(ctx, json);
     } else {
-      val.type = jbvString;
-      size_t len;
-      const char *v = JS_ToCStringLen(ctx, &len, value);
-
-      if (v == NULL) {
-        pljs_ereport_js_exception(ctx);
-      }
-
-      val.val.string.val = palloc(len);
-      memcpy(val.val.string.val, v, len);
-      val.val.string.len = len;
-
-      JS_FreeCString(ctx, v);
+      val.type = jbvNull;
     }
+  } else {
+    size_t len;
+    const char *v = JS_ToCStringLen(ctx, &len, value);
+
+    if (v == NULL) {
+      pljs_ereport_js_exception(ctx);
+    }
+
+    jsonb_string_value(&val, v, len, ctx);
+    JS_FreeCString(ctx, v);
   }
 
   // Push the result into the parse_state.
   return jsonb_push(pstate, type, &val);
+}
+
+/**
+ * @brief Returns what JSON writes for a value: a Date's toJSON(), or the value.
+ *
+ * As JSON.stringify() writes a Date: its toJSON(), which is its toISOString(),
+ * or null for an invalid Date.  A Date whose toJSON is not a function is
+ * written as an object, as JSON.stringify() writes it; it was called anyway,
+ * and raised "not a function".
+ *
+ * A Date used to be sent to jsonb_object_from_object() like any other object,
+ * and since it has no properties of its own it was stored as {}.
+ *
+ * @param value #JSValueConst - the value
+ * @param ctx #JSContext - Javascript context to execute in
+ * @returns #JSValue - an owned reference to what to write
+ */
+static JSValue jsonb_json_value(JSValueConst value, JSContext *ctx) {
+  JSValue to_json;
+  JSValue json;
+
+  if (!Is_Date(value)) {
+    return JS_DupValue(ctx, value);
+  }
+
+  to_json = JS_GetPropertyStr(ctx, value, "toJSON");
+
+  if (JS_IsException(to_json)) {
+    pljs_ereport_js_exception(ctx);
+  }
+
+  if (!JS_IsFunction(ctx, to_json)) {
+    JS_FreeValue(ctx, to_json);
+    return JS_DupValue(ctx, value);
+  }
+
+  json = JS_Call(ctx, to_json, value, 0, NULL);
+  JS_FreeValue(ctx, to_json);
+
+  if (JS_IsException(json)) {
+    pljs_ereport_js_exception(ctx);
+  }
+
+  return json;
+}
+
+/**
+ * @brief Whether JSON has no value for a JavaScript value.
+ *
+ * JSON.stringify() leaves out a property whose value is undefined, a function
+ * or a Symbol, and writes null for such an element of an array.
+ *
+ * A function was converted as an object, and every function's prototype has
+ * a constructor that is the function again: the recursion ran until it
+ * overflowed the stack and crashed the backend.  A property whose value was
+ * undefined wrote its key and no value.
+ *
+ * @param value #JSValueConst - the value, after jsonb_json_value()
+ * @param ctx #JSContext - Javascript context to execute in
+ * @returns @c bool
+ */
+static bool jsonb_has_no_value(JSValueConst value, JSContext *ctx) {
+  return JS_IsUndefined(value) || JS_IsSymbol(value) ||
+         JS_IsFunction(ctx, value);
+}
+
+/**
+ * @brief Converts a value to JSONB: an array, an object or a scalar.
+ *
+ * @param value #JSValue - the value, after jsonb_json_value()
+ * @param pstate #JsonbBuildState - the parse state of the `JSONB` object
+ * @param type #JsonbIteratorToken - WJB_VALUE or WJB_ELEM, for a scalar
+ * @param ctx #JSContext - Javascript context to execute in
+ * @param path @c List** - the arrays and objects being converted
+ * @returns #JsonbValue of the value
+ */
+static JsonbValue *jsonb_from_any(JSValue value, JsonbBuildState *pstate,
+                                  JsonbIteratorToken type, JSContext *ctx,
+                                  List **path) {
+  if (JS_IsArray(ctx, value)) {
+    return jsonb_array_from_array(value, pstate, ctx, path);
+  }
+
+  if (JS_IsObject(value)) {
+    return jsonb_object_from_object(value, pstate, ctx, path);
+  }
+
+  return jsonb_from_value(value, pstate, type, ctx);
+}
+
+/**
+ * @brief Starts converting an array or object, refusing a cycle.
+ *
+ * JSON.stringify() raises "circular reference" for an object that contains
+ * itself, and jsonb recursed into it until the stack overflowed and the
+ * backend crashed; so did an object nested deeply enough.
+ *
+ * @param value #JSValueConst - the array or object
+ * @param path @c List** - the arrays and objects being converted
+ */
+static void jsonb_enter(JSValueConst value, List **path) {
+  void *ptr = JS_VALUE_GET_PTR(value);
+
+  check_stack_depth();
+
+  if (list_member_ptr(*path, ptr)) {
+    ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                    errmsg("cannot convert a circular structure to jsonb")));
+  }
+
+  *path = lappend(*path, ptr);
 }
 
 /**
@@ -3036,10 +3364,14 @@ static JsonbValue *jsonb_from_value(JSValue value, JsonbBuildState *pstate,
  * @param array #JSValue - `Array` to convert
  * @param pstate #JsonbBuildState - the parse state of the `JSONB` object
  * @param ctx #JSContext - Javascript context to execute in
+ * @param path @c List** - the arrays and objects being converted
  * @returns #JsonbValue of the `JSONB` array
  */
-static JsonbValue *
-jsonb_array_from_array(JSValue array, JsonbBuildState *pstate, JSContext *ctx) {
+static JsonbValue *jsonb_array_from_array(JSValue array,
+                                          JsonbBuildState *pstate,
+                                          JSContext *ctx, List **path) {
+  jsonb_enter(array, path);
+
   // Push the beginning of the array into the parse state.
   JsonbValue *value = jsonb_push(pstate, WJB_BEGIN_ARRAY, NULL);
 
@@ -3059,21 +3391,23 @@ jsonb_array_from_array(JSValue array, JsonbBuildState *pstate, JSContext *ctx) {
       pljs_ereport_js_exception(ctx);
     }
 
-    // For each type, set `value` to the result.
-    if (JS_IsArray(ctx, elem)) {
-      value = jsonb_array_from_array(elem, pstate, ctx);
-    } else if (JS_IsObject(elem) && !Is_Date(elem)) {
-      value = jsonb_object_from_object(elem, pstate, ctx);
+    JSValue json = jsonb_json_value(elem, ctx);
+
+    JS_FreeValue(ctx, elem);
+
+    if (jsonb_has_no_value(json, ctx)) {
+      value = jsonb_from_value(JS_NULL, pstate, WJB_ELEM, ctx);
     } else {
-      value = jsonb_from_value(elem, pstate, WJB_ELEM, ctx, NULL);
+      value = jsonb_from_any(json, pstate, WJB_ELEM, ctx, path);
     }
 
-    // Free up the element.
-    JS_FreeValue(ctx, elem);
+    JS_FreeValue(ctx, json);
   }
 
   // Set the value to the end of the array.
   value = jsonb_push(pstate, WJB_END_ARRAY, NULL);
+
+  *path = list_delete_last(*path);
 
   return value;
 }
@@ -3084,19 +3418,27 @@ jsonb_array_from_array(JSValue array, JsonbBuildState *pstate, JSContext *ctx) {
  * @param object #JSValue - `Object` to convert
  * @param pstate #JsonbBuildState - the parse state of the `JSONB` object
  * @param ctx #JSContext - Javascript context to execute in
+ * @param path @c List** - the arrays and objects being converted
  * @returns #JsonbValue of the `JSONB` object
  */
 static JsonbValue *jsonb_object_from_object(JSValue object,
                                             JsonbBuildState *pstate,
-                                            JSContext *ctx) {
+                                            JSContext *ctx, List **path) {
+  jsonb_enter(object, path);
+
   // Push the beginning of the object intp the parse state.
   JsonbValue *value = jsonb_push(pstate, WJB_BEGIN_OBJECT, NULL);
   uint32_t object_keys_length = 0;
   JSPropertyEnum *tab;
 
-  // Get the keys of the `Object`.
+  /*
+   * Get the keys of the `Object`: its own enumerable string keys, which are
+   * what JSON.stringify() writes.  Without JS_GPN_ENUM_ONLY a function's
+   * `prototype` was one of them, which is how converting a function never
+   * ended.
+   */
   if (JS_GetOwnPropertyNames(ctx, &tab, &object_keys_length, object,
-                             JS_GPN_STRING_MASK) < 0) {
+                             JS_GPN_STRING_MASK | JS_GPN_ENUM_ONLY) < 0) {
     pljs_ereport_js_exception(ctx);
   }
 
@@ -3115,35 +3457,55 @@ static JsonbValue *jsonb_object_from_object(JSValue object,
       pljs_ereport_js_exception(ctx);
     }
 
-    const char *key = JS_AtomToCString(ctx, tab[object_key].atom);
+    JSValue json = jsonb_json_value(o, ctx);
+
+    JS_FreeValue(ctx, o);
+
+    if (jsonb_has_no_value(json, ctx)) {
+      JS_FreeValue(ctx, json);
+      continue;
+    }
+
+    /*
+     * The key with its length: a key holding "\u0000" was cut short at it by
+     * strlen().
+     */
+    JSValue key_value = JS_AtomToValue(ctx, tab[object_key].atom);
+    size_t key_length;
+    const char *key = JS_ToCStringLen(ctx, &key_length, key_value);
+
+    JS_FreeValue(ctx, key_value);
 
     if (key == NULL) {
-      JS_FreeValue(ctx, o);
+      JS_FreeValue(ctx, json);
       pljs_free_prop_enum(ctx, tab, object_keys_length);
       pljs_ereport_js_exception(ctx);
     }
 
-    value = jsonb_from_value(o, pstate, WJB_KEY, ctx, key);
+    JsonbValue key_jsonb;
 
-    // If the value is an `Array` the convert it.
-    if (JS_IsArray(ctx, o)) {
-      value = jsonb_array_from_array(o, pstate, ctx);
-    } else if (JS_IsObject(o) && !Is_Date(o)) {
-      // Or convert an `Object`.
-      value = jsonb_object_from_object(o, pstate, ctx);
-    } else {
-      // Or anything else.
-      value = jsonb_from_value(o, pstate, WJB_VALUE, ctx, NULL);
+    /* It raises; release this level's values first, as for a getter. */
+    if (memchr(key, '\0', key_length) != NULL) {
+      JS_FreeValue(ctx, json);
+      pljs_free_prop_enum(ctx, tab, object_keys_length);
     }
 
+    jsonb_string_value(&key_jsonb, key, key_length, ctx);
+    JS_FreeCString(ctx, key);
+
+    value = jsonb_push(pstate, WJB_KEY, &key_jsonb);
+    value = jsonb_from_any(json, pstate, WJB_VALUE, ctx, path);
+
     // Free up the memory.
-    JS_FreeValue(ctx, o);
+    JS_FreeValue(ctx, json);
   }
 
   pljs_free_prop_enum(ctx, tab, object_keys_length);
 
   // Push that we are at the end of an object.
   value = jsonb_push(pstate, WJB_END_OBJECT, NULL);
+
+  *path = list_delete_last(*path);
 
   return value;
 }
@@ -3153,7 +3515,8 @@ static JsonbValue *jsonb_object_from_object(JSValue object,
  *
  * @param object #JSValue - `Object` to convert
  * @param ctx #JSContext - Javascript context to execute in
- * @returns #Jsonb the converted `JSONB` value
+ * @returns #Jsonb the converted `JSONB` value, or NULL if JSON has no value
+ * for it
  */
 static Jsonb *convert_object(JSValue object, JSContext *ctx) {
   // Create a new memory context for conversion.
@@ -3165,25 +3528,31 @@ static Jsonb *convert_object(JSValue object, JSContext *ctx) {
   MemoryContextSwitchTo(conversion_context);
 
   JsonbBuildState parse_state = {0};
-  JsonbValue *value;
+  JsonbValue *value = NULL;
+  List *path = NIL;
+  JSValue json = jsonb_json_value(object, ctx);
 
   // Check the type and get its value.
-  if (JS_IsArray(ctx, object)) {
-    value = jsonb_array_from_array(object, &parse_state, ctx);
-  } else if (JS_IsObject(object) && !Is_Date(object)) {
-    value = jsonb_object_from_object(object, &parse_state, ctx);
+  if (jsonb_has_no_value(json, ctx)) {
+    value = NULL;
+  } else if (JS_IsArray(ctx, json)) {
+    value = jsonb_array_from_array(json, &parse_state, ctx, &path);
+  } else if (JS_IsObject(json)) {
+    value = jsonb_object_from_object(json, &parse_state, ctx, &path);
   } else {
     jsonb_push(&parse_state, WJB_BEGIN_ARRAY, NULL);
-    jsonb_from_value(object, &parse_state, WJB_ELEM, ctx, NULL);
+    jsonb_from_value(json, &parse_state, WJB_ELEM, ctx);
     value = jsonb_push(&parse_state, WJB_END_ARRAY, NULL);
     value->val.array.rawScalar = true;
   }
+
+  JS_FreeValue(ctx, json);
 
   // Switch back to our old #MemoryContext.
   MemoryContextSwitchTo(oldcontext);
 
   // Create the #Jsonb object to return.
-  Jsonb *ret = JsonbValueToJsonb(value);
+  Jsonb *ret = value != NULL ? JsonbValueToJsonb(value) : NULL;
 
   // Delete the conversion #MemoryContext.
   MemoryContextDelete(conversion_context);

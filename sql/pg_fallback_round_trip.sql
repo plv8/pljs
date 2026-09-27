@@ -1,0 +1,47 @@
+-- regproc and regoper survive a round trip through JavaScript.
+--
+-- They reach JavaScript through their output functions, which write a bare
+-- name, and come back through their input functions, which reject the name of
+-- an overloaded function or operator -- so a trigger that returned NEW failed
+-- for every row of a table with such a column, and so did any UPDATE of it.
+-- They are written as regprocedure and regoperator write them, as a
+-- signature, which reads back to the same OID.
+
+CREATE FUNCTION frt_describe(fn regproc, op regoper) RETURNS text
+LANGUAGE pljs AS $$
+  return typeof fn + ' ' + fn + ', ' + typeof op + ' ' + op;
+$$;
+SELECT frt_describe('abs(integer)'::regprocedure::regproc,
+                    '+(integer,integer)'::regoperator::regoper);
+SELECT frt_describe('now', '|/');
+
+CREATE TABLE frt_tbl (id int4, fn regproc, op regoper, fns regprocedure,
+                      ops regoperator, cls regclass, typ regtype);
+CREATE FUNCTION frt_trig() RETURNS trigger LANGUAGE pljs AS $$
+  return NEW;
+$$;
+CREATE TRIGGER frt_trig BEFORE INSERT OR UPDATE ON frt_tbl
+  FOR EACH ROW EXECUTE FUNCTION frt_trig();
+INSERT INTO frt_tbl VALUES
+  (1, 'abs(integer)'::regprocedure::regproc,
+   '+(integer,integer)'::regoperator::regoper,
+   'abs(integer)', '+(integer,integer)', 'frt_tbl', 'integer'),
+  (2, 'now', '|/', 'now()', '|/(NONE,double precision)', 'pg_class', 'text'),
+  (3, '0', '0', '0', '0', '0', '0');
+UPDATE frt_tbl SET id = id + 10;
+SELECT id, fn::regprocedure AS fn, op::regoperator AS op, fns, ops, cls, typ
+FROM frt_tbl ORDER BY id;
+
+-- The bare name and the OID are still accepted.
+CREATE FUNCTION frt_bind() RETURNS text LANGUAGE pljs AS $$
+  const by_name = pljs.execute('SELECT $1::regproc::oid AS o', ['now'])[0].o;
+  const by_oid = pljs.execute('SELECT $1::regproc::oid AS o',
+                              [String(by_name)])[0].o;
+  const by_signature = pljs.execute('SELECT $1::regproc::oid AS o',
+                                    ['now()'])[0].o;
+  return (by_name === by_oid && by_oid === by_signature) + '';
+$$;
+SELECT frt_bind();
+
+DROP TABLE frt_tbl;
+DROP FUNCTION frt_describe(regproc, regoper), frt_trig(), frt_bind();

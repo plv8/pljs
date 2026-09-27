@@ -36,6 +36,8 @@ static Datum call_function(PG_FUNCTION_ARGS, pljs_context *context,
                            JSValueConst *argv);
 static Datum call_srf_function(PG_FUNCTION_ARGS, pljs_context *context,
                                JSValueConst *argv);
+static Datum convert_result(FunctionCallInfo fcinfo, pljs_context *context,
+                            Oid rettype, JSValue ret);
 
 static void pljs_build_function_source(StringInfoData *src,
                                        pljs_context *context, bool is_trigger);
@@ -44,10 +46,8 @@ static Datum call_trigger(FunctionCallInfo fcinfo, pljs_context *context);
 static Datum dispatch_call(FunctionCallInfo fcinfo);
 static void run_inline(FunctionCallInfo fcinfo);
 static int interrupt_handler(JSRuntime *rt, void *opaque);
-static void setup_storage_for_context(pljs_context *context,
-                                      FunctionCallInfo fcinfo);
-static void store_storage_in_context(pljs_context *context,
-                                     pljs_storage *storage);
+static void setup_storage(pljs_storage *storage, pljs_func *function,
+                          FunctionCallInfo fcinfo);
 
 /** \brief QuickJS Runtime */
 JSRuntime *rt = NULL;
@@ -66,6 +66,18 @@ JSClassID js_pljs_storage_id;
 
 // class id for pljs window object
 JSClassID js_window_id;
+
+/*
+ * The storage of the pljs call running now -- a function, trigger or DO block
+ * -- or NULL outside of one; see pljs_current_storage().
+ */
+static pljs_storage *current_storage = NULL;
+
+/*
+ * Whether a function's result is being converted, anywhere up the stack; see
+ * pljs_commit().
+ */
+bool pljs_converting_result = false;
 
 /**
  * @brief PostgreSQL extension initialization function.
@@ -247,6 +259,14 @@ static char *dump_error(JSContext *ctx, char **message_out, char **detail_out,
 
   if (!str) {
     elog(DEBUG3, "error thrown but no error message");
+
+    /*
+     * The thrown value's toString() threw in turn.  Release that exception as
+     * well as the thrown value, rather than leave it pending in the context.
+     */
+    JS_FreeValue(ctx, JS_GetException(ctx));
+    JS_FreeValue(ctx, exception_val);
+
     return NULL;
   }
 
@@ -707,17 +727,21 @@ static Oid pljs_resolve_argtype(FunctionCallInfo fcinfo, Oid argtype,
  * @param fcinfo #FunctionCallInfo
  * @param proctuple #HeapTuple
  * @param context #pljs_context
+ * @param argc @c int* - set to the number of values in the array, all of
+ * which the caller owns
  * @returns an array of #JSValueConst values of the function arguments
  */
 static JSValueConst *convert_arguments_to_javascript(FunctionCallInfo fcinfo,
                                                      HeapTuple proctuple,
-                                                     pljs_context *context) {
+                                                     pljs_context *context,
+                                                     int *argc) {
   char **arguments;
   Oid *argtypes = NULL;
   char *argmodes;
   int nargs;
 
   nargs = get_func_arg_info(proctuple, &argtypes, &arguments, &argmodes);
+  *argc = nargs;
 
   JSValueConst *argv = (JSValueConst *)palloc(sizeof(JSValueConst) * nargs);
   int inargs = 0;
@@ -771,82 +795,46 @@ static JSValueConst *convert_arguments_to_javascript(FunctionCallInfo fcinfo,
 }
 
 /**
- * @brief Retrieves the #pljs_storage for a given #JSContext.
+ * @brief Retrieves the #pljs_storage of the pljs call running now.
  *
- * We stash a #pljs_storage object as an opaque object connected to the
- * `pljs` global Javascript object.  This contains important function
- * call contexts that allow us to do the conversions that we need.
+ * The storage holds what the builtins need from the call that is running --
+ * its FunctionCallInfo, the set it returns, its window -- and every entry
+ * point that runs JavaScript installs its own and restores the previous one
+ * however it leaves.
  *
- * @param ctx #JSContext
- * @returns #pljs_storage
+ * It was kept as the opaque of the global `pljs` object, which JavaScript can
+ * replace or delete: after `globalThis.pljs = undefined` the lookup returned
+ * NULL, and the next call dereferenced it and crashed the backend, for any
+ * user of the trusted language.  A function compiled in another user's
+ * JSContext -- reached through pljs.find_function() after SET ROLE -- saw
+ * that context's storage rather than the running call's.
+ *
+ * @returns #pljs_storage, or NULL outside of a pljs call
  */
-pljs_storage *pljs_storage_for_context(JSContext *ctx) {
-  JSValue global_obj = JS_GetGlobalObject(ctx);
-
-  JSValue pljs = JS_GetPropertyStr(ctx, global_obj, "pljs");
-
-  /*
-   * JS_GetOpaque only reads a pointer off the object; it does not keep the
-   * object alive.  Both global_obj and pljs are fresh references returned by
-   * the getters above, so we must drop them here.  The pljs object stays
-   * alive via the global object's property table.  Without this, every call
-   * (and this is a hot path: return_next, window helpers, each function
-   * invocation) leaks a reference and monotonically bumps the singletons'
-   * refcounts for the life of the backend.
-   */
-  pljs_storage *storage = JS_GetOpaque(pljs, js_pljs_storage_id);
-
-  JS_FreeValue(ctx, pljs);
-  JS_FreeValue(ctx, global_obj);
-
-  return storage;
-}
+pljs_storage *pljs_current_storage(void) { return current_storage; }
 
 /**
- * @brief Sets up the #pljs_storage object and stores it in the #JSContext.
+ * @brief Fills in a #pljs_storage for a call.
  *
- * @param context #pljs_context
- * @param fcinfo #FunctionCalInfo
+ * @param storage #pljs_storage - the storage to fill
+ * @param function #pljs_func - the function being called, or NULL for a DO
+ * block
+ * @param fcinfo #FunctionCalInfo - the call
  */
-static void setup_storage_for_context(pljs_context *context,
-                                      FunctionCallInfo fcinfo) {
-  // Set up the pljs storage object.
-  pljs_storage *storage = (pljs_storage *)palloc0(sizeof(pljs_storage));
+static void setup_storage(pljs_storage *storage, pljs_func *function,
+                          FunctionCallInfo fcinfo) {
+  WindowObject window_object = PG_WINDOW_OBJECT();
 
-  // Function.
-  storage->function = context->function;
+  memset(storage, 0, sizeof(pljs_storage));
 
-  // Set up the MemoryContext, we should be in our execution context by now.
+  storage->function = function;
   storage->execution_memory_context = CurrentMemoryContext;
-
-  // Set up the FunctionCallInfo.
   storage->fcinfo = fcinfo;
 
-  // Current WindowObject.
-  storage->window_object = PG_WINDOW_OBJECT();
-
-  store_storage_in_context(context, storage);
-}
-
-/**
- * @brief Store the #pljs_storage object in the #JSContext.
- *
- * @param context #pljs_context
- * @param storage #pljs_storage
- */
-static void store_storage_in_context(pljs_context *context,
-                                     pljs_storage *storage) {
-  JSValue global_obj = JS_GetGlobalObject(context->ctx);
-
-  JSValue pljs = JS_GetPropertyStr(context->ctx, global_obj, "pljs");
-
-  // Attach storage to the pljs object.
-  JS_SetOpaque(pljs, storage);
-
-  // Drop the fresh references returned by the getters above (see
-  // pljs_storage_for_context); the pljs object survives via the global object.
-  JS_FreeValue(context->ctx, pljs);
-  JS_FreeValue(context->ctx, global_obj);
+  /* fcinfo->context is a TriggerData or CallContext for other calls. */
+  if (WindowObjectIsValid(window_object)) {
+    storage->window_object = window_object;
+  }
 }
 
 /**
@@ -888,6 +876,8 @@ static Datum dispatch_call(FunctionCallInfo fcinfo) {
   HeapTuple proctuple;
   JSContext *ctx;
   Datum retval;
+  JSValueConst *argv = NULL;
+  int argc = 0;
 
   bool is_trigger = CALLED_AS_TRIGGER(fcinfo);
   pljs_context context = {0};
@@ -965,8 +955,8 @@ static Datum dispatch_call(FunctionCallInfo fcinfo) {
    * and the function branch still passed the tuple to
    * convert_arguments_to_javascript() -> get_func_arg_info().  That only bit
    * once the entry was actually evicted (cache pressure / concurrent DDL in a
-   * long-running backend).  Release it in each branch at the last safe point
-   * instead: right after the final read, before any JS is executed.
+   * long-running backend).  Release it at the last safe point instead: right
+   * after the final read, before any JS is executed.
    */
   if (is_trigger) {
     // Call in the context of a trigger.
@@ -975,59 +965,60 @@ static Datum dispatch_call(FunctionCallInfo fcinfo) {
     procStruct = (Form_pg_proc)GETSTRUCT(proctuple);
 
     context.function->rettype = procStruct->prorettype;
-
-    ReleaseSysCache(proctuple);
-
-    retval = call_trigger(fcinfo, &context);
   } else {
     // Call as a function.
-    JSValueConst *argv =
-        convert_arguments_to_javascript(fcinfo, proctuple, &context);
-
-    ReleaseSysCache(proctuple);
-
-    // Get the old storage object.
-    pljs_storage *old_storage = pljs_storage_for_context(context.ctx);
-
-    // Set up a new storage object for this call.
-    setup_storage_for_context(&context, fcinfo);
-
-    /*
-     * The storage MUST be restored even when the call raises.
-     *
-     * JSContexts are cached per user id and reused for the rest of the session,
-     * and the storage is attached to the context, so a call that raised used to
-     * leave its own storage installed permanently -- pointing at this call's
-     * fcinfo, its return_state and its execution memory context, all of which
-     * are gone once the error has unwound.  The next call of *any* kind that
-     * reads pljs_storage_for_context() -- a trigger, a window function,
-     * return_next() -- then dereferenced that stale pointer and segfaulted the
-     * backend.
-     *
-     * This was latent until a conversion error became reachable from inside a
-     * set-returning function: before that, returning an out-of-range integer
-     * wrapped silently instead of raising, so nothing escaped this block.  A
-     * failing SETOF call followed by any trigger reproduces it within a couple
-     * of dozen iterations.
-     */
-    PG_TRY();
-    {
-      if (context.function->is_srf) {
-        retval = call_srf_function(fcinfo, &context, argv);
-      } else {
-        retval = call_function(fcinfo, &context, argv);
-      }
-    }
-    PG_CATCH();
-    {
-      store_storage_in_context(&context, old_storage);
-      PG_RE_THROW();
-    }
-    PG_END_TRY();
-
-    // Reset to the old storage now that the call is over.
-    store_storage_in_context(&context, old_storage);
+    argv = convert_arguments_to_javascript(fcinfo, proctuple, &context, &argc);
   }
+
+  ReleaseSysCache(proctuple);
+
+  pljs_storage storage;
+  pljs_storage *previous_storage = current_storage;
+
+  setup_storage(&storage, context.function, fcinfo);
+  current_storage = &storage;
+
+  /*
+   * The storage MUST be restored even when the call raises.
+   *
+   * A call that raised used to leave its own storage installed permanently --
+   * pointing at this call's fcinfo, its return_state and its execution memory
+   * context, all of which are gone once the error has unwound.  The next call
+   * of *any* kind that reads pljs_current_storage() -- a trigger, a window
+   * function, return_next() -- then dereferenced that stale pointer and
+   * segfaulted the backend.
+   *
+   * This was latent until a conversion error became reachable from inside a
+   * set-returning function: before that, returning an out-of-range integer
+   * wrapped silently instead of raising, so nothing escaped this block.  A
+   * failing SETOF call followed by any trigger reproduces it within a couple
+   * of dozen iterations.
+   *
+   * The arguments are released here too.  JS_Call() takes references of its
+   * own, so these were never freed at all, and every call leaked its
+   * arguments into the runtime for the life of the backend -- 20MB over
+   * 20,000 calls with a 1kB text argument, until pljs.memory_limit was
+   * exhausted for good.
+   */
+  PG_TRY();
+  {
+    if (is_trigger) {
+      retval = call_trigger(fcinfo, &context);
+    } else if (context.function->is_srf) {
+      retval = call_srf_function(fcinfo, &context, argv);
+    } else {
+      retval = call_function(fcinfo, &context, argv);
+    }
+  }
+  PG_FINALLY();
+  {
+    current_storage = previous_storage;
+
+    for (int i = 0; i < argc; i++) {
+      JS_FreeValue(context.ctx, argv[i]);
+    }
+  }
+  PG_END_TRY();
 
   return retval;
 }
@@ -1100,8 +1091,27 @@ static void run_inline(FunctionCallInfo fcinfo) {
     elog(ERROR, "could not connect to spi manager");
   }
 
-  // Call the function.
-  call_anonymous_function(sourcecode, ctx);
+  /*
+   * A DO block has storage of its own, with no set to return and no window:
+   * it used to see whatever the call further up the stack had installed, so
+   * pljs.return_next() from a DO block run by pljs.execute() added rows to
+   * the set of the function that ran it.
+   */
+  pljs_storage storage;
+  pljs_storage *previous_storage = current_storage;
+
+  setup_storage(&storage, NULL, fcinfo);
+  current_storage = &storage;
+
+  PG_TRY();
+  {
+    call_anonymous_function(sourcecode, ctx);
+  }
+  PG_FINALLY();
+  {
+    current_storage = previous_storage;
+  }
+  PG_END_TRY();
 
   SPI_finish();
 }
@@ -1509,23 +1519,32 @@ static Datum call_trigger(FunctionCallInfo fcinfo, pljs_context *context) {
   JSValue ret =
       JS_Call(context->ctx, context->js_function, JS_UNDEFINED, 10, argv);
 
-  if (JS_IsException(ret)) {
-    /*
-     * Before the report, as in call_function(): it does not return, so an
-     * SPI_finish() after it would never run.
-     */
-    SPI_finish();
+  /* JS_Call() took references of its own; see dispatch_call(). */
+  for (int i = 0; i < 10; i++) {
+    JS_FreeValue(context->ctx, argv[i]);
+  }
 
+  if (JS_IsException(ret)) {
     /*
      * Same order as call_function(): extract, release, then report.  The
      * JS_FreeValue() below used to sit *after* the report, which never returns,
      * so it was dead code -- `ret` leaked a QuickJS reference on every trigger
      * exception, not merely on a cancel.
+     *
+     * The error is extracted while the SPI connection is open, as the result
+     * is converted; see call_function().
      */
     char *message = NULL, *pg_detail = NULL, *sqlstate = NULL;
-    char *detail = dump_error(context->ctx, &message, &pg_detail, &sqlstate);
+    char *detail;
+
+    MemoryContextSwitchTo(execution_context);
+    detail = dump_error(context->ctx, &message, &pg_detail, &sqlstate);
 
     JS_FreeValue(context->ctx, ret);
+
+    /* Before the report, which does not return. */
+    SPI_finish();
+
     MemoryContextSwitchTo(old_context);
 
     /* Surface a pending cancel/terminate as the real PostgreSQL error. */
@@ -1615,14 +1634,24 @@ static Datum call_function(FunctionCallInfo fcinfo, pljs_context *context,
                         context->function->inargs, argv);
 
   if (JS_IsException(ret)) {
-    /* Before the report, which does not return. */
-    SPI_finish();
-
     char *message = NULL, *pg_detail = NULL, *sqlstate = NULL;
-    char *error_message =
-        dump_error(context->ctx, &message, &pg_detail, &sqlstate);
+    char *error_message;
+
+    /*
+     * Extract the error while the SPI connection is still open, for the same
+     * reason the result is converted then: dump_error() runs JavaScript -- the
+     * thrown value's toString(), and getters for its message, detail and
+     * sqlstate -- and pljs.commit() from there crashed the backend after
+     * SPI_finish().  It is extracted into this call's context, which outlives
+     * SPI_finish(), rather than SPI's.
+     */
+    MemoryContextSwitchTo(execution_context);
+    error_message = dump_error(context->ctx, &message, &pg_detail, &sqlstate);
 
     JS_FreeValue(context->ctx, ret);
+
+    /* Before the report, which does not return. */
+    SPI_finish();
 
     /* Surface a pending cancel/terminate as the real PostgreSQL error. */
     CHECK_FOR_INTERRUPTS();
@@ -1633,8 +1662,8 @@ static Datum call_function(FunctionCallInfo fcinfo, pljs_context *context,
     /* Shuts up the compiler, since ereports of ERROR stop execution. */
     return (Datum)0;
   } else {
-    pljs_storage *storage = pljs_storage_for_context(context->ctx);
     Datum datum = 0;
+    bool was_converting = pljs_converting_result;
 
     /*
      * Convert the result while this call's SPI connection is still open, as
@@ -1649,51 +1678,17 @@ static Datum call_function(FunctionCallInfo fcinfo, pljs_context *context,
      * transaction from here; see pljs_commit().
      */
     MemoryContextSwitchTo(execution_context);
-    storage->converting_result = true;
+    pljs_converting_result = true;
 
-    if (rettype == RECORDOID) {
-      TupleDesc tupdesc;
-
-      /*
-       * Check the status rather than discarding it.  TYPEFUNC_RECORD means the
-       * caller did not supply a column definition list, and tupdesc comes back
-       * NULL; pljs_jsvalue_to_record() then reached
-       * lookup_rowtype_tupdesc(RECORDOID, -1) and raised "record type has not
-       * been registered", which is an unhelpful way to say "you forgot
-       * AS (a int, b text)".
-       */
-      if (get_call_result_type(fcinfo, &rettype, &tupdesc) !=
-          TYPEFUNC_COMPOSITE) {
-        ereport(ERROR,
-                (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-                 errmsg("a function returning \"record\" needs a column "
-                        "definition list"),
-                 errhint("Call it as ... AS (column_name data_type, ...).")));
-      }
-
-      pljs_type type;
-      bool is_null = false;
-
-      pljs_type_fill(&type, rettype);
-
-      /*
-       * pljs_jsvalue_to_record() reports a null or undefined result through
-       * is_null, and was handed NULL for it: `return null` from a function
-       * returning record, or with OUT parameters, crashed the backend.
-       */
-      datum =
-          pljs_jsvalue_to_record(&type, ret, &is_null, tupdesc, context->ctx);
-
-      if (is_null) {
-        fcinfo->isnull = true;
-      }
-    } else {
-      bool is_null;
-      datum =
-          pljs_jsvalue_to_datum(rettype, ret, &is_null, context->ctx, fcinfo);
+    PG_TRY();
+    {
+      datum = convert_result(fcinfo, context, rettype, ret);
     }
-
-    storage->converting_result = false;
+    PG_FINALLY();
+    {
+      pljs_converting_result = was_converting;
+    }
+    PG_END_TRY();
 
     JS_FreeValue(context->ctx, ret);
 
@@ -1703,6 +1698,62 @@ static Datum call_function(FunctionCallInfo fcinfo, pljs_context *context,
 
     return datum;
   }
+}
+
+/**
+ * @brief Converts what a function returned to its result type.
+ *
+ * @param fcinfo #FunctionCallInfo - the call
+ * @param context #pljs_context - the function
+ * @param rettype #Oid - the result type
+ * @param ret #JSValue - what the function returned
+ * @returns #Datum of the result, with fcinfo->isnull set for a SQL NULL
+ */
+static Datum convert_result(FunctionCallInfo fcinfo, pljs_context *context,
+                            Oid rettype, JSValue ret) {
+  Datum datum;
+
+  if (rettype == RECORDOID) {
+    TupleDesc tupdesc;
+
+    /*
+     * Check the status rather than discarding it.  TYPEFUNC_RECORD means the
+     * caller did not supply a column definition list, and tupdesc comes back
+     * NULL; pljs_jsvalue_to_record() then reached
+     * lookup_rowtype_tupdesc(RECORDOID, -1) and raised "record type has not
+     * been registered", which is an unhelpful way to say "you forgot
+     * AS (a int, b text)".
+     */
+    if (get_call_result_type(fcinfo, &rettype, &tupdesc) !=
+        TYPEFUNC_COMPOSITE) {
+      ereport(ERROR,
+              (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+               errmsg("a function returning \"record\" needs a column "
+                      "definition list"),
+               errhint("Call it as ... AS (column_name data_type, ...).")));
+    }
+
+    pljs_type type;
+    bool is_null = false;
+
+    pljs_type_fill(&type, rettype);
+
+    /*
+     * pljs_jsvalue_to_record() reports a null or undefined result through
+     * is_null, and was handed NULL for it: `return null` from a function
+     * returning record, or with OUT parameters, crashed the backend.
+     */
+    datum = pljs_jsvalue_to_record(&type, ret, &is_null, tupdesc, context->ctx);
+
+    if (is_null) {
+      fcinfo->isnull = true;
+    }
+  } else {
+    bool is_null;
+    datum = pljs_jsvalue_to_datum(rettype, ret, &is_null, context->ctx, fcinfo);
+  }
+
+  return datum;
 }
 
 /**
@@ -1723,7 +1774,12 @@ static void put_returned_row(pljs_return_state *state, JSValueConst row,
     pljs_ereport_js_exception(ctx);
   }
 
-  if (state->is_composite) {
+  if (state->is_domain) {
+    /* A null row is left out, as it is for any other composite set. */
+    if (!JS_IsNull(row) && !JS_IsUndefined(row)) {
+      pljs_put_domain_row(state, row, ctx);
+    }
+  } else if (state->is_composite) {
     bool *nulls = (bool *)palloc0(sizeof(bool) * state->tuple_desc->natts);
     Datum *values =
         pljs_jsvalue_to_datums(NULL, row, &nulls, state->tuple_desc, ctx);
@@ -1822,21 +1878,42 @@ static Datum call_srf_function(FunctionCallInfo fcinfo, pljs_context *context,
     state->tuple_desc = rsinfo->setDesc;
   }
 
-  state->is_composite = context->function->typeclass == TYPEFUNC_COMPOSITE;
+  /*
+   * A set of a domain over a composite type has rows of the composite type,
+   * each of which has to satisfy the domain.  TYPEFUNC_COMPOSITE_DOMAIN was
+   * taken for a single-column set, so its row objects had their first
+   * property converted, and that one Datum was passed as a row of all of the
+   * composite type's columns: tuplestore_putvalues() read the rest off the
+   * stack, and the backend was killed.  The domain's constraints were never
+   * checked either.
+   */
+  state->is_domain = context->function->typeclass == TYPEFUNC_COMPOSITE_DOMAIN;
+  state->is_composite =
+      context->function->typeclass == TYPEFUNC_COMPOSITE || state->is_domain;
+
+  /*
+   * Whether converting a row can check a domain's constraints, which can run
+   * any SQL; see pljs_return_next().
+   */
+  state->convert_in_subtransaction = state->is_domain;
+
+  for (int i = 0;
+       i < state->tuple_desc->natts && !state->convert_in_subtransaction; i++) {
+    Form_pg_attribute attr = TupleDescAttr(state->tuple_desc, i);
+
+    if (!attr->attisdropped) {
+      state->convert_in_subtransaction =
+          pljs_type_may_check_domain(attr->atttypid);
+    }
+  }
 
   rsinfo->returnMode = SFRM_Materialize;
   rsinfo->setResult = state->tuple_store_state;
 
   MemoryContextSwitchTo(execution_context);
 
-  pljs_storage *storage = pljs_storage_for_context(context->ctx);
-
-  if (storage == NULL) {
-    elog(ERROR, "invalid storage found on pljs object");
-  }
-
   // Set the current return context.
-  storage->return_state = state;
+  pljs_current_storage()->return_state = state;
 
   /*
    * Re-anchor QuickJS's stack measurement here, at the C-stack depth this call
@@ -1854,17 +1931,20 @@ static Datum call_srf_function(FunctionCallInfo fcinfo, pljs_context *context,
                         context->function->inargs, argv);
 
   if (JS_IsException(ret)) {
+    char *message = NULL, *pg_detail = NULL, *sqlstate = NULL;
+    char *error_message;
+
+    /* While the SPI connection is open; see call_function(). */
+    MemoryContextSwitchTo(execution_context);
+    error_message = dump_error(context->ctx, &message, &pg_detail, &sqlstate);
+
+    JS_FreeValue(context->ctx, ret);
+
     /* Before the report, which does not return. */
     SPI_finish();
 
     /* Surface a pending cancel/terminate as the real PostgreSQL error. */
     CHECK_FOR_INTERRUPTS();
-
-    char *message = NULL, *pg_detail = NULL, *sqlstate = NULL;
-    char *error_message =
-        dump_error(context->ctx, &message, &pg_detail, &sqlstate);
-
-    JS_FreeValue(context->ctx, ret);
 
     pljs_ereport_js_error(message, pg_detail, error_message, sqlstate,
                           "execution error");
