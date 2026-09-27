@@ -876,8 +876,9 @@ static Datum dispatch_call(FunctionCallInfo fcinfo) {
   HeapTuple proctuple;
   JSContext *ctx;
   Datum retval;
-  JSValueConst *argv = NULL;
-  int argc = 0;
+  /* Read in the PG_FINALLY below. */
+  JSValueConst *volatile argv = NULL;
+  volatile int argc = 0;
 
   bool is_trigger = CALLED_AS_TRIGGER(fcinfo);
   pljs_context context = {0};
@@ -967,7 +968,10 @@ static Datum dispatch_call(FunctionCallInfo fcinfo) {
     context.function->rettype = procStruct->prorettype;
   } else {
     // Call as a function.
-    argv = convert_arguments_to_javascript(fcinfo, proctuple, &context, &argc);
+    int nargs;
+
+    argv = convert_arguments_to_javascript(fcinfo, proctuple, &context, &nargs);
+    argc = nargs;
   }
 
   ReleaseSysCache(proctuple);

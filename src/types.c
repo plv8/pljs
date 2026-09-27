@@ -1287,7 +1287,7 @@ static JSValue pljs_datum_to_jsvalue_fallback(Datum arg, pljs_type_io *io,
   FmgrInfo *output = pljs_type_io_output(io);
   MemoryContext scratch = pljs_type_io_scratch_begin();
   MemoryContext old_context = MemoryContextSwitchTo(scratch);
-  JSValue ret;
+  volatile JSValue ret;
 
   PG_TRY();
   {
@@ -1973,8 +1973,10 @@ static Datum pljs_jsvalue_to_datum_via_io(pljs_type_io *io, JSValueConst val,
     if (io->is_domain) {
       ret = pljs_domain_check(io, text, (Datum)0, false);
     } else {
-      ret =
-          InputFunctionCall(pljs_type_io_input(io), text, io->ioparam, typmod);
+      /* Looked up first: it is what sets io->ioparam. */
+      FmgrInfo *input = pljs_type_io_input(io);
+
+      ret = InputFunctionCall(input, text, io->ioparam, typmod);
     }
 
     MemoryContextSwitchTo(caller_context);
