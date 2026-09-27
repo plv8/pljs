@@ -792,16 +792,28 @@ static const char *pljs_util_spi_status_string(int status) {
 /**
  * @brief Helper for getting the length of a Javascript array.
  *
+ * Reading `length` can run JavaScript -- a Proxy, or a getter -- and when that
+ * threw, the length came back as whatever was on the stack.  It now returns
+ * -1 and leaves the exception pending, for the caller to raise or to hand back
+ * to JavaScript.
+ *
  * @param obj JSValueConst - Javascript array to check the length of
  * @param ctx #JSContext - Javascript context to execute in
- * @returns @c uint32_t
+ * @returns @c int32_t length, or -1 if reading it threw
  */
-uint32_t pljs_js_array_length(JSValueConst obj, JSContext *ctx) {
+int32_t pljs_js_array_length(JSValueConst obj, JSContext *ctx) {
   JSValue length = JS_GetPropertyStr(ctx, obj, "length");
   int32_t array_length_int;
-  JS_ToInt32(ctx, &array_length_int, length);
+  int failed;
 
-  return array_length_int;
+  if (JS_IsException(length)) {
+    return -1;
+  }
+
+  failed = JS_ToInt32(ctx, &array_length_int, length);
+  JS_FreeValue(ctx, length);
+
+  return failed < 0 ? -1 : array_length_int;
 }
 
 /**
@@ -934,10 +946,19 @@ JSValue pljs_datum_to_object(pljs_type *type, Datum arg, JSContext *ctx) {
 
       datum = heap_getattr(&tuple, i + 1, tupdesc, &isnull);
 
-      JS_SetPropertyStr(
+      /*
+       * Defined, not set: setting runs any setter an object inherits, so a
+       * setter on Object.prototype ran -- while the arguments were being
+       * converted, before the call had an SPI connection -- and took the
+       * column's value instead of the row, and a column named __proto__
+       * replaced the row's prototype.  So for every object and array built
+       * from a PostgreSQL value, as JSON.parse() builds its own.
+       */
+      JS_DefinePropertyValueStr(
           ctx, obj, colname,
           pljs_datum_to_jsvalue(TupleDescAttr(tupdesc, i)->atttypid, datum,
-                                isnull, true, ctx));
+                                isnull, true, ctx),
+          JS_PROP_C_W_E);
     }
 
     ReleaseTupleDesc(tupdesc);
@@ -987,7 +1008,8 @@ JSValue pljs_datum_to_array(pljs_type *type, Datum arg, JSContext *ctx) {
     JSValue value =
         pljs_datum_to_jsvalue(type->typid, values[i], nulls[i], true, ctx);
 
-    JS_SetPropertyUint32(ctx, array, i, value);
+    /* Defined, not set; see pljs_datum_to_object(). */
+    JS_DefinePropertyValueUint32(ctx, array, i, value, JS_PROP_C_W_E);
   }
 
   JSValue length = JS_NewInt32(ctx, nelems);
@@ -1271,6 +1293,10 @@ Datum pljs_jsvalue_to_array(pljs_type *type, JSValue val, JSContext *ctx,
   int lbs[] = {[0] = 1};
 
   int32_t array_length = pljs_js_array_length(val, ctx);
+
+  if (array_length < 0) {
+    pljs_ereport_js_exception(ctx);
+  }
 
   values = (Datum *)palloc(sizeof(Datum) * array_length);
   nulls = (bool *)palloc(sizeof(bool) * array_length);
@@ -1618,6 +1644,10 @@ static Datum pljs_jsvalue_to_datum_fallback(JSValue value, bool *is_null,
   // Set whether the Datum is `NULL` or not.
   JSValue is_set_null_value = JS_GetPropertyStr(ctx, value, "is_null");
 
+  if (JS_IsException(is_set_null_value)) {
+    pljs_ereport_js_exception(ctx);
+  }
+
   *is_null = JS_ToBool(ctx, is_set_null_value);
   JS_FreeValue(ctx, is_set_null_value);
 
@@ -1673,8 +1703,9 @@ static Datum pljs_jsvalue_to_datum_via_io(pljs_type_io *io, JSValueConst val,
   FmgrInfo *input;
   Datum ret;
 
+  /* toString() threw, or QuickJS ran out of memory. */
   if (str == NULL) {
-    elog(ERROR, "could not convert JavaScript value to a string");
+    pljs_ereport_js_exception(ctx);
   }
 
   if (memchr(str, '\0', plen) != NULL) {
@@ -1763,8 +1794,9 @@ static int64 pljs_number_to_int_checked(JSContext *ctx, JSValueConst val,
                                         Oid typid) {
   double d;
 
+  /* valueOf() threw. */
   if (JS_ToFloat64(ctx, &d, val) < 0) {
-    elog(ERROR, "could not convert JavaScript value to a number");
+    pljs_ereport_js_exception(ctx);
   }
 
   if (isnan(d)) {
@@ -1803,7 +1835,7 @@ static int64 pljs_bigint_to_int64_checked(JSContext *ctx, JSValueConst val,
   bool same;
 
   if (JS_ToBigInt64(ctx, &v, val) < 0) {
-    elog(ERROR, "could not convert JavaScript BigInt to an integer");
+    pljs_ereport_js_exception(ctx);
   }
 
   back = JS_NewBigInt64(ctx, v);
@@ -1918,7 +1950,15 @@ static Datum pljs_jsvalue_to_datum_internal(pljs_type_io *io, int32 typmod,
 
   case OIDOID: {
     int64_t in;
-    JS_ToInt64(ctx, &in, val);
+
+    /*
+     * Each JS_To*() below runs valueOf() or toString() on an object, and each
+     * used to ignore that it threw, converting whatever was on the stack: an
+     * oid became 0 and a float8 or numeric NaN.
+     */
+    if (JS_ToInt64(ctx, &in, val) < 0) {
+      pljs_ereport_js_exception(ctx);
+    }
 
     PG_RETURN_OID(in);
     break;
@@ -2015,7 +2055,10 @@ static Datum pljs_jsvalue_to_datum_internal(pljs_type_io *io, int32 typmod,
 
   case FLOAT4OID: {
     double in;
-    JS_ToFloat64(ctx, &in, val);
+
+    if (JS_ToFloat64(ctx, &in, val) < 0) {
+      pljs_ereport_js_exception(ctx);
+    }
 
     PG_RETURN_FLOAT4((float4)in);
     break;
@@ -2023,7 +2066,10 @@ static Datum pljs_jsvalue_to_datum_internal(pljs_type_io *io, int32 typmod,
 
   case FLOAT8OID: {
     double in;
-    JS_ToFloat64(ctx, &in, val);
+
+    if (JS_ToFloat64(ctx, &in, val) < 0) {
+      pljs_ereport_js_exception(ctx);
+    }
 
     PG_RETURN_FLOAT8(in);
     break;
@@ -2053,7 +2099,9 @@ static Datum pljs_jsvalue_to_datum_internal(pljs_type_io *io, int32 typmod,
     } else {
       double in;
 
-      JS_ToFloat64(ctx, &in, val);
+      if (JS_ToFloat64(ctx, &in, val) < 0) {
+        pljs_ereport_js_exception(ctx);
+      }
 
       return DirectFunctionCall1(float8_numeric, Float8GetDatum((float8)in));
     }
@@ -2074,7 +2122,7 @@ static Datum pljs_jsvalue_to_datum_internal(pljs_type_io *io, int32 typmod,
     Datum ret;
 
     if (str == NULL) {
-      elog(ERROR, "could not convert JavaScript value to a string");
+      pljs_ereport_js_exception(ctx);
     }
 
     PG_TRY();
@@ -2107,7 +2155,7 @@ static Datum pljs_jsvalue_to_datum_internal(pljs_type_io *io, int32 typmod,
      * CStringGetTextDatum() would hand that straight to strlen().
      */
     if (str == NULL) {
-      elog(ERROR, "could not convert JavaScript value to a string");
+      pljs_ereport_js_exception(ctx);
     }
 
     /*
@@ -2136,7 +2184,23 @@ static Datum pljs_jsvalue_to_datum_internal(pljs_type_io *io, int32 typmod,
     JSValueConst *argv = &val;
     JSValue js = JS_JSONStringify(ctx, argv[0], JS_UNDEFINED, JS_UNDEFINED);
     size_t plen;
-    const char *str = JS_ToCStringLen(ctx, &plen, js);
+    const char *str;
+
+    /*
+     * A toJSON() or getter that threw.  Its JS_EXCEPTION rendered to a NULL
+     * string, which CStringGetTextDatum() passed to strlen() and crashed the
+     * backend.
+     */
+    if (JS_IsException(js)) {
+      pljs_ereport_js_exception(ctx);
+    }
+
+    str = JS_ToCStringLen(ctx, &plen, js);
+
+    if (str == NULL) {
+      JS_FreeValue(ctx, js);
+      pljs_ereport_js_exception(ctx);
+    }
 
     // return it as a CStringTextDatum.
     Datum ret = CStringGetTextDatum(str);
@@ -2158,7 +2222,16 @@ static Datum pljs_jsvalue_to_datum_internal(pljs_type_io *io, int32 typmod,
 #else // JSONB_DIRECT_CONVERSION
     JSValue js = JS_JSONStringify(ctx, argv[0], JS_UNDEFINED, JS_UNDEFINED);
 
+    if (JS_IsException(js)) {
+      pljs_ereport_js_exception(ctx);
+    }
+
     const char *str = JS_ToCString(ctx, js);
+
+    if (str == NULL) {
+      JS_FreeValue(ctx, js);
+      pljs_ereport_js_exception(ctx);
+    }
 
     // return it as a Datum, since there is no direct CStringGetJsonb exposed.
     Datum ret = (Datum)DatumGetJsonbP(
@@ -2178,7 +2251,13 @@ static Datum pljs_jsvalue_to_datum_internal(pljs_type_io *io, int32 typmod,
 
     uint8_t *buffer;
 
-    uint32_t length = pljs_js_array_length(val, ctx);
+    int32_t array_length = pljs_js_array_length(val, ctx);
+
+    if (array_length < 0) {
+      pljs_ereport_js_exception(ctx);
+    }
+
+    uint32_t length = (uint32_t)array_length;
 
     if (Is_ArrayType(val, JS_CLASS_UINT8_ARRAY) ||
         Is_ArrayType(val, JS_CLASS_INT8_ARRAY)) {
@@ -2262,6 +2341,10 @@ static Datum pljs_jsvalue_to_datum_internal(pljs_type_io *io, int32 typmod,
       size_t str_length;
       const char *str = JS_ToCStringLen(ctx, &str_length, val);
 
+      if (str == NULL) {
+        pljs_ereport_js_exception(ctx);
+      }
+
       buffer = palloc(str_length + VARHDRSZ);
 
       SET_VARSIZE(buffer, str_length + VARHDRSZ);
@@ -2297,7 +2380,11 @@ static Datum pljs_jsvalue_to_datum_internal(pljs_type_io *io, int32 typmod,
   case TIMESTAMPTZOID:
     if (Is_Date(val)) {
       double in;
-      JS_ToFloat64(ctx, &in, val);
+
+      /* A Date's valueOf() can be replaced, and the replacement can throw. */
+      if (JS_ToFloat64(ctx, &in, val) < 0) {
+        pljs_ereport_js_exception(ctx);
+      }
 
       /*
        * An invalid Date -- one whose getTime() is NaN -- has no epoch to
@@ -2422,6 +2509,17 @@ static Datum pljs_jsvalue_to_datum_typmod(Oid typid, int32 typmod, JSValue val,
    * back as SQL NULL, and any other value raised "type void is not
    * composite".
    */
+  /*
+   * A getter that threw while this value was read -- a column of a record or
+   * row, or an element of an array.  Its JS_EXCEPTION was converted like any
+   * other value, so the error said "could not convert JavaScript value to a
+   * number" instead of what the getter threw, or a text column stored an
+   * empty string.
+   */
+  if (JS_IsException(val)) {
+    pljs_ereport_js_exception(ctx);
+  }
+
   if (typid == VOIDOID) {
     if (is_null != NULL) {
       *is_null = false;
@@ -2502,13 +2600,15 @@ JSValue pljs_values_to_array(JSValue *array, int argc, int start,
   uint32_t current = 0;
   for (int i = start; i < argc; i++) {
     /*
-     * JS_SetPropertyUint32() takes ownership of the value, and these are the
-     * caller's arguments, borrowed from QuickJS.  Without the dup, freeing the
-     * array released references it never held: `pljs.prepare(sql, 'int8')`
-     * freed a string constant of the calling function, and the backend
-     * crashed when that function's bytecode was freed.
+     * JS_DefinePropertyValueUint32() takes ownership of the value, and these
+     * are the caller's arguments, borrowed from QuickJS.  Without the dup,
+     * freeing the array released references it never held:
+     * `pljs.prepare(sql, 'int8')` freed a string constant of the calling
+     * function, and the backend crashed when that function's bytecode was
+     * freed.
      */
-    JS_SetPropertyUint32(ctx, ret, current, JS_DupValue(ctx, array[i]));
+    JS_DefinePropertyValueUint32(ctx, ret, current, JS_DupValue(ctx, array[i]),
+                                 JS_PROP_C_W_E);
     current++;
   }
 
@@ -2538,9 +2638,11 @@ JSValue pljs_tuple_to_jsvalue(TupleDesc tupledesc, HeapTuple heap_tuple,
 
     char *name = NameStr(tuple_attrs->attname);
 
-    JS_SetPropertyStr(
+    /* Defined, not set; see pljs_datum_to_object(). */
+    JS_DefinePropertyValueStr(
         ctx, obj, name,
-        pljs_datum_to_jsvalue(tuple_attrs->atttypid, datum, isnull, true, ctx));
+        pljs_datum_to_jsvalue(tuple_attrs->atttypid, datum, isnull, true, ctx),
+        JS_PROP_C_W_E);
   }
 
   return obj;
@@ -2582,7 +2684,7 @@ JSValue pljs_spi_result_to_jsvalue(int status, JSContext *ctx) {
       JSValue value =
           pljs_tuple_to_jsvalue(tupdesc, SPI_tuptable->vals[r], ctx);
 
-      JS_SetPropertyUint32(ctx, obj, r, value);
+      JS_DefinePropertyValueUint32(ctx, obj, r, value, JS_PROP_C_W_E);
     }
 
     result = obj;
@@ -2658,17 +2760,18 @@ static JSValue jsonb_iterate(JsonbIterator **it, JSValue container,
 
       // If our container is an `Array`, append the object.
       // Iterate through the `JSONB` array until we get to the end of the array.
+      // Defined, not set, throughout; see pljs_datum_to_object().
       if (JS_IsArray(ctx, container)) {
-        JS_SetPropertyUint32(ctx, container, count,
-                             jsonb_iterate(it, obj, ctx));
+        JS_DefinePropertyValueUint32(
+            ctx, container, count, jsonb_iterate(it, obj, ctx), JS_PROP_C_W_E);
         count++;
       } else {
         // Otherwise set the property of the `Object`.  We use the
         // #key_string that we previously stored from the `JSONB` object.
         // Iterate through the `JSONB` object until we get to the end of the
         // object.
-        JS_SetPropertyStr(ctx, container, key_string,
-                          jsonb_iterate(it, obj, ctx));
+        JS_DefinePropertyValueStr(ctx, container, key_string,
+                                  jsonb_iterate(it, obj, ctx), JS_PROP_C_W_E);
         JS_FreeCString(ctx, key_string);
         key_string = NULL;
       }
@@ -2684,12 +2787,12 @@ static JSValue jsonb_iterate(JsonbIterator **it, JSValue container,
     case WJB_BEGIN_ARRAY:
       obj = JS_NewArray(ctx);
       if (JS_IsArray(ctx, container)) {
-        JS_SetPropertyUint32(ctx, container, count,
-                             jsonb_iterate(it, obj, ctx));
+        JS_DefinePropertyValueUint32(
+            ctx, container, count, jsonb_iterate(it, obj, ctx), JS_PROP_C_W_E);
         count++;
       } else {
-        JS_SetPropertyStr(ctx, container, key_string,
-                          jsonb_iterate(it, obj, ctx));
+        JS_DefinePropertyValueStr(ctx, container, key_string,
+                                  jsonb_iterate(it, obj, ctx), JS_PROP_C_W_E);
         JS_FreeCString(ctx, key_string);
         key_string = NULL;
       }
@@ -2711,8 +2814,8 @@ static JSValue jsonb_iterate(JsonbIterator **it, JSValue container,
 
       // Retrieve the object value and set it using `key_string`.
     case WJB_VALUE:
-      JS_SetPropertyStr(ctx, container, key_string,
-                        get_jsonb_value(&value, ctx));
+      JS_DefinePropertyValueStr(ctx, container, key_string,
+                                get_jsonb_value(&value, ctx), JS_PROP_C_W_E);
       JS_FreeCString(ctx, key_string);
 
       // Clear the `key_string` so it cannot be re-used.
@@ -2722,7 +2825,8 @@ static JSValue jsonb_iterate(JsonbIterator **it, JSValue container,
 
       // Retrieve an array element and set it, then increment the count.
     case WJB_ELEM:
-      JS_SetPropertyUint32(ctx, container, count, get_jsonb_value(&value, ctx));
+      JS_DefinePropertyValueUint32(ctx, container, count,
+                                   get_jsonb_value(&value, ctx), JS_PROP_C_W_E);
       count++;
       break;
 
@@ -2853,6 +2957,10 @@ static JsonbValue *jsonb_from_value(JSValue value, JsonbBuildState *pstate,
       size_t len;
       const char *v = JS_ToCStringLen(ctx, &len, value);
 
+      if (v == NULL) {
+        pljs_ereport_js_exception(ctx);
+      }
+
       val.val.string.val = palloc(len);
       memcpy(val.val.string.val, v, len);
       val.val.string.len = len;
@@ -2861,7 +2969,9 @@ static JsonbValue *jsonb_from_value(JSValue value, JsonbBuildState *pstate,
     } else if (JS_IsNumber(value)) {
       double in;
 
-      JS_ToFloat64(ctx, &in, value);
+      if (JS_ToFloat64(ctx, &in, value) < 0) {
+        pljs_ereport_js_exception(ctx);
+      }
 
       val.val.numeric = DatumGetNumeric(
           DirectFunctionCall1(float8_numeric, Float8GetDatum((float8)in)));
@@ -2869,7 +2979,9 @@ static JsonbValue *jsonb_from_value(JSValue value, JsonbBuildState *pstate,
     } else if (Is_Date(value)) {
       double in;
 
-      JS_ToFloat64(ctx, &in, value);
+      if (JS_ToFloat64(ctx, &in, value) < 0) {
+        pljs_ereport_js_exception(ctx);
+      }
 
       if (isnan(in)) {
         val.type = jbvNull;
@@ -2882,6 +2994,10 @@ static JsonbValue *jsonb_from_value(JSValue value, JsonbBuildState *pstate,
       val.type = jbvString;
       size_t len;
       const char *v = JS_ToCStringLen(ctx, &len, value);
+
+      if (v == NULL) {
+        pljs_ereport_js_exception(ctx);
+      }
 
       val.val.string.val = palloc(len);
       memcpy(val.val.string.val, v, len);
@@ -2911,10 +3027,18 @@ jsonb_array_from_array(JSValue array, JsonbBuildState *pstate, JSContext *ctx) {
   // Get the length of the `Array`.
   int32_t array_length = pljs_js_array_length(array, ctx);
 
+  if (array_length < 0) {
+    pljs_ereport_js_exception(ctx);
+  }
+
   // Iterate through the `Array`.
   for (int i = 0; i < array_length; i++) {
     // Get the current element.
     JSValue elem = JS_GetPropertyUint32(ctx, array, i);
+
+    if (JS_IsException(elem)) {
+      pljs_ereport_js_exception(ctx);
+    }
 
     // For each type, set `value` to the result.
     if (JS_IsArray(ctx, elem)) {
@@ -2954,7 +3078,7 @@ static JsonbValue *jsonb_object_from_object(JSValue object,
   // Get the keys of the `Object`.
   if (JS_GetOwnPropertyNames(ctx, &tab, &object_keys_length, object,
                              JS_GPN_STRING_MASK) < 0) {
-    return false;
+    pljs_ereport_js_exception(ctx);
   }
 
   // Iterate through the `Object` keys.
@@ -2963,7 +3087,22 @@ static JsonbValue *jsonb_object_from_object(JSValue object,
     JSValue o =
         JS_GetPropertyInternal(ctx, object, tab[object_key].atom, object, 0);
 
+    /*
+     * A getter that threw.  Its JS_EXCEPTION went on to be stored as an empty
+     * string.
+     */
+    if (JS_IsException(o)) {
+      pljs_free_prop_enum(ctx, tab, object_keys_length);
+      pljs_ereport_js_exception(ctx);
+    }
+
     const char *key = JS_AtomToCString(ctx, tab[object_key].atom);
+
+    if (key == NULL) {
+      JS_FreeValue(ctx, o);
+      pljs_free_prop_enum(ctx, tab, object_keys_length);
+      pljs_ereport_js_exception(ctx);
+    }
 
     value = jsonb_from_value(o, pstate, WJB_KEY, ctx, key);
 

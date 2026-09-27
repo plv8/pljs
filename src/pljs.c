@@ -382,6 +382,25 @@ pg_noreturn static void pljs_ereport_js_error(const char *message,
   pg_unreachable();
 }
 
+/**
+ * @brief Raises the pending JavaScript exception as a PostgreSQL error.
+ *
+ * For C code that finds a QuickJS call has failed because JavaScript threw --
+ * a getter, toString() or valueOf() run while a value was being converted --
+ * and has to raise rather than hand the exception back to JavaScript.  The
+ * error keeps the exception's message, and its SQLSTATE if it wrapped a
+ * PostgreSQL error.
+ *
+ * @param ctx #JSContext - the context with the pending exception
+ */
+void pljs_ereport_js_exception(JSContext *ctx) {
+  char *message = NULL, *pg_detail = NULL, *sqlstate = NULL;
+  char *detail = dump_error(ctx, &message, &pg_detail, &sqlstate);
+
+  pljs_ereport_js_error(message, pg_detail, detail, sqlstate,
+                        "could not convert a JavaScript value");
+}
+
 static int interrupt_handler(JSRuntime *rt, void *opaque) {
   /*
    * Return non-zero to make QuickJS abort the running script.  We interrupt on
@@ -1452,9 +1471,10 @@ static Datum call_trigger(FunctionCallInfo fcinfo, pljs_context *context) {
   JSValue tgargv = JS_NewArray(context->ctx);
 
   for (int i = 0; i < trig->tg_trigger->tgnargs; i++) {
-    JS_SetPropertyUint32(
+    /* Defined, not set; see pljs_datum_to_object(). */
+    JS_DefinePropertyValueUint32(
         context->ctx, tgargv, i,
-        JS_NewString(context->ctx, trig->tg_trigger->tgargs[i]));
+        JS_NewString(context->ctx, trig->tg_trigger->tgargs[i]), JS_PROP_C_W_E);
   }
 
   argv[9] = tgargv;
@@ -1686,6 +1706,56 @@ static Datum call_function(FunctionCallInfo fcinfo, pljs_context *context,
 }
 
 /**
+ * @brief Puts a row that a set-returning function returned into its result.
+ *
+ * A row of a composite set is a `{column: value}` object.  A row of a
+ * single-column set is its value, or an object naming it, as return_next()
+ * accepts; see pljs_single_column_value().
+ *
+ * @param state #pljs_return_state - the set being returned
+ * @param row #JSValueConst - the row
+ * @param ctx #JSContext - Javascript context to execute in
+ */
+static void put_returned_row(pljs_return_state *state, JSValueConst row,
+                             JSContext *ctx) {
+  /* A getter on the returned array that threw. */
+  if (JS_IsException(row)) {
+    pljs_ereport_js_exception(ctx);
+  }
+
+  if (state->is_composite) {
+    bool *nulls = (bool *)palloc0(sizeof(bool) * state->tuple_desc->natts);
+    Datum *values =
+        pljs_jsvalue_to_datums(NULL, row, &nulls, state->tuple_desc, ctx);
+
+    if (values != NULL) {
+      tuplestore_putvalues(state->tuple_store_state, state->tuple_desc, values,
+                           nulls);
+      pfree(values);
+    }
+
+    pfree(nulls);
+  } else {
+    JSValue value =
+        pljs_single_column_value(ctx, row, state->tuple_desc, "returned row");
+    bool is_null = false;
+    Datum result;
+
+    if (JS_IsException(value)) {
+      pljs_ereport_js_exception(ctx);
+    }
+
+    result =
+        pljs_jsvalue_to_datum(TupleDescAttr(state->tuple_desc, 0)->atttypid,
+                              value, &is_null, ctx, NULL);
+
+    tuplestore_putvalues(state->tuple_store_state, state->tuple_desc, &result,
+                         &is_null);
+    JS_FreeValue(ctx, value);
+  }
+}
+
+/**
  * @brief Call a set returning function (SRF).
  *
  * Sets up all of the function arguments for a set returning function,
@@ -1809,68 +1879,22 @@ static Datum call_srf_function(FunctionCallInfo fcinfo, pljs_context *context,
     if (!JS_IsUndefined(ret) && !JS_IsNull(ret)) {
       MemoryContextSwitchTo(rsinfo->econtext->ecxt_per_query_memory);
 
-      bool is_null = false;
+      // JS can return a single row or an array of rows.
+      if (JS_IsArray(context->ctx, ret)) {
+        int32_t length = pljs_js_array_length(ret, context->ctx);
 
-      if (state->is_composite) {
-        // Handle composite (RETURNS TABLE / RETURNS SETOF record):
-        // JS can return a single object or an array of objects.
-        if (JS_IsArray(context->ctx, ret)) {
-          // Array of objects: iterate and put each as a row.
-          for (uint32_t i = 0; i < pljs_js_array_length(ret, context->ctx);
-               i++) {
-            JSValue val = JS_GetPropertyUint32(context->ctx, ret, i);
-            bool *nulls =
-                (bool *)palloc0(sizeof(bool) * state->tuple_desc->natts);
+        if (length < 0) {
+          pljs_ereport_js_exception(context->ctx);
+        }
 
-            Datum *values = pljs_jsvalue_to_datums(
-                NULL, val, &nulls, state->tuple_desc, context->ctx);
+        for (int32_t i = 0; i < length; i++) {
+          JSValue row = JS_GetPropertyUint32(context->ctx, ret, i);
 
-            if (values != NULL) {
-              tuplestore_putvalues(state->tuple_store_state, state->tuple_desc,
-                                   values, nulls);
-              pfree(values);
-            }
-            pfree(nulls);
-            JS_FreeValue(context->ctx, val);
-          }
-        } else {
-          // Single object: put as one row.
-          bool *nulls =
-              (bool *)palloc0(sizeof(bool) * state->tuple_desc->natts);
-
-          Datum *values = pljs_jsvalue_to_datums(
-              NULL, ret, &nulls, state->tuple_desc, context->ctx);
-
-          if (values != NULL) {
-            tuplestore_putvalues(state->tuple_store_state, state->tuple_desc,
-                                 values, nulls);
-            pfree(values);
-          }
-          pfree(nulls);
+          put_returned_row(state, row, context->ctx);
+          JS_FreeValue(context->ctx, row);
         }
       } else {
-        if (JS_IsArray(context->ctx, ret)) {
-          for (uint32_t i = 0; i < pljs_js_array_length(ret, context->ctx);
-               i++) {
-            JSValue val = JS_GetPropertyUint32(context->ctx, ret, i);
-
-            Datum result = pljs_jsvalue_to_datum(
-                TupleDescAttr(state->tuple_desc, 0)->atttypid, val, &is_null,
-                context->ctx, NULL);
-            tuplestore_putvalues(state->tuple_store_state, state->tuple_desc,
-                                 &result, &is_null);
-            JS_FreeValue(context->ctx, val);
-          }
-        } else {
-          if (!JS_IsUndefined(ret)) {
-            Datum result = pljs_jsvalue_to_datum(
-                TupleDescAttr(state->tuple_desc, 0)->atttypid, ret, &is_null,
-                context->ctx, NULL);
-
-            tuplestore_putvalues(state->tuple_store_state, state->tuple_desc,
-                                 &result, &is_null);
-          }
-        }
+        put_returned_row(state, ret, context->ctx);
       }
 
       MemoryContextSwitchTo(execution_context);

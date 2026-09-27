@@ -53,13 +53,16 @@ NOTICE:  cannot roll back while a procedure's result is being converted
  1 | 2
 (1 row)
 
--- Uncaught, the refusal fails the conversion instead of crashing the backend.
+-- Uncaught, the refusal is the error, instead of a crashed backend.
 CREATE PROCEDURE rcs_commit_uncaught(INOUT x int4, INOUT y int4)
   LANGUAGE pljs AS $$
   return { get x() { pljs.commit(); return 1; }, y: 2 };
 $$;
 CALL rcs_commit_uncaught(NULL, NULL);
-ERROR:  could not convert JavaScript value to a number
+ERROR:  cannot commit while a procedure's result is being converted
+DETAIL:  Error: cannot commit while a procedure's result is being converted
+    at get x (<function>:3:33)
+
 SELECT 1 AS still_connected;
  still_connected 
 -----------------

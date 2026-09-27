@@ -177,10 +177,14 @@ void pljs_register_js_classes(JSRuntime *rt);
 JSValue js_throw(const char *, JSContext *);
 // Throw a Javascript error carrying a Postgres ErrorData's detail/hint/sqlstate
 JSValue js_throw_error_data(ErrorData *, JSContext *);
+// Raise the pending Javascript exception as a Postgres error
+pg_noreturn void pljs_ereport_js_exception(JSContext *);
 
 // Functions
 JSValue pljs_compile_function(pljs_context *context, bool is_trigger);
 JSValue pljs_find_js_function(Oid fn_oid, JSContext *ctx);
+JSValue pljs_single_column_value(JSContext *ctx, JSValueConst row,
+                                 TupleDesc tupdesc, const char *caller);
 bool pljs_has_permission_to_execute(const char *signature);
 pljs_storage *pljs_storage_for_context(JSContext *ctx);
 
@@ -225,7 +229,7 @@ Datum *pljs_jsvalue_to_datums(pljs_type *type, JSValue val, bool **is_null,
                               TupleDesc tupdesc, JSContext *ctx);
 
 // Utility
-uint32_t pljs_js_array_length(JSValue, JSContext *);
+int32_t pljs_js_array_length(JSValue, JSContext *);
 void pljs_type_fill(pljs_type *, Oid);
 Oid pljs_type_base(Oid);
 

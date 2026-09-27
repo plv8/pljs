@@ -89,7 +89,8 @@ REGRESS = init-extension function json jsonb json_conv types bytea context \
 	pg_type_io_typmod \
 	pg_null_result \
 	pg_result_conversion_spi \
-	pg_prepare_declared_types
+	pg_prepare_declared_types \
+	pg_conversion_user_code
 
 all: deps/quickjs/quickjs.h deps/quickjs/libquickjs.a pljs--$(PLJS_VERSION).sql
 

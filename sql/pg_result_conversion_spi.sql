@@ -44,7 +44,7 @@ CREATE PROCEDURE rcs_rollback(INOUT x int4, INOUT y int4) LANGUAGE pljs AS $$
 $$;
 CALL rcs_rollback(NULL, NULL);
 
--- Uncaught, the refusal fails the conversion instead of crashing the backend.
+-- Uncaught, the refusal is the error, instead of a crashed backend.
 CREATE PROCEDURE rcs_commit_uncaught(INOUT x int4, INOUT y int4)
   LANGUAGE pljs AS $$
   return { get x() { pljs.commit(); return 1; }, y: 2 };
