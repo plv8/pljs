@@ -475,6 +475,69 @@ NOTICE:  accepted 00000000-0000-0000-0000-000000000000
 NOTICE:  accepted 0
 NOTICE:  value for domain tid_txn_uuid violates check constraint "tid_txn_uuid_nonzero"
 NOTICE:  value for domain tid_txn_int violates check constraint "tid_txn_int_pos"
+-- 12) A range over a domain is not a domain, but its input function runs
+-- the domain's, which keeps its checking state in the same way; case 9 was
+-- fixed for domains alone.  range_in() rebuilt the domain's constraints in
+-- the function's cache on every constraint change, and nothing freed them.
+CREATE TYPE tid_pos_range AS RANGE (subtype = tid_pos);
+CREATE FUNCTION tid_range_churn(n int4) RETURNS SETOF tid_pos_range
+  LANGUAGE pljs AS $$
+  const used = () => Number(pljs.execute(
+    "SELECT sum(total_bytes) AS b FROM pg_backend_memory_contexts " +
+    "WHERE name IN ('PLJS Type I/O', 'PLJS Domain Check')")[0].b);
+  const churn = (count) => {
+    for (let i = 0; i < count; i++) {
+      pljs.execute('CREATE TEMP TABLE tid_churn (x int4 CHECK (x > 0))');
+      pljs.execute('DROP TABLE tid_churn');
+      pljs.return_next('[1,5)');
+    }
+  };
+
+  churn(10);
+
+  const before = used();
+
+  churn(n);
+
+  pljs.elog(NOTICE, 'grew by less than 64kB: ' + (used() - before < 65536));
+$$;
+SELECT count(*) FROM tid_range_churn(300);
+NOTICE:  grew by less than 64kB: true
+ count 
+-------
+   310
+(1 row)
+
+-- The state built again is built from the constraints as they are now.
+CREATE DOMAIN tid_range_int AS int4;
+CREATE TYPE tid_int_range AS RANGE (subtype = tid_range_int);
+CREATE FUNCTION tid_range_later() RETURNS SETOF tid_int_range
+  LANGUAGE pljs AS $$
+  const next = (v) => {
+    try {
+      pljs.return_next(v);
+    } catch (e) {
+      pljs.elog(NOTICE, e.message);
+    }
+  };
+
+  next('[-5,5)');
+  pljs.execute('ALTER DOMAIN tid_range_int ADD CONSTRAINT tid_range_int_pos ' +
+               'CHECK (VALUE > 0)');
+  next('[-5,5)');
+  next('[1,5)');
+$$;
+SELECT * FROM tid_range_later();
+NOTICE:  value for domain tid_range_int violates check constraint "tid_range_int_pos"
+ tid_range_later 
+-----------------
+ [-5,5)
+ [1,5)
+(2 rows)
+
+DROP FUNCTION tid_range_churn, tid_range_later;
+DROP TYPE tid_pos_range, tid_int_range;
+DROP DOMAIN tid_range_int;
 DROP TABLE tid_tbl, tid_spi, tid_gen;
 DROP PROCEDURE tid_row_churn, tid_txn;
 DROP FUNCTION tid_uuid_seen, tid_uuid_ret, tid_uuid_0192_ret, tid_mood_ret,

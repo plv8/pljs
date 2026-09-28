@@ -105,6 +105,9 @@ void _PG_init(void) {
   // Initialize cache.
   pljs_cache_init();
 
+  // Initialize what the type conversions keep for the life of the backend.
+  pljs_type_io_init();
+
   // Initialize the GUCs.
   pljs_guc_init();
 
@@ -360,12 +363,19 @@ static char *dump_error(JSContext *ctx, char **message_out, char **detail_out,
   } else {
     val = JS_GetPropertyStr(ctx, exception_val, "stack");
 
-    if (!JS_IsUndefined(val)) {
-      stack = JS_ToCStringLen(ctx, &s2, val);
+    /*
+     * A `stack` that cannot be made a string -- a Symbol, or a getter that
+     * throws -- is treated as no stack at all.  Its NULL went to sprintf(),
+     * which wrote "(null)" past the end of a buffer sized for an empty stack.
+     */
+    stack = JS_IsUndefined(val) ? NULL : JS_ToCStringLen(ctx, &s2, val);
 
+    if (stack != NULL) {
       ret = (char *)palloc((s1 + s2 + 2) * sizeof(char));
       sprintf(ret, "%s\n%s", str, stack);
       JS_FreeCString(ctx, stack);
+    } else if (!JS_IsUndefined(val)) {
+      JS_FreeValue(ctx, JS_GetException(ctx));
     }
 
     JS_FreeValue(ctx, val);
@@ -692,29 +702,51 @@ static void setup_start_proc(JSContext *ctx) {
     elog(DEBUG3, "javascript function is not found for \"%s\"",
          configuration.start_proc);
   } else {
-    JSValue ret = JS_Call(ctx, func, JS_UNDEFINED, 0, NULL);
-    if (JS_IsException(ret)) {
-      char *message = NULL, *pg_detail = NULL, *sqlstate = NULL;
-      char *detail = dump_error(ctx, &message, &pg_detail, &sqlstate);
+    /*
+     * The start_proc runs with storage of its own, as a DO block does, with
+     * no set to return and no window.  A context is created on the first
+     * call a user makes, which can be a call made from inside another --
+     * pljs.execute() after SET ROLE -- and the start_proc saw that call's
+     * storage: its pljs.return_next() added rows to the other call's set.
+     */
+    pljs_storage storage;
+    pljs_storage *previous_storage = current_storage;
+
+    setup_storage(&storage, NULL, NULL);
+    current_storage = &storage;
+
+    PG_TRY();
+    {
+      JSValue ret = JS_Call(ctx, func, JS_UNDEFINED, 0, NULL);
+
+      if (JS_IsException(ret)) {
+        char *message = NULL, *pg_detail = NULL, *sqlstate = NULL;
+        char *detail = dump_error(ctx, &message, &pg_detail, &sqlstate);
+
+        /*
+         * Release the JavaScript side before reporting: the report does not
+         * return, so anything freed after it is never freed at all.
+         */
+        JS_FreeValue(ctx, ret);
+        JS_FreeValue(ctx, func);
+
+        pljs_ereport_js_error(message, pg_detail, detail, sqlstate,
+                              "start proc execution error");
+      }
 
       /*
-       * Release the JavaScript side before reporting: the report does not
-       * return, so anything freed after it is never freed at all.
+       * The function reference and the call's result both belong to this
+       * function. Neither was released, so every context creation with
+       * pljs.start_proc set leaked both.
        */
       JS_FreeValue(ctx, ret);
       JS_FreeValue(ctx, func);
-
-      pljs_ereport_js_error(message, pg_detail, detail, sqlstate,
-                            "start proc execution error");
     }
-
-    /*
-     * The function reference and the call's result both belong to this
-     * function. Neither was released, so every context creation with
-     * pljs.start_proc set leaked both.
-     */
-    JS_FreeValue(ctx, ret);
-    JS_FreeValue(ctx, func);
+    PG_FINALLY();
+    {
+      current_storage = previous_storage;
+    }
+    PG_END_TRY();
   }
 }
 
@@ -769,48 +801,64 @@ static JSValueConst *convert_arguments_to_javascript(FunctionCallInfo fcinfo,
 
   WindowObject window_obj = PG_WINDOW_OBJECT();
 
-  if (WindowObjectIsValid(window_obj)) {
-    for (int i = 0; i < nargs; i++) {
-      bool is_null;
-      Datum arg = WinGetFuncArgCurrent(window_obj, i, &is_null);
+  /*
+   * Every element is `undefined` until it is converted, so that when one of
+   * them raises, the ones converted before it can be released: the caller
+   * only frees the arguments once this has returned them, and the values
+   * converted so far stayed in the runtime -- a 1MB text argument for every
+   * call whose next argument was a multidimensional array.
+   */
+  for (int i = 0; i < nargs; i++) {
+    argv[i] = JS_UNDEFINED;
+  }
 
-      Oid argtype = pljs_resolve_argtype(fcinfo, argtypes[i], i);
+  PG_TRY();
+  {
+    if (WindowObjectIsValid(window_obj)) {
+      for (int i = 0; i < nargs; i++) {
+        bool is_null;
+        Datum arg = WinGetFuncArgCurrent(window_obj, i, &is_null);
 
-      // Window functions: expand_composite=false (skip composite expansion)
-      argv[i] =
-          pljs_datum_to_jsvalue(argtype, arg, is_null, false, context->ctx);
-    }
-  } else {
-    for (int i = 0; i < nargs; i++) {
-      Oid argtype = argtypes[i];
-      char argmode = argmodes ? argmodes[i] : PROARGMODE_IN;
+        Oid argtype = pljs_resolve_argtype(fcinfo, argtypes[i], i);
 
-      switch (argmode) {
-      case PROARGMODE_IN:
-      case PROARGMODE_INOUT:
-      case PROARGMODE_VARIADIC:
-        break;
-      default:
-        continue;
+        // Window functions: expand_composite=false (skip composite expansion)
+        argv[i] =
+            pljs_datum_to_jsvalue(argtype, arg, is_null, false, context->ctx);
       }
+    } else {
+      for (int i = 0; i < nargs; i++) {
+        Oid argtype = argtypes[i];
+        char argmode = argmodes ? argmodes[i] : PROARGMODE_IN;
 
-      argtype = pljs_resolve_argtype(fcinfo, argtype, i);
+        switch (argmode) {
+        case PROARGMODE_IN:
+        case PROARGMODE_INOUT:
+        case PROARGMODE_VARIADIC:
+          break;
+        default:
+          continue;
+        }
 
-      bool is_null = (fcinfo->args[inargs].isnull == 1);
-      // Regular functions: expand_composite=true (expand composite types)
-      argv[inargs] = pljs_datum_to_jsvalue(argtype, fcinfo->args[inargs].value,
-                                           is_null, true, context->ctx);
+        argtype = pljs_resolve_argtype(fcinfo, argtype, i);
 
-      inargs++;
-    }
+        bool is_null = (fcinfo->args[inargs].isnull == 1);
+        // Regular functions: expand_composite=true (expand composite types)
+        argv[inargs] = pljs_datum_to_jsvalue(
+            argtype, fcinfo->args[inargs].value, is_null, true, context->ctx);
 
-    /* If there are still empty arguments, fill them with `undefined`. */
-    if (inargs < nargs) {
-      for (int i = inargs; i < nargs; i++) {
-        argv[i] = JS_UNDEFINED;
+        inargs++;
       }
     }
   }
+  PG_CATCH();
+  {
+    for (int i = 0; i < nargs; i++) {
+      JS_FreeValue(context->ctx, argv[i]);
+    }
+
+    PG_RE_THROW();
+  }
+  PG_END_TRY();
 
   return argv;
 }
@@ -839,12 +887,12 @@ pljs_storage *pljs_current_storage(void) { return current_storage; }
  *
  * @param storage #pljs_storage - the storage to fill
  * @param function #pljs_func - the function being called, or NULL for a DO
- * block
- * @param fcinfo #FunctionCalInfo - the call
+ * block or a start_proc
+ * @param fcinfo #FunctionCalInfo - the call, or NULL for a start_proc
  */
 static void setup_storage(pljs_storage *storage, pljs_func *function,
                           FunctionCallInfo fcinfo) {
-  WindowObject window_object = PG_WINDOW_OBJECT();
+  WindowObject window_object = fcinfo != NULL ? PG_WINDOW_OBJECT() : NULL;
 
   memset(storage, 0, sizeof(pljs_storage));
 
@@ -1971,20 +2019,12 @@ static Datum call_srf_function(FunctionCallInfo fcinfo, pljs_context *context,
       context->function->typeclass == TYPEFUNC_COMPOSITE || state->is_domain;
 
   /*
-   * Whether converting a row can check a domain's constraints, which can run
-   * any SQL; see pljs_return_next().
+   * Whether converting a row can run a domain's CHECK constraint, which can
+   * run any SQL, is worked out by pljs_return_next() when it is first called.
    */
-  state->convert_in_subtransaction = state->is_domain;
-
-  for (int i = 0;
-       i < state->tuple_desc->natts && !state->convert_in_subtransaction; i++) {
-    Form_pg_attribute attr = TupleDescAttr(state->tuple_desc, i);
-
-    if (!attr->attisdropped) {
-      state->convert_in_subtransaction =
-          pljs_type_may_check_domain(attr->atttypid);
-    }
-  }
+  state->convert_in_subtransaction = false;
+  state->convert_known = false;
+  state->convert_generation = 0;
 
   rsinfo->returnMode = SFRM_Materialize;
   rsinfo->setResult = state->tuple_store_state;

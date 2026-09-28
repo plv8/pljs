@@ -147,6 +147,53 @@ NOTICE:  return_next: not positive: -2
  {[6,7)}
 (2 rows)
 
+-- 3) Only a CHECK constraint can run SQL, so only a domain with one needs a
+-- subtransaction per row; one with NOT NULL alone still rejects a NULL.
+CREATE DOMAIN rnd_nn AS int4 NOT NULL;
+CREATE FUNCTION rnd_nn_set() RETURNS SETOF rnd_nn LANGUAGE pljs AS $$
+  for (const v of [1, null, 3]) {
+    try {
+      pljs.return_next(v);
+    } catch (e) {
+      pljs.elog(NOTICE, 'return_next: ' + e.message);
+    }
+  }
+  pljs.elog(NOTICE, 'execute: ' + pljs.execute('SELECT 42 AS x')[0].x);
+$$;
+SELECT * FROM rnd_nn_set();
+NOTICE:  return_next: domain rnd_nn does not allow null values
+NOTICE:  execute: 42
+ rnd_nn_set 
+------------
+          1
+          3
+(2 rows)
+
+-- A CHECK constraint added while the set is being returned is seen, and the
+-- rows after it are converted in a subtransaction.
+CREATE DOMAIN rnd_late AS int4;
+CREATE FUNCTION rnd_late_set() RETURNS SETOF rnd_late LANGUAGE pljs AS $$
+  pljs.return_next(1);
+  pljs.execute('ALTER DOMAIN rnd_late ADD CONSTRAINT rnd_late_positive ' +
+               'CHECK (rnd_positive(VALUE))');
+  for (const v of [-2, 3]) {
+    try {
+      pljs.return_next(v);
+    } catch (e) {
+      pljs.elog(NOTICE, 'return_next: ' + e.message);
+    }
+  }
+  pljs.elog(NOTICE, 'execute: ' + pljs.execute('SELECT 42 AS x')[0].x);
+$$;
+SELECT * FROM rnd_late_set();
+NOTICE:  return_next: not positive: -2
+NOTICE:  execute: 42
+ rnd_late_set 
+--------------
+            1
+            3
+(2 rows)
+
 SELECT 1 AS still_connected;
  still_connected 
 -----------------
@@ -154,7 +201,7 @@ SELECT 1 AS still_connected;
 (1 row)
 
 DROP FUNCTION rnd_f(), rnd_pos_set(), rnd_rows(), rnd_arrays(), rnd_ranges(),
-  rnd_multiranges();
+  rnd_multiranges(), rnd_nn_set(), rnd_late_set();
 DROP TYPE rnd_row, rnd_range;
-DROP DOMAIN rnd_d, rnd_pos;
+DROP DOMAIN rnd_d, rnd_pos, rnd_nn, rnd_late;
 DROP FUNCTION rnd_g(int4), rnd_positive(int4);

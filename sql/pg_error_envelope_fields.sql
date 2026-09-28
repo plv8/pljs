@@ -81,5 +81,22 @@ $$ LANGUAGE pljs;
 
 SELECT eenv_empty();
 
+-- An Error whose `stack` cannot be made a string -- a Symbol, or a getter
+-- that throws -- is reported as one with no stack.  Its NULL was written
+-- into the detail as "(null)", past the end of a buffer sized for an empty
+-- stack.
+DO $$ throw Object.assign(new Error('symbol stack'), {stack: Symbol()}); $$
+  LANGUAGE pljs;
+DO $$
+  const e = new Error('throwing stack');
+
+  Object.defineProperty(e, 'stack', {
+    get() {
+      throw new Error('no stack for you');
+    }
+  });
+  throw e;
+$$ LANGUAGE pljs;
+
 DROP FUNCTION eenv_fields, eenv_detail, eenv_dispatch, eenv_nested, eenv_inner, eenv_empty;
 DROP TABLE eenv_t;

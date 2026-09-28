@@ -89,6 +89,8 @@ typedef struct pljs_return_state {
   bool is_composite;
   bool is_domain; // rettype is a domain over the composite type of the rows
   bool convert_in_subtransaction; // converting a row can run a domain's checks
+  bool convert_known;        // convert_in_subtransaction has been worked out
+  uint64 convert_generation; // pljs_type_domain_generation() it was worked at
 } pljs_return_state;
 
 // Expanded type definitions for pljs.
@@ -106,6 +108,7 @@ typedef struct pljs_type {
 typedef struct pljs_plan {
   SPIPlanPtr plan;
   pljs_param_state *parstate;
+  int32 *param_typmods; // the declared parameters' typmods, or NULL if none
 } pljs_plan;
 
 // Context and information for the function to be called.
@@ -234,6 +237,8 @@ Datum pljs_jsvalue_to_datum(Oid rettype, JSValue val, bool *is_null,
                             JSContext *ctx, FunctionCallInfo fcinfo);
 Datum pljs_jsvalue_to_datum_free(Oid rettype, JSValue val, bool *is_null,
                                  JSContext *ctx);
+Datum pljs_jsvalue_to_datum_typmod_free(Oid typid, int32 typmod, JSValue val,
+                                        bool *is_null, JSContext *ctx);
 Datum pljs_jsvalue_to_record(pljs_type *type, JSValue val, bool *is_null,
                              TupleDesc tupdesc, JSContext *ctx);
 Datum *pljs_jsvalue_to_datums(pljs_type *type, JSValue val, bool **is_null,
@@ -244,6 +249,8 @@ int32_t pljs_js_array_length(JSValue, JSContext *);
 void pljs_type_fill(pljs_type *, Oid);
 Oid pljs_type_base(Oid);
 bool pljs_type_may_check_domain(Oid);
+void pljs_type_io_init(void);
+uint64 pljs_type_domain_generation(void);
 
 // Type conversion state for the pljs function being called
 typedef struct pljs_type_io_cache pljs_type_io_cache;

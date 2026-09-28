@@ -392,18 +392,20 @@ static JSValue pljs_execute(JSContext *ctx, JSValueConst this_val, int argc,
  * @param params #JSValueConst - the array of parameters
  * @param nparams @c int - how many there are
  * @param types #Oid* - the type of each
+ * @param typmods @c int32* - the typmod of each, or NULL if none has one
  * @param values #Datum* - filled with each value
  * @param nulls @c char* - filled with 'n' for each null value, ' ' otherwise
  * @param ctx #JSContext - Javascript context to execute in
  */
 static void pljs_params_to_datums(JSValueConst params, int nparams,
-                                  const Oid *types, Datum *values, char *nulls,
-                                  JSContext *ctx) {
+                                  const Oid *types, const int32 *typmods,
+                                  Datum *values, char *nulls, JSContext *ctx) {
   for (int i = 0; i < nparams; i++) {
     bool is_null;
 
-    values[i] = pljs_jsvalue_to_datum_free(
-        types[i], JS_GetPropertyUint32(ctx, params, i), &is_null, ctx);
+    values[i] = pljs_jsvalue_to_datum_typmod_free(
+        types[i], typmods != NULL ? typmods[i] : -1,
+        JS_GetPropertyUint32(ctx, params, i), &is_null, ctx);
     nulls[i] = is_null ? 'n' : ' ';
   }
 }
@@ -477,8 +479,8 @@ static int pljs_execute_params(const char *sql, JSValue params,
                              parstate.nparams, nparams)));
     }
 
-    pljs_params_to_datums(params, nparams, parstate.param_types, values, nulls,
-                          ctx);
+    pljs_params_to_datums(params, nparams, parstate.param_types, NULL, values,
+                          nulls, ctx);
 
     ParamListInfo param_li =
         pljs_setup_variable_paramlist(&parstate, values, nulls);
@@ -527,6 +529,10 @@ static void pljs_free_plan_struct(pljs_plan *plan) {
       pfree(plan->parstate->param_types);
     }
     pfree(plan->parstate);
+  }
+
+  if (plan->param_typmods) {
+    pfree(plan->param_typmods);
   }
 
   pfree(plan);
@@ -587,6 +593,7 @@ static void pljs_plan_params_to_datums(pljs_plan *plan, JSValueConst handle,
   int argcount =
       plan->parstate ? plan->parstate->nparams : SPI_getargcount(plan->plan);
   Oid *types;
+  int32 *typmods = NULL;
 
   if (argcount != nparams) {
     ereport(ERROR,
@@ -604,7 +611,13 @@ static void pljs_plan_params_to_datums(pljs_plan *plan, JSValueConst handle,
                               : SPI_getargtypeid(plan->plan, i);
   }
 
-  pljs_params_to_datums(params, nparams, types, *values, *nulls, ctx);
+  /* Copied for the same reason as the types: the plan can be freed. */
+  if (plan->param_typmods != NULL) {
+    typmods = palloc(sizeof(int32) * nparams);
+    memcpy(typmods, plan->param_typmods, sizeof(int32) * nparams);
+  }
+
+  pljs_params_to_datums(params, nparams, types, typmods, *values, *nulls, ctx);
 
   if (JS_GetOpaque(handle, js_prepared_statement_handle_id) != plan) {
     ereport(ERROR,
@@ -860,6 +873,8 @@ static JSValue pljs_prepare(JSContext *ctx, JSValueConst this_val, int argc,
   JSValue params = {0};
   int nparams;
   Oid *types = NULL;
+  int32 *typmods = NULL;
+  int32 *saved_typmods = NULL;
   SPIPlanPtr initial = NULL, saved = NULL;
   pljs_param_state *parstate = NULL;
   pljs_plan *plan = NULL;
@@ -902,6 +917,7 @@ static JSValue pljs_prepare(JSContext *ctx, JSValueConst this_val, int argc,
 
   if (nparams) {
     types = palloc(sizeof(Oid) * nparams);
+    typmods = palloc(sizeof(int32) * nparams);
   }
 
   sql = JS_ToCString(ctx, argv[0]);
@@ -941,7 +957,6 @@ static JSValue pljs_prepare(JSContext *ctx, JSValueConst this_val, int argc,
     for (int i = 0; i < nparams; i++) {
       JSValue param = JS_GetPropertyUint32(ctx, params, i);
       const char *str = JS_ToCString(ctx, param);
-      int32 typemod;
 
       JS_FreeValue(ctx, param);
 
@@ -951,7 +966,7 @@ static JSValue pljs_prepare(JSContext *ctx, JSValueConst this_val, int argc,
 
       PG_TRY();
       {
-        parseTypeString(str, &types[i], &typemod, false);
+        parseTypeString(str, &types[i], &typmods[i], false);
       }
       PG_FINALLY();
       {
@@ -1002,6 +1017,7 @@ static JSValue pljs_prepare(JSContext *ctx, JSValueConst this_val, int argc,
 
     if (types != NULL) {
       pfree(types);
+      pfree(typmods);
     }
 
     if (cleanup_params) {
@@ -1025,8 +1041,24 @@ static JSValue pljs_prepare(JSContext *ctx, JSValueConst this_val, int argc,
 
   JS_FreeCString(ctx, sql);
 
+  /*
+   * The typmods the type names declared.  SPI_prepare() takes only the types,
+   * so a value bound to `numeric(5,2)` kept 3.14159 and one bound to
+   * `varchar(3)` kept 'abcdef'; the parameters are converted with them
+   * instead, as a column's value is.
+   */
+  for (int i = 0; i < nparams; i++) {
+    if (typmods[i] >= 0) {
+      saved_typmods =
+          MemoryContextAlloc(CacheMemoryContext, sizeof(int32) * nparams);
+      memcpy(saved_typmods, typmods, sizeof(int32) * nparams);
+      break;
+    }
+  }
+
   if (types != NULL) {
     pfree(types);
+    pfree(typmods);
   }
 
   JSValue ret = JS_NewObject(ctx);
@@ -1038,6 +1070,7 @@ static JSValue pljs_prepare(JSContext *ctx, JSValueConst this_val, int argc,
 
   plan->parstate = parstate;
   plan->plan = saved;
+  plan->param_typmods = saved_typmods;
 
   JSValue handle = JS_NewObjectClass(ctx, js_prepared_statement_handle_id);
   JS_SetOpaque(handle, plan);
@@ -1948,6 +1981,48 @@ static JSValue pljs_return_next_internal(JSContext *ctx,
 }
 
 /**
+ * @brief Whether converting a row of a set can run a domain's CHECK
+ * constraint, and so has to be done in a subtransaction.
+ *
+ * Only a CHECK constraint can run SQL.  Every domain was taken to, so a set
+ * of a domain with none -- or with NOT NULL alone -- paid for a subtransaction
+ * per row for nothing.  A constraint can be added while the set is being
+ * returned, by the function itself, so the answer is worked out again
+ * whenever one can have been.
+ *
+ * @param retstate #pljs_return_state - the set being returned
+ * @returns @c bool
+ */
+static bool pljs_return_next_needs_subtransaction(pljs_return_state *retstate) {
+  /* Read first, so that a change while this runs is seen next time. */
+  uint64 generation = pljs_type_domain_generation();
+  bool needed = false;
+
+  if (retstate->convert_known && retstate->convert_generation == generation) {
+    return retstate->convert_in_subtransaction;
+  }
+
+  if (retstate->is_domain) {
+    /* The domain's own constraints, and those of the row type's columns. */
+    needed = pljs_type_may_check_domain(retstate->rettype);
+  } else {
+    for (int i = 0; i < retstate->tuple_desc->natts && !needed; i++) {
+      Form_pg_attribute attr = TupleDescAttr(retstate->tuple_desc, i);
+
+      if (!attr->attisdropped) {
+        needed = pljs_type_may_check_domain(attr->atttypid);
+      }
+    }
+  }
+
+  retstate->convert_in_subtransaction = needed;
+  retstate->convert_generation = generation;
+  retstate->convert_known = true;
+
+  return needed;
+}
+
+/**
  * @brief Javascript function `pljs.return_next`.
  *
  * Adds a value to return for a Set Returning Function.
@@ -1980,9 +2055,10 @@ static JSValue pljs_return_next_internal(JSContext *ctx,
  * converted, left its SPI connection on the stack, and the set-returning
  * function carried on with it as its own -- "transaction left non-empty SPI
  * stack", "improper call to spi_printtup".  So when a row's conversion can
- * check a domain, it runs in a subtransaction, as pljs.execute() runs its
- * query, and an error rolls that back.  Other rows do without one, which
- * costs a subtransaction per row.
+ * run a domain's CHECK constraint, it runs in a subtransaction, as
+ * pljs.execute() runs its query, and an error rolls that back.  Other rows do
+ * without one, which costs a subtransaction per row; see
+ * pljs_return_next_needs_subtransaction().
  */
 static JSValue pljs_return_next(JSContext *ctx, JSValueConst this_val, int argc,
                                 JSValueConst *argv) {
@@ -2005,10 +2081,11 @@ static JSValue pljs_return_next(JSContext *ctx, JSValueConst this_val, int argc,
                     ctx);
   }
 
-  subtransaction = retstate->convert_in_subtransaction;
-
   PG_TRY();
   {
+    /* Inside the PG_TRY: working it out reads the catalogs. */
+    subtransaction = pljs_return_next_needs_subtransaction(retstate);
+
     if (subtransaction) {
       BeginInternalSubTransaction(NULL);
       stage = 1;
@@ -2235,8 +2312,13 @@ static JSValue pljs_window_set_partition_local(JSContext *ctx,
   }
   PG_END_TRY();
 
-  if (window_storage->max_length != 0 &&
-      window_storage->max_length < size + sizeof(pljs_window_storage)) {
+  /*
+   * max_length is what the data can hold, the header aside, however the
+   * memory was allocated.  Compared with the size of the data and the header
+   * together, a value set before any get_partition_local() in a partition
+   * made every later value of its size or more an overflow.
+   */
+  if (window_storage->max_length != 0 && window_storage->max_length < size) {
     JS_FreeCString(ctx, str);
     JS_FreeValue(ctx, js);
 

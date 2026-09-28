@@ -110,4 +110,28 @@ DO $$
   }
 $$ LANGUAGE pljs;
 
+-- 6) A declared length or precision applies too, as it does to a column.  It
+-- was parsed and thrown away, so numeric(5,2) kept 3.14159 and varchar(3)
+-- kept 'abcdef'.
+DO $$
+  const plan = pljs.prepare('SELECT $1 AS n, $2 AS v, $3 AS c',
+                            ['numeric(5,2)', 'varchar(3)', 'char(4)']);
+
+  pljs.elog(NOTICE, JSON.stringify(plan.execute([3.14159, 'abc', 'ab'])[0]));
+
+  try {
+    plan.execute([1, 'abcdef', 'ab']);
+  } catch (e) {
+    pljs.elog(NOTICE, 'execute: ' + e.message);
+  }
+
+  try {
+    plan.cursor([1234.5, 'a', 'ab']);
+  } catch (e) {
+    pljs.elog(NOTICE, 'cursor: ' + e.message);
+  }
+
+  plan.free();
+$$ LANGUAGE pljs;
+
 DROP DOMAIN pdt_pos;

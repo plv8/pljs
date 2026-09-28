@@ -114,8 +114,20 @@ SELECT cel_released($$
   }
 $$);
 
+-- And from PostgreSQL to JavaScript: an array or a row being built when one
+-- of its elements or columns cannot be converted -- here a multidimensional
+-- array.  Only the outermost row of a query's result was released, so a row
+-- inside an array, or the row whose column raised, stayed in the runtime.
+CREATE TYPE cel_holder AS (s text, a int4[]);
+SELECT cel_released($$
+  pljs.execute(`SELECT ARRAY[ROW(repeat('x', 20000), '{{1,2},{3,4}}')::cel_holder] AS a`)
+$$);
+SELECT cel_released($$
+  pljs.execute(`SELECT ROW(repeat('x', 20000), '{{1,2},{3,4}}')::cel_holder AS r`)
+$$);
+
 DROP TABLE cel_tbl;
 DROP FUNCTION cel_mb(), cel_gc(), cel_run(text, int4), cel_released(text),
   cel_result(), cel_rows(), cel_trig(), cel_next_array(), cel_next_row(),
   cel_next_value(), cel_jsonb();
-DROP TYPE cel_pair;
+DROP TYPE cel_pair, cel_holder;

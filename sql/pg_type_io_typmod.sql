@@ -113,10 +113,29 @@ CREATE FUNCTION tt_row_set() RETURNS SETOF tt_row LANGUAGE pljs AS $$
 $$;
 SELECT * FROM tt_row_set();
 
+-- 4) A typmod failure in a row inside a row, caught.  The inner row's type
+-- descriptor was pinned while its columns were converted, and only released
+-- when they all converted: return_next() hands the error to JavaScript with
+-- no subtransaction to release it, and COMMIT warned of every one.
+CREATE TYPE tt_inner AS (v varchar(2));
+CREATE TYPE tt_outer AS (c tt_inner);
+CREATE FUNCTION tt_nested_set() RETURNS SETOF tt_outer LANGUAGE pljs AS $$
+  for (const v of ['ok', 'too long', 'no']) {
+    try {
+      pljs.return_next({c: {v: v}});
+    } catch (e) {
+      pljs.elog(NOTICE, 'return_next: ' + e.message);
+    }
+  }
+$$;
+BEGIN;
+SELECT * FROM tt_nested_set();
+COMMIT;
+
 DROP TABLE tt_tbl;
 DROP FUNCTION tt_char2_ret(text), tt_varchar3_ret(text), tt_numeric52_ret(float8), tt_ts0_ret(),
               tt_varchar2s_ret(text[]), tt_bit8_ret(text), tt_time0_ret(text), tt_tbl_trig(),
-              tt_row_ret(), tt_row_set();
-DROP TYPE tt_row;
+              tt_row_ret(), tt_row_set(), tt_nested_set();
+DROP TYPE tt_row, tt_outer, tt_inner;
 DROP DOMAIN tt_char2, tt_varchar3, tt_numeric52, tt_ts0, tt_varchar2s, tt_bit8,
             tt_time0;

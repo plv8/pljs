@@ -226,6 +226,41 @@ SELECT bad_alloc('5') OVER ();
 SELECT bad_alloc('not a number') OVER ();
 SELECT bad_alloc('1000') OVER (); -- not so bad
 
+-- A value set before anything is got allocates just enough for itself, and
+-- what it holds is compared with the next value's size alone: the next value
+-- of the same size was reported as an overflow, as it was compared with its
+-- size plus the header's.
+CREATE FUNCTION set_first() RETURNS int AS $$
+  var winobj = pljs.get_window_object();
+  var pos = winobj.get_current_position();
+
+  try {
+    winobj.set_partition_local({n: pos});
+  } catch (e) {
+    pljs.elog(NOTICE, e.message);
+    return -1;
+  }
+  return winobj.get_partition_local().n;
+$$ LANGUAGE pljs WINDOW;
+
+SELECT set_first() OVER (), x FROM generate_series(1, 3) x;
+
+-- Still an overflow once the value outgrows it.
+CREATE FUNCTION set_grow() RETURNS int AS $$
+  var winobj = pljs.get_window_object();
+  var pos = winobj.get_current_position();
+
+  try {
+    winobj.set_partition_local({s: 'x'.repeat(pos + 1)});
+  } catch (e) {
+    pljs.elog(NOTICE, e.message);
+    return -1;
+  }
+  return winobj.get_partition_local().s.length;
+$$ LANGUAGE pljs WINDOW;
+
+SELECT set_grow() OVER (), x FROM generate_series(1, 2) x;
+
 CREATE FUNCTION non_window() RETURNS void AS $$
   var winobj = pljs.get_window_object();
 $$ LANGUAGE pljs;

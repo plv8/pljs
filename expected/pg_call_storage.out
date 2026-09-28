@@ -168,8 +168,44 @@ SELECT count(*) AS committed FROM cs_log;
          0
 (1 row)
 
+-- 7) A start_proc run for a context created from inside another call.  A
+-- user's context is created on their first call, which can be made from
+-- inside a set-returning function after SET ROLE, and the start_proc ran
+-- with that function's storage: its return_next() added a row to the set.
+CREATE ROLE cs_start_role;
+CREATE FUNCTION cs_start() RETURNS void LANGUAGE pljs AS $$
+  try {
+    pljs.return_next(99);
+    pljs.elog(NOTICE, 'start_proc added a row');
+  } catch (e) {
+    pljs.elog(NOTICE, 'start_proc: ' + e.message);
+  }
+$$;
+CREATE FUNCTION cs_as_role() RETURNS int4 LANGUAGE pljs AS $$ return 1; $$;
+GRANT EXECUTE ON FUNCTION cs_start(), cs_as_role() TO cs_start_role;
+CREATE FUNCTION cs_srf_start() RETURNS SETOF int4 LANGUAGE pljs AS $$
+  pljs.return_next(1);
+  pljs.execute('SET ROLE cs_start_role');
+  pljs.execute("SET pljs.start_proc = 'cs_start'");
+  try {
+    pljs.execute('SELECT cs_as_role()');
+  } finally {
+    pljs.execute('RESET pljs.start_proc');
+    pljs.execute('RESET ROLE');
+  }
+  pljs.return_next(2);
+$$;
+SELECT * FROM cs_srf_start();
+NOTICE:  start_proc: return_next called in context that cannot accept a set
+ cs_srf_start 
+--------------
+            1
+            2
+(2 rows)
+
 DROP TABLE cs_tbl, cs_log;
 DROP PROCEDURE cs_guard(cs_pair);
 DROP TYPE cs_pair;
 DROP FUNCTION cs_plain(), cs_clobber(), cs_srf_clobber(), cs_trig(),
-  cs_srf_do(), cs_win();
+  cs_srf_do(), cs_win(), cs_start(), cs_as_role(), cs_srf_start();
+DROP ROLE cs_start_role;

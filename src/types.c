@@ -7,16 +7,19 @@
 #include "funcapi.h"
 #include "mb/pg_wchar.h"
 #include "miscadmin.h"
+#include "nodes/execnodes.h"
 #include "nodes/pg_list.h"
 #include "parser/parse_coerce.h"
 #include "utils/array.h"
 #include "utils/builtins.h"
 #include "utils/date.h"
 #include "utils/datum.h"
+#include "utils/inval.h"
 #include "utils/jsonb.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/palloc.h"
+#include "utils/syscache.h"
 #include "utils/timestamp.h"
 #include "utils/typcache.h"
 
@@ -141,9 +144,6 @@ static Datum pljs_string_to_datum_via_input(Oid typid, JSValueConst val,
 static Datum pljs_jsvalue_to_datum_typmod(Oid typid, int32 typmod, JSValue val,
                                           bool *is_null, JSContext *ctx,
                                           FunctionCallInfo fcinfo);
-static Datum pljs_jsvalue_to_datum_typmod_free(Oid typid, int32 typmod,
-                                               JSValue val, bool *is_null,
-                                               JSContext *ctx);
 struct pljs_type_io;
 static Datum pljs_jsvalue_to_datum_via_io(struct pljs_type_io *io,
                                           JSValueConst val, int32 typmod,
@@ -187,6 +187,13 @@ typedef struct pljs_type_io {
   bool has_js_case;
 
   /*
+   * The input function the type is converted with checks a domain inside it:
+   * range_in() for a range over a domain runs the subtype's domain_in().  See
+   * pljs_domain_check().
+   */
+  bool inner_domain;
+
+  /*
    * What pljs_type_fill() reports: the type's own category and storage, and
    * for an array, or a domain over one, its element type's.  None of these
    * can change for an existing type.
@@ -216,14 +223,17 @@ typedef struct pljs_type_io {
 
   /*
    * A domain's checking state: domain_check()'s, or for a domain_via_input
-   * domain domain_in()'s, which keeps it in its FmgrInfo.  Built on first use
-   * in a context of its own, and again whenever the typcache has rebuilt the
-   * domain's constraints; see pljs_domain_check().
+   * domain domain_in()'s, which keeps it in its FmgrInfo -- or for a type with
+   * an inner_domain, its input function's.  Built on first use in a context
+   * of its own, and again whenever the typcache has rebuilt the domain's
+   * constraints, or for an inner_domain, whenever any domain's constraints
+   * can have changed; see pljs_domain_check().
    */
   MemoryContext domain_mcxt;
   void *domain_extra;
   FmgrInfo domain_in;
   DomainConstraintCache *domain_constraints;
+  uint64 domain_generation;
 
   /* A check further up the stack is using the domain's checking state. */
   bool domain_busy;
@@ -268,6 +278,129 @@ struct pljs_type_io_cache {
 
 /* The cache of the pljs function running now, or NULL outside of one. */
 static pljs_type_io_cache *pljs_type_io_current = NULL;
+
+/*
+ * How many times any domain's constraints can have changed; see
+ * pljs_type_io_init().
+ */
+static uint64 pljs_domain_generation = 0;
+
+/**
+ * @brief Counts an invalidation that can change a domain's constraints.
+ */
+static void pljs_domain_invalidate(Datum arg, int cacheid, uint32 hashvalue) {
+  pljs_domain_generation++;
+}
+
+/**
+ * @brief Sets up what the type conversions need for the life of the backend.
+ *
+ * The typcache rebuilds a domain's constraints when pg_constraint changes, or
+ * pg_type does, and says so only to a caller that asks about that domain.
+ * What converts a range over a domain holds that domain's checking state
+ * deep inside range_in()'s, where nothing can ask; and whether a conversion
+ * can run a CHECK constraint can change with any of the domains in a row.
+ * So the same invalidations are counted here, and anything that depends on
+ * them notes the count it was built at.
+ */
+void pljs_type_io_init(void) {
+  CacheRegisterSyscacheCallback(CONSTROID, pljs_domain_invalidate, (Datum)0);
+  CacheRegisterSyscacheCallback(TYPEOID, pljs_domain_invalidate, (Datum)0);
+}
+
+/**
+ * @brief Returns the count kept by pljs_domain_invalidate().
+ *
+ * @returns @c uint64 - it has changed whenever any domain's constraints can
+ * have
+ */
+uint64 pljs_type_domain_generation(void) { return pljs_domain_generation; }
+
+/**
+ * @brief Whether a domain has a CHECK constraint, of its own or of a domain
+ * it is over.
+ *
+ * NOT NULL runs no code, and a CHECK constraint can call any function.
+ *
+ * @param typid #Oid - the domain
+ * @returns @c bool
+ */
+static bool pljs_domain_has_check(Oid typid) {
+  MemoryContext mcxt = AllocSetContextCreate(
+      CurrentMemoryContext, "PLJS Domain Constraints", ALLOCSET_SMALL_SIZES);
+  DomainConstraintRef *ref = MemoryContextAlloc(mcxt, sizeof(*ref));
+  ListCell *lc;
+  bool found = false;
+
+  InitDomainConstraintRef(typid, ref, mcxt, false);
+
+  foreach (lc, ref->constraints) {
+    DomainConstraintState *constraint = (DomainConstraintState *)lfirst(lc);
+
+    if (constraint->constrainttype == DOM_CONSTRAINT_CHECK) {
+      found = true;
+      break;
+    }
+  }
+
+  /* Also gives back the reference to the constraints that ref took. */
+  MemoryContextDelete(mcxt);
+
+  return found;
+}
+
+/**
+ * @brief Whether converting a value to a type can check a domain.
+ *
+ * That is a domain, or an array, composite, range or multirange type with one
+ * inside it.  A range's input function runs its subtype's, which for a domain
+ * is domain_in().
+ *
+ * @param typid #Oid - the type
+ * @param checks_only @c bool - count only a domain with a CHECK constraint
+ * @returns @c bool
+ */
+static bool pljs_type_has_domain(Oid typid, bool checks_only) {
+  Oid inner;
+
+  switch (get_typtype(typid)) {
+  case TYPTYPE_DOMAIN:
+    if (!checks_only || pljs_domain_has_check(typid)) {
+      return true;
+    }
+
+    return pljs_type_has_domain(getBaseType(typid), checks_only);
+
+  case TYPTYPE_RANGE:
+    return pljs_type_has_domain(get_range_subtype(typid), checks_only);
+
+  case TYPTYPE_MULTIRANGE:
+    return pljs_type_has_domain(get_multirange_range(typid), checks_only);
+
+  case TYPTYPE_COMPOSITE: {
+    /* A copy, so that nothing is left pinned if a lookup below raises. */
+    TupleDesc tupdesc = lookup_rowtype_tupdesc_copy(typid, -1);
+    bool found = false;
+
+    for (int i = 0; i < tupdesc->natts && !found; i++) {
+      Form_pg_attribute attr = TupleDescAttr(tupdesc, i);
+
+      if (!attr->attisdropped) {
+        found = pljs_type_has_domain(attr->atttypid, checks_only);
+      }
+    }
+
+    FreeTupleDesc(tupdesc);
+
+    return found;
+  }
+
+  default:
+    inner = get_element_type(typid);
+
+    return OidIsValid(inner) && pljs_type_has_domain(inner, checks_only);
+  }
+}
 
 /**
  * @brief Whether pljs has a dedicated conversion for a (non-domain) type.
@@ -449,6 +582,17 @@ static pljs_type_io *pljs_type_io_lookup(Oid typid) {
 
   get_type_category_preferred(typid, &entry->category, &is_preferred);
 
+  /*
+   * record[] is a pseudo-type, but an array for all that, of anonymous rows:
+   * ARRAY[ROW(1, 'a')].  Taken for a row, its array was read as a tuple
+   * header, which named no type -- "type with OID 0 does not exist" -- and a
+   * second one crashed the backend.
+   */
+  if (entry->category == TYPCATEGORY_PSEUDOTYPE &&
+      OidIsValid(get_element_type(typid))) {
+    entry->category = TYPCATEGORY_ARRAY;
+  }
+
   if (entry->category == TYPCATEGORY_ARRAY) {
     /*
      * A domain over an array has the array's category but no element type of
@@ -460,7 +604,8 @@ static pljs_type_io *pljs_type_io_lookup(Oid typid) {
       TypeCacheEntry *elementry = lookup_type_cache(entry->elemtype, 0);
 
       entry->elem_is_composite =
-          (TypeCategory(entry->elemtype) == TYPCATEGORY_COMPOSITE);
+          (TypeCategory(entry->elemtype) == TYPCATEGORY_COMPOSITE ||
+           entry->elemtype == RECORDOID);
       entry->elem_length = elementry->typlen;
       entry->elem_byval = elementry->typbyval;
       entry->elem_align = elementry->typalign;
@@ -476,6 +621,22 @@ static pljs_type_io *pljs_type_io_lookup(Oid typid) {
   entry->domain_via_input = entry->is_domain && !entry->has_js_case &&
                             base_category != TYPCATEGORY_ARRAY &&
                             base_category != TYPCATEGORY_COMPOSITE;
+
+  /*
+   * Only a type converted through an input function -- the fallback's, or a
+   * domain_via_input domain's domain_in() -- can reach a domain inside it
+   * that way.  An array or a composite is converted element by element, or
+   * column by column, and a type with a case of its own by that case.
+   */
+  if (entry->is_domain) {
+    entry->inner_domain =
+        entry->domain_via_input && pljs_type_has_domain(entry->basetype, false);
+  } else {
+    entry->inner_domain = !entry->has_js_case &&
+                          entry->category != TYPCATEGORY_ARRAY &&
+                          entry->category != TYPCATEGORY_COMPOSITE &&
+                          pljs_type_has_domain(typid, false);
+  }
 
   /* Entered once built, so a build that raised leaves nothing half done. */
   slot = pljs_type_io_hash_insert(cache->types, typid, &found);
@@ -562,35 +723,97 @@ static char *pljs_signature_to_oid_text(pljs_type_io *io, char *str) {
  * from, so its bytes are passed as they are.
  *
  * @param str @c char* - the text
- * @returns @c char* - @p str, or a palloc'd conversion of it
- */
-static char *pljs_server_to_utf8(char *str) {
-  int encoding = GetDatabaseEncoding();
-
-  if (encoding == PG_UTF8 || encoding == PG_SQL_ASCII) {
-    return str;
-  }
-
-  return pg_server_to_any(str, strlen(str), PG_UTF8);
-}
-
-/**
- * @brief Converts UTF-8 text from QuickJS to the database's encoding.
- *
- * The reverse of pljs_server_to_utf8().
- *
- * @param str @c char* - the text, which QuickJS owns
  * @param len @c size_t - its length
  * @returns @c char* - @p str, or a palloc'd conversion of it
  */
-static char *pljs_utf8_to_server(const char *str, size_t len) {
+static char *pljs_server_to_utf8(const char *str, size_t len) {
   int encoding = GetDatabaseEncoding();
 
   if (encoding == PG_UTF8 || encoding == PG_SQL_ASCII) {
     return (char *)str;
   }
 
+  return pg_server_to_any(str, len, PG_UTF8);
+}
+
+/**
+ * @brief Makes a JavaScript string of text in the database's encoding.
+ *
+ * For every value that reaches JavaScript as text -- text, varchar, char,
+ * name, json, and a jsonb string or key -- as well as the fallback's.  Those
+ * were given to QuickJS as they were stored, so in a LATIN1 database every
+ * accented letter became U+FFFD; see pljs_server_to_utf8().
+ *
+ * @param ctx #JSContext - Javascript context
+ * @param str @c char* - the text
+ * @param len @c size_t - its length
+ * @returns #JSValue of the string
+ */
+static JSValue pljs_new_server_string(JSContext *ctx, const char *str,
+                                      size_t len) {
+  char *utf8 = pljs_server_to_utf8(str, len);
+  JSValue ret;
+
+  if (utf8 == str) {
+    return JS_NewStringLen(ctx, str, len);
+  }
+
+  ret = JS_NewString(ctx, utf8);
+  pfree(utf8);
+
+  return ret;
+}
+
+/**
+ * @brief Converts UTF-8 text from QuickJS to the database's encoding.
+ *
+ * The reverse of pljs_server_to_utf8(), except that it always goes through
+ * pg_any_to_server(), which validates the text even when there is nothing to
+ * convert.  QuickJS writes a lone surrogate -- '\uD800' -- as the three bytes
+ * ED A0 80, which are not UTF-8, and in a UTF8 database they were passed on
+ * unchecked: citext stored them, and a dump of the table could not be
+ * restored.
+ *
+ * @param str @c char* - the text, which QuickJS owns
+ * @param len @c size_t - its length
+ * @returns @c char* - @p str, or a palloc'd conversion of it
+ */
+static char *pljs_utf8_to_server(const char *str, size_t len) {
   return pg_any_to_server(str, len, PG_UTF8);
+}
+
+/**
+ * @brief pljs_utf8_to_server() for a string QuickJS owns, which is released
+ * if the text is not valid.
+ *
+ * For every value that reaches PostgreSQL as text -- text, varchar, char,
+ * name, json, and a jsonb string or key -- as well as the fallback's.  Those
+ * were stored as QuickJS wrote them: a lone surrogate as bytes that are not
+ * UTF-8, and in a LATIN1 database every accented letter as the two bytes of
+ * its UTF-8.
+ *
+ * @param ctx #JSContext - Javascript context that owns @p str
+ * @param str @c char* - the string, which the caller frees unless this raises
+ * @param len @c size_t - its length
+ * @returns @c char* - @p str, or a palloc'd conversion of it, which the
+ * caller frees
+ */
+static char *pljs_js_string_to_server(JSContext *ctx, const char *str,
+                                      size_t len) {
+  char *server;
+
+  PG_TRY();
+  {
+    server = pljs_utf8_to_server(str, len);
+  }
+  PG_CATCH();
+  {
+    JS_FreeCString(ctx, str);
+    PG_RE_THROW();
+  }
+  PG_END_TRY();
+
+  return server;
 }
 
 /**
@@ -620,59 +843,25 @@ static FmgrInfo *pljs_type_io_output(pljs_type_io *io) {
 Oid pljs_type_base(Oid typid) { return pljs_type_io_lookup(typid)->basetype; }
 
 /**
- * @brief Whether converting a value to a type can check a domain's
- * constraints.
+ * @brief Whether converting a value to a type can run a domain's CHECK
+ * constraint.
  *
- * A domain's CHECK constraints can call any function, so converting a value
- * to one can run any SQL, which pljs_return_next() has to know.  That is a
- * domain, or an array, composite, range or multirange type with one inside
- * it.  A range's input function runs its subtype's, which for a domain is
- * domain_in(); ranges were missed, and a failed CHECK in a range of a domain
- * left its SPI connection on the stack as any other did.
+ * A CHECK constraint can call any function, so converting a value to a
+ * domain with one can run any SQL, which pljs_return_next() has to know.
+ * That is such a domain, or an array, composite, range or multirange type
+ * with one inside it; see pljs_type_has_domain().  Ranges were missed once,
+ * and a failed CHECK in a range of a domain left its SPI connection on the
+ * stack as any other did.  A domain with no CHECK constraint -- none at all,
+ * or NOT NULL alone -- runs nothing, and does not count.
+ *
+ * The answer changes when a constraint is added or dropped, so it is only
+ * good for as long as pljs_type_domain_generation() is unchanged.
  *
  * @param typid #Oid - the type
  * @returns @c bool
  */
 bool pljs_type_may_check_domain(Oid typid) {
-  pljs_type_io *io = pljs_type_io_lookup(typid);
-  bool found = false;
-
-  if (io->is_domain) {
-    return true;
-  }
-
-  if (io->category == TYPCATEGORY_ARRAY) {
-    return OidIsValid(io->elemtype) && pljs_type_may_check_domain(io->elemtype);
-  }
-
-  if (io->category == TYPCATEGORY_RANGE) {
-    Oid subtype = get_range_subtype(typid);
-
-    /* Not a range, so a multirange: look through it to its range. */
-    if (!OidIsValid(subtype)) {
-      Oid rangetype = get_multirange_range(typid);
-
-      return OidIsValid(rangetype) && pljs_type_may_check_domain(rangetype);
-    }
-
-    return pljs_type_may_check_domain(subtype);
-  }
-
-  if (io->category == TYPCATEGORY_COMPOSITE) {
-    TupleDesc tupdesc = lookup_rowtype_tupdesc(typid, -1);
-
-    for (int i = 0; i < tupdesc->natts && !found; i++) {
-      Form_pg_attribute attr = TupleDescAttr(tupdesc, i);
-
-      if (!attr->attisdropped) {
-        found = pljs_type_may_check_domain(attr->atttypid);
-      }
-    }
-
-    ReleaseTupleDesc(tupdesc);
-  }
-
-  return found;
+  return pljs_type_has_domain(typid, true);
 }
 
 /**
@@ -754,15 +943,24 @@ static Datum pljs_apply_typmod(pljs_type_io *io, Datum value, int32 typmod) {
  *     has rebuilt the domain's constraints the state is freed here and built
  *     again.
  *
- * @param io #pljs_type_io - the domain
+ * A type with an inner_domain -- a range over a domain, which is not a domain
+ * itself -- is converted here too, through its own input function, since that
+ * keeps the inner domain's domain_in() state in the same way and has the same
+ * two problems.  The typcache says nothing of that domain to a caller asking
+ * about the range, so its state is built again whenever any domain's
+ * constraints can have changed; see pljs_type_io_init().
+ *
+ * @param io #pljs_type_io - the domain, or the type with an inner_domain
  * @param str @c char* - the text to parse, or NULL; for a domain_via_input
- * domain
+ * domain or an inner_domain
  * @param value #Datum - the value to check; for any other domain
  * @param isnull @c bool - whether @p value is SQL NULL
+ * @param typmod @c int32 - the typmod to parse @p str with; -1 for a domain,
+ * which carries its own
  * @returns #Datum of the domain
  */
 static Datum pljs_domain_check(pljs_type_io *io, char *str, Datum value,
-                               bool isnull) {
+                               bool isnull, int32 typmod) {
   MemoryContext nested = NULL;
   MemoryContext mcxt;
   FmgrInfo nested_input;
@@ -771,6 +969,7 @@ static Datum pljs_domain_check(pljs_type_io *io, char *str, Datum value,
   void *nested_extra = NULL;
   void **extra;
   Datum ret = value;
+  bool via_input = io->domain_via_input || io->inner_domain;
 
   if (io->domain_busy) {
     nested = AllocSetContextCreate(
@@ -778,7 +977,7 @@ static Datum pljs_domain_check(pljs_type_io *io, char *str, Datum value,
     mcxt = nested;
     extra = &nested_extra;
 
-    if (io->domain_via_input) {
+    if (via_input) {
       Oid typinput;
 
       getTypeInputInfo(io->typid, &typinput, &ioparam);
@@ -787,15 +986,20 @@ static Datum pljs_domain_check(pljs_type_io *io, char *str, Datum value,
     }
   } else {
     TypeCacheEntry *typentry =
-        lookup_type_cache(io->typid, TYPECACHE_DOMAIN_CONSTR_INFO);
+        io->is_domain
+            ? lookup_type_cache(io->typid, TYPECACHE_DOMAIN_CONSTR_INFO)
+            : NULL;
+    uint64 generation = pljs_domain_generation;
 
     /*
      * The typcache has rebuilt the domain's constraints since the state was
      * built.  The state holds a reference to the ones it was built from, so
-     * a new set cannot turn up at the same address.
+     * a new set cannot turn up at the same address.  Or for an inner_domain,
+     * any domain's constraints can have changed.
      */
     if (io->domain_mcxt != NULL &&
-        io->domain_constraints != typentry->domainData) {
+        ((typentry != NULL && io->domain_constraints != typentry->domainData) ||
+         (io->inner_domain && io->domain_generation != generation))) {
       MemoryContextDelete(io->domain_mcxt);
       io->domain_mcxt = NULL;
     }
@@ -804,7 +1008,7 @@ static Datum pljs_domain_check(pljs_type_io *io, char *str, Datum value,
       MemoryContext domain_mcxt = AllocSetContextCreate(
           io->mcxt, "PLJS Domain Check", ALLOCSET_SMALL_SIZES);
 
-      if (io->domain_via_input) {
+      if (via_input) {
         Oid typinput;
 
         getTypeInputInfo(io->typid, &typinput, &io->ioparam);
@@ -812,7 +1016,8 @@ static Datum pljs_domain_check(pljs_type_io *io, char *str, Datum value,
       }
 
       io->domain_extra = NULL;
-      io->domain_constraints = typentry->domainData;
+      io->domain_constraints = typentry != NULL ? typentry->domainData : NULL;
+      io->domain_generation = generation;
       io->domain_mcxt = domain_mcxt;
     }
 
@@ -826,8 +1031,8 @@ static Datum pljs_domain_check(pljs_type_io *io, char *str, Datum value,
 
   PG_TRY();
   {
-    if (io->domain_via_input) {
-      ret = InputFunctionCall(input, str, ioparam, -1);
+    if (via_input) {
+      ret = InputFunctionCall(input, str, ioparam, typmod);
     } else {
       domain_check(value, isnull, io->typid, extra, mcxt);
     }
@@ -856,7 +1061,7 @@ static Datum pljs_domain_check(pljs_type_io *io, char *str, Datum value,
  */
 static void pljs_domain_check_null(pljs_type_io *io) {
   if (io->is_domain) {
-    pljs_domain_check(io, NULL, (Datum)0, true);
+    pljs_domain_check(io, NULL, (Datum)0, true, -1);
   }
 }
 
@@ -1109,7 +1314,13 @@ static void pljs_type_fill_io(pljs_type *type, pljs_type_io *io) {
     type->length = io->elem_length;
     type->byval = io->elem_byval;
     type->align = io->elem_align;
-  } else if (io->category == TYPCATEGORY_PSEUDOTYPE) {
+  } else if (io->typid == RECORDOID) {
+    /*
+     * An anonymous row.  Only record: every pseudo-type was taken for one,
+     * so a cstring -- `SELECT textout('a')` -- or an anyarray had its datum
+     * read as a tuple header.  The others are converted by their output and
+     * input functions, which say plainly when a type cannot be.
+     */
     type->is_composite = true;
   }
 }
@@ -1172,62 +1383,68 @@ JSValue pljs_datum_to_object(pljs_type *type, Datum arg, JSContext *ctx) {
   JSValue obj;
 
   HeapTupleHeader rec = DatumGetHeapTupleHeader(arg);
-  Oid tupType;
-  int32 tupTypmod;
-  TupleDesc tupdesc = NULL;
+  TupleDesc tupdesc;
   HeapTupleData tuple;
 
-  PG_TRY();
-  {
-    /* Extract type info from the tuple itself. */
-    tupType = HeapTupleHeaderGetTypeId(rec);
-    tupTypmod = HeapTupleHeaderGetTypMod(rec);
-    tupdesc = lookup_rowtype_tupdesc(tupType, tupTypmod);
-  }
-  PG_CATCH();
-  {
-    ErrorData *edata = CopyErrorData();
-    JSValue error = js_throw_error_data(edata, ctx);
-    FlushErrorState();
-    FreeErrorData(edata);
-
-    return error;
-  }
-  PG_END_TRY();
+  /*
+   * Extract type info from the tuple itself.  A failure is raised, as any
+   * other conversion error is.  It was caught and thrown into JavaScript, and
+   * the JS_EXCEPTION that returned was then kept as the value -- a column, an
+   * argument, an array element -- which corrupted the runtime.
+   */
+  tupdesc = lookup_rowtype_tupdesc(HeapTupleHeaderGetTypeId(rec),
+                                   HeapTupleHeaderGetTypMod(rec));
 
   obj = JS_NewObject(ctx);
 
   if (tupdesc) {
-    for (int16 i = 0; i < tupdesc->natts; i++) {
-      Datum datum;
-      bool isnull = false;
+    /*
+     * A column that does not convert raises, and the builtins hand that to
+     * JavaScript, which can catch it and try again: release the row built so
+     * far, and the descriptor, rather than leave them behind.  Only the
+     * outermost row was released, so a row inside an array or another row
+     * stayed in the runtime.
+     */
+    PG_TRY();
+    {
+      for (int16 i = 0; i < tupdesc->natts; i++) {
+        Datum datum;
+        bool isnull = false;
 
-      if (TupleDescAttr(tupdesc, i)->attisdropped) {
-        continue;
+        if (TupleDescAttr(tupdesc, i)->attisdropped) {
+          continue;
+        }
+
+        char *colname = NameStr(TupleDescAttr(tupdesc, i)->attname);
+        tuple.t_len = HeapTupleHeaderGetDatumLength(rec);
+        ItemPointerSetInvalid(&(tuple.t_self));
+        tuple.t_tableOid = InvalidOid;
+        tuple.t_data = rec;
+
+        datum = heap_getattr(&tuple, i + 1, tupdesc, &isnull);
+
+        /*
+         * Defined, not set: setting runs any setter an object inherits, so a
+         * setter on Object.prototype ran -- while the arguments were being
+         * converted, before the call had an SPI connection -- and took the
+         * column's value instead of the row, and a column named __proto__
+         * replaced the row's prototype.  So for every object and array built
+         * from a PostgreSQL value, as JSON.parse() builds its own.
+         */
+        JS_DefinePropertyValueStr(
+            ctx, obj, colname,
+            pljs_datum_to_jsvalue(TupleDescAttr(tupdesc, i)->atttypid, datum,
+                                  isnull, true, ctx),
+            JS_PROP_C_W_E);
       }
-
-      char *colname = NameStr(TupleDescAttr(tupdesc, i)->attname);
-      tuple.t_len = HeapTupleHeaderGetDatumLength(rec);
-      ItemPointerSetInvalid(&(tuple.t_self));
-      tuple.t_tableOid = InvalidOid;
-      tuple.t_data = rec;
-
-      datum = heap_getattr(&tuple, i + 1, tupdesc, &isnull);
-
-      /*
-       * Defined, not set: setting runs any setter an object inherits, so a
-       * setter on Object.prototype ran -- while the arguments were being
-       * converted, before the call had an SPI connection -- and took the
-       * column's value instead of the row, and a column named __proto__
-       * replaced the row's prototype.  So for every object and array built
-       * from a PostgreSQL value, as JSON.parse() builds its own.
-       */
-      JS_DefinePropertyValueStr(
-          ctx, obj, colname,
-          pljs_datum_to_jsvalue(TupleDescAttr(tupdesc, i)->atttypid, datum,
-                                isnull, true, ctx),
-          JS_PROP_C_W_E);
     }
+    PG_CATCH();
+    {
+      ReleaseTupleDesc(tupdesc);
+      JS_FreeValue(ctx, obj);
+      PG_RE_THROW();
+    }
+    PG_END_TRY();
 
     ReleaseTupleDesc(tupdesc);
   }
@@ -1247,7 +1464,7 @@ JSValue pljs_datum_to_object(pljs_type *type, Datum arg, JSContext *ctx) {
  * @returns #JSValue of the array
  */
 JSValue pljs_datum_to_array(pljs_type *type, Datum arg, JSContext *ctx) {
-  JSValue array = JS_NewArray(ctx);
+  JSValue array;
   Datum *values;
   bool *nulls;
   int nelems;
@@ -1272,13 +1489,28 @@ JSValue pljs_datum_to_array(pljs_type *type, Datum arg, JSContext *ctx) {
   deconstruct_array(array_value, type->typid, type->length, type->byval,
                     type->align, &values, &nulls, &nelems);
 
-  for (int i = 0; i < nelems; i++) {
-    JSValue value =
-        pljs_datum_to_jsvalue(type->typid, values[i], nulls[i], true, ctx);
+  /*
+   * Created only once nothing above can raise, and released if an element
+   * does not convert; see pljs_datum_to_object().
+   */
+  array = JS_NewArray(ctx);
 
-    /* Defined, not set; see pljs_datum_to_object(). */
-    JS_DefinePropertyValueUint32(ctx, array, i, value, JS_PROP_C_W_E);
+  PG_TRY();
+  {
+    for (int i = 0; i < nelems; i++) {
+      JSValue value =
+          pljs_datum_to_jsvalue(type->typid, values[i], nulls[i], true, ctx);
+
+      /* Defined, not set; see pljs_datum_to_object(). */
+      JS_DefinePropertyValueUint32(ctx, array, i, value, JS_PROP_C_W_E);
+    }
   }
+  PG_CATCH();
+  {
+    JS_FreeValue(ctx, array);
+    PG_RE_THROW();
+  }
+  PG_END_TRY();
 
   JSValue length = JS_NewInt32(ctx, nelems);
   JS_SetPropertyStr(ctx, array, "length", length);
@@ -1360,9 +1592,9 @@ static JSValue pljs_datum_to_jsvalue_fallback(Datum arg, pljs_type_io *io,
 
   PG_TRY();
   {
-    char *str = pljs_server_to_utf8(OutputFunctionCall(output, arg));
+    char *str = OutputFunctionCall(output, arg);
 
-    ret = JS_NewString(ctx, str);
+    ret = pljs_new_server_string(ctx, str, strlen(str));
   }
   PG_FINALLY();
   {
@@ -1372,6 +1604,31 @@ static JSValue pljs_datum_to_jsvalue_fallback(Datum arg, pljs_type_io *io,
   PG_END_TRY();
 
   return ret;
+}
+
+/**
+ * @brief Returns the array type of an array from its elements' type.
+ *
+ * For an array of a type that names no element type of its own; see
+ * pljs_datum_to_jsvalue().
+ *
+ * @param arg #Datum - an array
+ * @returns #Oid of its array type
+ */
+static Oid pljs_array_type_of(Datum arg) {
+  ArrayType *array = DatumGetArrayTypeP(arg);
+  Oid elemtype = ARR_ELEMTYPE(array);
+  Oid arraytype = get_array_type(elemtype);
+
+  pljs_free_if_detoasted(array, arg);
+
+  if (!OidIsValid(arraytype)) {
+    ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                    errmsg("cannot convert an array of type %s",
+                           format_type_be(elemtype))));
+  }
+
+  return arraytype;
 }
 
 /**
@@ -1405,6 +1662,15 @@ JSValue pljs_datum_to_jsvalue(Oid argtype, Datum arg, bool is_null,
 
   JSValue return_result;
   char *str;
+
+  /*
+   * anyarray -- the type of pg_stats' histogram_bounds, and of a polymorphic
+   * argument that could not be resolved -- names no element type, but the
+   * array itself does.
+   */
+  if (argtype == ANYARRAYOID || argtype == ANYCOMPATIBLEARRAYOID) {
+    argtype = pljs_array_type_of(arg);
+  }
 
   /*
    * Walks a chain of domains down to the concrete type; a type that is not a
@@ -1467,32 +1733,37 @@ JSValue pljs_datum_to_jsvalue(Oid argtype, Datum arg, bool is_null,
   case VARCHAROID:
   case BPCHAROID:
   case XMLOID: {
-    // Get a copy of the string.
-    text *text_value = DatumGetTextP(arg);
+    text *text_value = DatumGetTextPP(arg);
 
-    str = pljs_util_dup_pgtext(text_value);
+    return_result = pljs_new_server_string(ctx, VARDATA_ANY(text_value),
+                                           VARSIZE_ANY_EXHDR(text_value));
 
-    return_result = JS_NewString(ctx, str);
-
-    // Free the memory allocated.
-    pfree(str);
     pljs_free_if_detoasted(text_value, arg);
     break;
   }
 
-  case NAMEOID:
-    return_result = JS_NewString(ctx, DatumGetName(arg)->data);
+  case NAMEOID: {
+    const char *name = NameStr(*DatumGetName(arg));
+
+    return_result = pljs_new_server_string(ctx, name, strlen(name));
     break;
+  }
 
   case JSONOID: {
     // Get a copy of the string.
     text *json_value = DatumGetTextP(arg);
+    char *utf8;
 
     str = pljs_util_dup_pgtext(json_value);
+    utf8 = pljs_server_to_utf8(str, strlen(str));
 
-    return_result = JS_ParseJSON(ctx, str, strlen(str), NULL);
+    return_result = JS_ParseJSON(ctx, utf8, strlen(utf8), NULL);
 
     // free the memory allocated.
+    if (utf8 != str) {
+      pfree(utf8);
+    }
+
     pfree(str);
     pljs_free_if_detoasted(json_value, arg);
     break;
@@ -1519,9 +1790,15 @@ JSValue pljs_datum_to_jsvalue(Oid argtype, Datum arg, bool is_null,
     // a varlena).
     str = JsonbToCString(NULL, (JsonbContainer *)VARDATA(jb), VARSIZE(jb));
 
-    return_result = JS_ParseJSON(ctx, str, strlen(str), NULL);
+    char *utf8 = pljs_server_to_utf8(str, strlen(str));
+
+    return_result = JS_ParseJSON(ctx, utf8, strlen(utf8), NULL);
 
     // Free the memory allocated.
+    if (utf8 != str) {
+      pfree(utf8);
+    }
+
     pfree(str);
     pljs_free_if_detoasted(jb, arg);
 #endif
@@ -1791,40 +2068,53 @@ Datum *pljs_jsvalue_to_datums(pljs_type *type, JSValue val, bool **is_null,
   // Allocate the values array now that we have the tuple descriptor
   Datum *values = (Datum *)palloc(sizeof(Datum) * tupdesc->natts);
 
-  for (int16 c = 0; c < tupdesc->natts; c++) {
-    // If this is a dropped column, we can skip it, and set the null flag to
-    // true.
-    if (TupleDescAttr(tupdesc, c)->attisdropped) {
-      (*is_null)[c] = true;
-      continue;
+  /*
+   * A column that does not convert raises, and return_next() hands that to
+   * JavaScript without a subtransaction to release what this pinned: each
+   * caught error left a reference to the row type's descriptor, and COMMIT
+   * warned of every one.
+   */
+  PG_TRY();
+  {
+    for (int16 c = 0; c < tupdesc->natts; c++) {
+      // If this is a dropped column, we can skip it, and set the null flag to
+      // true.
+      if (TupleDescAttr(tupdesc, c)->attisdropped) {
+        (*is_null)[c] = true;
+        continue;
+      }
+
+      // Retrieve the column name of each attribute that we are expecting, we
+      // only care about named tuples.
+      char *colname = NameStr(TupleDescAttr(tupdesc, c)->attname);
+
+      JSValue o = JS_GetPropertyStr(ctx, val, colname);
+
+      // Set the value of each Datum, or set the `is_null` flag if it is
+      // considered `NULL`.  The column's typmod applies: a trigger's NEW, or a
+      // composite with a varchar(n) or bit(n) column, is not re-checked by the
+      // executor.
+      //
+      // JS_GetPropertyStr() returns an owned reference, so it has to be
+      // released whatever the column's value, and whether or not it converts.
+      // Leaking it costs one QuickJS reference per column per row, on every
+      // composite return and every return_next() of a row object, which is the
+      // hottest allocation path in the extension.  Because QuickJS runs on the
+      // libc allocator the loss is invisible to pg_backend_memory_contexts; it
+      // counts against pljs.memory_limit and is not returned until the backend
+      // exits.
+      values[c] = pljs_jsvalue_to_datum_typmod_free(
+          TupleDescAttr(tupdesc, c)->atttypid,
+          TupleDescAttr(tupdesc, c)->atttypmod, o, &(*is_null)[c], ctx);
     }
-
-    // Retrieve the column name of each attribute that we are expecting, we
-    // only care about named tuples.
-    char *colname = NameStr(TupleDescAttr(tupdesc, c)->attname);
-
-    JSValue o = JS_GetPropertyStr(ctx, val, colname);
-
-    // Set the value of each Datum, or set the `is_null` flag if it is
-    // considered `NULL`.  The column's typmod applies: a trigger's NEW, or a
-    // composite with a varchar(n) or bit(n) column, is not re-checked by the
-    // executor.
-    //
-    // JS_GetPropertyStr() returns an owned reference, so it has to be released
-    // whatever the column's value, and whether or not it converts.  Leaking it
-    // costs one QuickJS reference per column per row, on every composite
-    // return and every return_next() of a row object, which is the hottest
-    // allocation path in the extension.  Because QuickJS runs on the libc
-    // allocator the loss is invisible to pg_backend_memory_contexts; it counts
-    // against pljs.memory_limit and is not returned until the backend exits.
-    values[c] = pljs_jsvalue_to_datum_typmod_free(
-        TupleDescAttr(tupdesc, c)->atttypid,
-        TupleDescAttr(tupdesc, c)->atttypmod, o, &(*is_null)[c], ctx);
   }
-
-  if (cleanup_tupdesc) {
-    ReleaseTupleDesc(tupdesc);
+  PG_FINALLY();
+  {
+    if (cleanup_tupdesc) {
+      ReleaseTupleDesc(tupdesc);
+    }
   }
+  PG_END_TRY();
 
   return values;
 }
@@ -1860,46 +2150,55 @@ Datum pljs_jsvalue_to_record(pljs_type *type, JSValue val, bool *is_null,
   Datum *values = (Datum *)palloc0(sizeof(Datum) * tupdesc->natts);
   bool *nulls = (bool *)palloc0(sizeof(bool) * tupdesc->natts);
 
-  for (int16 c = 0; c < tupdesc->natts; c++) {
-    if (TupleDescAttr(tupdesc, c)->attisdropped) {
-      nulls[c] = true;
-      continue;
-    }
+  /* Release the descriptor however this ends; see pljs_jsvalue_to_datums(). */
+  PG_TRY();
+  {
+    for (int16 c = 0; c < tupdesc->natts; c++) {
+      if (TupleDescAttr(tupdesc, c)->attisdropped) {
+        nulls[c] = true;
+        continue;
+      }
 
-    char *colname = NameStr(TupleDescAttr(tupdesc, c)->attname);
+      char *colname = NameStr(TupleDescAttr(tupdesc, c)->attname);
 
-    JSValue o = JS_GetPropertyStr(ctx, val, colname);
+      JSValue o = JS_GetPropertyStr(ctx, val, colname);
 
-    /* Owned reference: release it on both paths.  See pljs_jsvalue_to_datums().
-     */
-    if (TupleDescAttr(tupdesc, c)->attgenerated != '\0' &&
-        (JS_IsNull(o) || JS_IsUndefined(o))) {
       /*
-       * A generated column is NULL in a BEFORE trigger's NEW, since the
-       * executor computes it after the trigger has run.  That NULL is not a
-       * value to check against the column's domain: a NOT NULL domain
-       * rejected it, so a trigger that returned NEW failed on every row.
+       * Owned reference: release it on both paths.  See
+       * pljs_jsvalue_to_datums().
        */
-      JS_FreeValue(ctx, o);
-      nulls[c] = true;
-      continue;
+      if (TupleDescAttr(tupdesc, c)->attgenerated != '\0' &&
+          (JS_IsNull(o) || JS_IsUndefined(o))) {
+        /*
+         * A generated column is NULL in a BEFORE trigger's NEW, since the
+         * executor computes it after the trigger has run.  That NULL is not a
+         * value to check against the column's domain: a NOT NULL domain
+         * rejected it, so a trigger that returned NEW failed on every row.
+         */
+        JS_FreeValue(ctx, o);
+        nulls[c] = true;
+        continue;
+      }
+
+      values[c] = pljs_jsvalue_to_datum_typmod_free(
+          TupleDescAttr(tupdesc, c)->atttypid,
+          TupleDescAttr(tupdesc, c)->atttypmod, o, &nulls[c], ctx);
     }
 
-    values[c] = pljs_jsvalue_to_datum_typmod_free(
-        TupleDescAttr(tupdesc, c)->atttypid,
-        TupleDescAttr(tupdesc, c)->atttypmod, o, &nulls[c], ctx);
+    // Form a Tuple from the values and nulls using the tuple descriptor
+    // as the template for the tuple.
+    result = HeapTupleGetDatum(heap_form_tuple(tupdesc, values, nulls));
   }
-
-  // Form a Tuple from the values and nulls using the tuple descriptor
-  // as the template for the tuple.
-  result = HeapTupleGetDatum(heap_form_tuple(tupdesc, values, nulls));
+  PG_FINALLY();
+  {
+    if (cleanup_tupdesc) {
+      ReleaseTupleDesc(tupdesc);
+    }
+  }
+  PG_END_TRY();
 
   pfree(nulls);
   pfree(values);
-
-  if (cleanup_tupdesc) {
-    ReleaseTupleDesc(tupdesc);
-  }
 
   return result;
 }
@@ -2034,8 +2333,8 @@ static Datum pljs_jsvalue_to_datum_via_io(pljs_type_io *io, JSValueConst val,
 
     text = pljs_signature_to_oid_text(io, pljs_utf8_to_server(str, plen));
 
-    if (io->is_domain) {
-      ret = pljs_domain_check(io, text, (Datum)0, false);
+    if (io->is_domain || io->inner_domain) {
+      ret = pljs_domain_check(io, text, (Datum)0, false, typmod);
     } else {
       /* Looked up first: it is what sets io->ioparam. */
       FmgrInfo *input = pljs_type_io_input(io);
@@ -2448,7 +2747,13 @@ static Datum pljs_jsvalue_to_datum_internal(pljs_type_io *io, int32 typmod,
 
     PG_TRY();
     {
-      ret = DirectFunctionCall1(namein, CStringGetDatum(str));
+      char *server = pljs_utf8_to_server(str, strlen(str));
+
+      ret = DirectFunctionCall1(namein, CStringGetDatum(server));
+
+      if (server != str) {
+        pfree(server);
+      }
     }
     PG_CATCH();
     {
@@ -2500,7 +2805,16 @@ static Datum pljs_jsvalue_to_datum_internal(pljs_type_io *io, int32 typmod,
                errmsg("null byte (\\u0000) is not allowed in a text value")));
     }
 
-    Datum ret = PointerGetDatum(cstring_to_text_with_len(str, plen));
+    char *server = pljs_js_string_to_server(ctx, str, plen);
+    Datum ret;
+
+    if (server == str) {
+      ret = PointerGetDatum(cstring_to_text_with_len(str, plen));
+    } else {
+      ret = PointerGetDatum(cstring_to_text(server));
+      pfree(server);
+    }
+
     JS_FreeCString(ctx, str);
 
     return ret;
@@ -2533,17 +2847,21 @@ static Datum pljs_jsvalue_to_datum_internal(pljs_type_io *io, int32 typmod,
     }
 
     str = JS_ToCStringLen(ctx, &plen, js);
+    JS_FreeValue(ctx, js);
 
     if (str == NULL) {
-      JS_FreeValue(ctx, js);
       pljs_ereport_js_exception(ctx);
     }
 
-    // return it as a CStringTextDatum.
-    Datum ret = CStringGetTextDatum(str);
+    // return it as a text Datum, in the database's encoding.
+    char *server = pljs_js_string_to_server(ctx, str, plen);
+    Datum ret = CStringGetTextDatum(server);
+
+    if (server != str) {
+      pfree(server);
+    }
 
     JS_FreeCString(ctx, str);
-    JS_FreeValue(ctx, js);
 
     return ret;
     break;
@@ -2576,17 +2894,30 @@ static Datum pljs_jsvalue_to_datum_internal(pljs_type_io *io, int32 typmod,
 
     const char *str = JS_ToCString(ctx, js);
 
+    JS_FreeValue(ctx, js);
+
     if (str == NULL) {
-      JS_FreeValue(ctx, js);
       pljs_ereport_js_exception(ctx);
     }
 
     // return it as a Datum, since there is no direct CStringGetJsonb exposed.
-    Datum ret = (Datum)DatumGetJsonbP(
-        DirectFunctionCall1(jsonb_in, (Datum)(char *)str));
+    char *server = pljs_js_string_to_server(ctx, str, strlen(str));
+    Datum ret;
 
-    JS_FreeCString(ctx, str);
-    JS_FreeValue(ctx, js);
+    PG_TRY();
+    {
+      ret = (Datum)DatumGetJsonbP(
+          DirectFunctionCall1(jsonb_in, CStringGetDatum(server)));
+    }
+    PG_FINALLY();
+    {
+      if (server != str) {
+        pfree(server);
+      }
+
+      JS_FreeCString(ctx, str);
+    }
+    PG_END_TRY();
 
     return ret;
 #endif
@@ -2844,7 +3175,7 @@ static Datum pljs_jsvalue_to_datum_typmod(Oid typid, int32 typmod, JSValue val,
     ret = pljs_jsvalue_to_base(pljs_type_io_lookup(io->basetype),
                                io->basetypmod, val, &isnull, ctx);
 
-    pljs_domain_check(io, NULL, ret, isnull);
+    pljs_domain_check(io, NULL, ret, isnull, -1);
   }
 
   if (isnull) {
@@ -2862,7 +3193,8 @@ static Datum pljs_jsvalue_to_datum_typmod(Oid typid, int32 typmod, JSValue val,
  * @brief Converts a Javascript value to a Postgres #Datum.
  *
  * See pljs_jsvalue_to_datum_typmod(); this is the form for a target without a
- * typmod, which is every target except a column.
+ * typmod, which is every target except a column or a plan parameter declared
+ * with one.
  *
  * @param rettype #Oid - the target type
  * @param val #JSValue - the Javascript object to convert
@@ -2894,9 +3226,8 @@ Datum pljs_jsvalue_to_datum(Oid rettype, JSValue val, bool *is_null,
  * @param ctx #JSContext - Javascript context to execute in
  * @returns #Datum of the Postgres value
  */
-static Datum pljs_jsvalue_to_datum_typmod_free(Oid typid, int32 typmod,
-                                               JSValue val, bool *is_null,
-                                               JSContext *ctx) {
+Datum pljs_jsvalue_to_datum_typmod_free(Oid typid, int32 typmod, JSValue val,
+                                        bool *is_null, JSContext *ctx) {
   Datum ret;
 
   PG_TRY();
@@ -3083,9 +3414,9 @@ static JSValue get_jsonb_value(JsonbValue *scalar_value, JSContext *ctx) {
   if (scalar_value->type == jbvNull) {
     return JS_NULL;
   } else if (scalar_value->type == jbvString) {
-    // A `String`.
-    return JS_NewStringLen(ctx, scalar_value->val.string.val,
-                           scalar_value->val.string.len);
+    // A `String`, or an object's key.
+    return pljs_new_server_string(ctx, scalar_value->val.string.val,
+                                  scalar_value->val.string.len);
   } else if (scalar_value->type == jbvNumeric) {
     // `Number`.
     return JS_NewFloat64(ctx, pljs_numeric_to_double(
@@ -3338,7 +3669,9 @@ static void jsonb_release(jsonb_build *build) {
  *
  * jsonb cannot hold "\u0000" -- jsonb_in() rejects it -- and a value that
  * held one anyway was stored, and then failed a cast to text, COPY and a
- * restore.  The same error jsonb_in() raises is raised here.
+ * restore.  The same error jsonb_in() raises is raised here.  The string is
+ * converted to the database's encoding, and so validated, as jsonb_in()
+ * would have it; see pljs_utf8_to_server().
  *
  * @param val #JsonbValue - the value to fill
  * @param str @c char* - the string, which the caller frees unless this raises
@@ -3347,6 +3680,8 @@ static void jsonb_release(jsonb_build *build) {
  */
 static void jsonb_string_value(JsonbValue *val, const char *str, size_t len,
                                JSContext *ctx) {
+  char *server;
+
   if (memchr(str, '\0', len) != NULL) {
     JS_FreeCString(ctx, str);
     ereport(ERROR, (errcode(ERRCODE_UNTRANSLATABLE_CHARACTER),
@@ -3354,10 +3689,20 @@ static void jsonb_string_value(JsonbValue *val, const char *str, size_t len,
                     errdetail("\\u0000 cannot be converted to text.")));
   }
 
+  server = pljs_js_string_to_server(ctx, str, len);
+
+  if (server != str) {
+    len = strlen(server);
+  }
+
   val->type = jbvString;
   val->val.string.val = palloc(len);
-  memcpy(val->val.string.val, str, len);
+  memcpy(val->val.string.val, server, len);
   val->val.string.len = len;
+
+  if (server != str) {
+    pfree(server);
+  }
 }
 
 /**

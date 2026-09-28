@@ -45,5 +45,33 @@ INSERT INTO al_tbl SELECT i, repeat('x', 1000) FROM generate_series(1, 20000) AS
 SELECT al_gc();
 SELECT al_malloc_mb() - mb < 5 AS trigger_arguments_released FROM al_before;
 
+-- The arguments converted before one that cannot be.  The call handler only
+-- released the arguments once all of them had been converted, so when the
+-- second raised the first stayed in the runtime: a 1kB string per call.
+CREATE FUNCTION al_two(s text, a int4[]) RETURNS int4 LANGUAGE pljs AS $$
+  return s.length;
+$$;
+CREATE FUNCTION al_two_loop(n int4) RETURNS int4 LANGUAGE pljs AS $$
+  let failed = 0;
+
+  for (let i = 0; i < n; i++) {
+    try {
+      pljs.execute("SELECT al_two(repeat('x', 1000), '{{1,2},{3,4}}')");
+    } catch (e) {
+      failed++;
+    }
+  }
+
+  return failed;
+$$;
+
+SELECT al_two_loop(1), al_gc();
+TRUNCATE al_before;
+INSERT INTO al_before SELECT al_malloc_mb();
+SELECT al_two_loop(20000);
+SELECT al_gc();
+SELECT al_malloc_mb() - mb < 5 AS converted_arguments_released FROM al_before;
+
 DROP TABLE al_tbl;
-DROP FUNCTION al_malloc_mb(), al_gc(), al_len(text), al_rows(text), al_trig();
+DROP FUNCTION al_malloc_mb(), al_gc(), al_len(text), al_rows(text), al_trig(),
+  al_two(text, int4[]), al_two_loop(int4);
