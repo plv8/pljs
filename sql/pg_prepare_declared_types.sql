@@ -87,6 +87,20 @@ DO $$
   plan.free();
 $$ LANGUAGE pljs;
 
+-- An empty list of type names, or an undefined or null one, names none, and
+-- the types are inferred too.  An empty list prepared the plan with no
+-- parameters, which failed with "there is no parameter $1"; an undefined one
+-- was a type named "undefined".
+DO $$
+  for (const types of [[], undefined, null]) {
+    const plan = pljs.prepare('SELECT $1::int4 + 1 AS x', types);
+
+    pljs.elog(NOTICE, JSON.stringify(types) + ' inferred ' +
+                          plan.execute([41])[0].x);
+    plan.free();
+  }
+$$ LANGUAGE pljs;
+
 -- 5) Type names declare every parameter, as in plv8.
 DO $$
   try {

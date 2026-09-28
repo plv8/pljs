@@ -106,13 +106,55 @@ NOTICE:  return_next: not positive: -4
  {5}
 (2 rows)
 
+-- And in a range, and a multirange, of the domain: a range's input function
+-- runs its subtype's, which checks the domain.  Ranges were not looked into,
+-- so their rows were converted without a subtransaction, and a failed CHECK
+-- left "transaction left non-empty SPI stack".
+CREATE TYPE rnd_range AS RANGE (subtype = rnd_pos);
+CREATE FUNCTION rnd_ranges() RETURNS SETOF rnd_range LANGUAGE pljs AS $$
+  for (const v of ['[1,5)', '[-2,3)', '[3,4)']) {
+    try {
+      pljs.return_next(v);
+    } catch (e) {
+      pljs.elog(NOTICE, 'return_next: ' + e.message);
+    }
+  }
+  pljs.elog(NOTICE, 'execute: ' + pljs.execute('SELECT 42 AS x')[0].x);
+$$;
+SELECT * FROM rnd_ranges();
+NOTICE:  return_next: not positive: -2
+NOTICE:  execute: 42
+ rnd_ranges 
+------------
+ [1,5)
+ [3,4)
+(2 rows)
+
+CREATE FUNCTION rnd_multiranges() RETURNS SETOF rnd_multirange LANGUAGE pljs AS $$
+  for (const v of ['{[1,5)}', '{[3,4), [-2,3)}', '{[6,7)}']) {
+    try {
+      pljs.return_next(v);
+    } catch (e) {
+      pljs.elog(NOTICE, 'return_next: ' + e.message);
+    }
+  }
+$$;
+SELECT * FROM rnd_multiranges();
+NOTICE:  return_next: not positive: -2
+ rnd_multiranges 
+-----------------
+ {[1,5)}
+ {[6,7)}
+(2 rows)
+
 SELECT 1 AS still_connected;
  still_connected 
 -----------------
                1
 (1 row)
 
-DROP FUNCTION rnd_f(), rnd_pos_set(), rnd_rows(), rnd_arrays();
-DROP TYPE rnd_row;
+DROP FUNCTION rnd_f(), rnd_pos_set(), rnd_rows(), rnd_arrays(), rnd_ranges(),
+  rnd_multiranges();
+DROP TYPE rnd_row, rnd_range;
 DROP DOMAIN rnd_d, rnd_pos;
 DROP FUNCTION rnd_g(int4), rnd_positive(int4);

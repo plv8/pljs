@@ -48,6 +48,7 @@ static void run_inline(FunctionCallInfo fcinfo);
 static int interrupt_handler(JSRuntime *rt, void *opaque);
 static void setup_storage(pljs_storage *storage, pljs_func *function,
                           FunctionCallInfo fcinfo);
+static JSValue js_throw_uncatchable(ErrorData *edata, JSContext *ctx);
 
 /** \brief QuickJS Runtime */
 JSRuntime *rt = NULL;
@@ -72,6 +73,14 @@ JSClassID js_window_id;
  * -- or NULL outside of one; see pljs_current_storage().
  */
 static pljs_storage *current_storage = NULL;
+
+/*
+ * The error the running call has to end with, or NULL; see
+ * pljs_throw_fatal_error().
+ */
+static ErrorData *pljs_fatal_error(void) {
+  return current_storage != NULL ? current_storage->fatal_error : NULL;
+}
 
 /*
  * Whether a function's result is being converted, anywhere up the stack; see
@@ -390,6 +399,12 @@ pg_noreturn static void pljs_ereport_js_error(const char *message,
                                               const char *fallback) {
   int sqlerrcode = ERRCODE_INTERNAL_ERROR;
   const char *edetail = (pg_detail && pg_detail[0]) ? pg_detail : detail;
+  ErrorData *fatal_error = pljs_fatal_error();
+
+  /* The exception stood for this error; see pljs_throw_fatal_error(). */
+  if (fatal_error != NULL) {
+    ReThrowError(fatal_error);
+  }
 
   if (sqlstate && strlen(sqlstate) == 5) {
     sqlerrcode = MAKE_SQLSTATE(sqlstate[0], sqlstate[1], sqlstate[2],
@@ -447,8 +462,14 @@ static int interrupt_handler(JSRuntime *rt, void *opaque) {
    * InterruptPending in the condition, pg_object_keys_leak failed on every run
    * on PostgreSQL 18 and any long-running pljs function died when another
    * session called pg_log_backend_memory_contexts() on it.
+   *
+   * A call that has to end with an error stops too, should C code have caught
+   * the exception that was to end it; see pljs_throw_fatal_error().
    */
-  return (QueryCancelPending || ProcDiePending || ClientConnectionLost) ? 1 : 0;
+  return (QueryCancelPending || ProcDiePending || ClientConnectionLost ||
+          pljs_fatal_error() != NULL)
+             ? 1
+             : 0;
 }
 
 /**
@@ -1013,6 +1034,14 @@ static Datum dispatch_call(FunctionCallInfo fcinfo) {
     } else {
       retval = call_function(fcinfo, &context, argv);
     }
+
+    /*
+     * A call that has to end with an error, whose exception C code caught on
+     * the way out -- it still ends with it; see pljs_throw_fatal_error().
+     */
+    if (storage.fatal_error != NULL) {
+      ReThrowError(storage.fatal_error);
+    }
   }
   PG_FINALLY();
   {
@@ -1558,25 +1587,34 @@ static Datum call_trigger(FunctionCallInfo fcinfo, pljs_context *context) {
                           "execution error");
   }
 
-  /* Convert NEW while the SPI connection is open; see call_function(). */
+  /*
+   * Convert NEW while the SPI connection is open, and release it however that
+   * ends; see call_function().
+   */
   MemoryContextSwitchTo(execution_context);
 
-  if (JS_IsNull(ret) || !TRIGGER_FIRED_FOR_ROW(event)) {
-    result = PointerGetDatum(NULL);
-  } else if (!JS_IsUndefined(ret)) {
+  PG_TRY();
+  {
+    if (JS_IsNull(ret) || !TRIGGER_FIRED_FOR_ROW(event)) {
+      result = PointerGetDatum(NULL);
+    } else if (!JS_IsUndefined(ret)) {
 
-    TupleDesc tupdesc = RelationGetDescr(rel);
+      TupleDesc tupdesc = RelationGetDescr(rel);
 
-    pljs_type type;
-    pljs_type_fill(&type, context->function->rettype);
-    Datum d = pljs_jsvalue_to_record(&type, ret, NULL, tupdesc, context->ctx);
+      pljs_type type;
+      pljs_type_fill(&type, context->function->rettype);
+      Datum d = pljs_jsvalue_to_record(&type, ret, NULL, tupdesc, context->ctx);
 
-    HeapTupleHeader header = DatumGetHeapTupleHeader(d);
+      HeapTupleHeader header = DatumGetHeapTupleHeader(d);
 
-    result = PointerGetDatum((char *)header - HEAPTUPLESIZE);
+      result = PointerGetDatum((char *)header - HEAPTUPLESIZE);
+    }
   }
-
-  JS_FreeValue(context->ctx, ret);
+  PG_FINALLY();
+  {
+    JS_FreeValue(context->ctx, ret);
+  }
+  PG_END_TRY();
 
   SPI_finish();
 
@@ -1680,6 +1718,11 @@ static Datum call_function(FunctionCallInfo fcinfo, pljs_context *context,
      * The result has to outlive SPI_finish(), so it is built in this call's
      * own context rather than SPI's.  A procedure still cannot end its
      * transaction from here; see pljs_commit().
+     *
+     * The result is released however the conversion ends.  A result that
+     * could not be converted -- one bad element of a large array -- stayed in
+     * the runtime for the life of the backend, and a loop that retried the
+     * call ran pljs.memory_limit out.
      */
     MemoryContextSwitchTo(execution_context);
     pljs_converting_result = true;
@@ -1691,10 +1734,9 @@ static Datum call_function(FunctionCallInfo fcinfo, pljs_context *context,
     PG_FINALLY();
     {
       pljs_converting_result = was_converting;
+      JS_FreeValue(context->ctx, ret);
     }
     PG_END_TRY();
-
-    JS_FreeValue(context->ctx, ret);
 
     SPI_finish();
 
@@ -1779,9 +1821,18 @@ static void put_returned_row(pljs_return_state *state, JSValueConst row,
   }
 
   if (state->is_domain) {
-    /* A null row is left out, as it is for any other composite set. */
     if (!JS_IsNull(row) && !JS_IsUndefined(row)) {
       pljs_put_domain_row(state, row, ctx);
+    } else {
+      /*
+       * A null row is left out, as it is for any other composite set -- but
+       * only once the domain has allowed it, as return_next() checks one.  A
+       * NOT NULL domain's set could return null rows and have them dropped
+       * without a word.
+       */
+      bool is_null;
+
+      pljs_jsvalue_to_datum(state->rettype, row, &is_null, ctx, NULL);
     }
   } else if (state->is_composite) {
     bool *nulls = (bool *)palloc0(sizeof(bool) * state->tuple_desc->natts);
@@ -1805,14 +1856,38 @@ static void put_returned_row(pljs_return_state *state, JSValueConst row,
       pljs_ereport_js_exception(ctx);
     }
 
-    result =
-        pljs_jsvalue_to_datum(TupleDescAttr(state->tuple_desc, 0)->atttypid,
-                              value, &is_null, ctx, NULL);
+    result = pljs_jsvalue_to_datum_free(
+        TupleDescAttr(state->tuple_desc, 0)->atttypid, value, &is_null, ctx);
 
     tuplestore_putvalues(state->tuple_store_state, state->tuple_desc, &result,
                          &is_null);
-    JS_FreeValue(ctx, value);
   }
+}
+
+/**
+ * @brief Puts a row that a set-returning function returned, and releases it.
+ *
+ * The row is released however putting it ends.  It is a parameter here,
+ * rather than a variable of the caller's loop, because a variable assigned in
+ * a PG_TRY cannot be relied on in its PG_FINALLY even when it is volatile:
+ * clang reads a volatile JSValue passed by value from the register it was
+ * last in, and the row that failed was never released.
+ *
+ * @param state #pljs_return_state - the set being returned
+ * @param row #JSValue - the row, an owned reference, which is released
+ * @param ctx #JSContext - Javascript context to execute in
+ */
+static void put_returned_row_free(pljs_return_state *state, JSValue row,
+                                  JSContext *ctx) {
+  PG_TRY();
+  {
+    put_returned_row(state, row, ctx);
+  }
+  PG_FINALLY();
+  {
+    JS_FreeValue(ctx, row);
+  }
+  PG_END_TRY();
 }
 
 /**
@@ -1958,34 +2033,40 @@ static Datum call_srf_function(FunctionCallInfo fcinfo, pljs_context *context,
   } else {
     /*
      * Rows the function returned rather than passed to return_next() are
-     * converted while the SPI connection is open; see call_function().
+     * converted while the SPI connection is open, and released however that
+     * ends; see call_function().
      */
-    if (!JS_IsUndefined(ret) && !JS_IsNull(ret)) {
-      MemoryContextSwitchTo(rsinfo->econtext->ecxt_per_query_memory);
+    PG_TRY();
+    {
+      if (!JS_IsUndefined(ret) && !JS_IsNull(ret)) {
+        MemoryContextSwitchTo(rsinfo->econtext->ecxt_per_query_memory);
 
-      // JS can return a single row or an array of rows.
-      if (JS_IsArray(context->ctx, ret)) {
-        int32_t length = pljs_js_array_length(ret, context->ctx);
+        // JS can return a single row or an array of rows.
+        if (JS_IsArray(context->ctx, ret)) {
+          int32_t length = pljs_js_array_length(ret, context->ctx);
 
-        if (length < 0) {
-          pljs_ereport_js_exception(context->ctx);
+          if (length < 0) {
+            pljs_ereport_js_exception(context->ctx);
+          }
+
+          for (int32_t i = 0; i < length; i++) {
+            put_returned_row_free(state,
+                                  JS_GetPropertyUint32(context->ctx, ret, i),
+                                  context->ctx);
+          }
+        } else {
+          put_returned_row(state, ret, context->ctx);
         }
 
-        for (int32_t i = 0; i < length; i++) {
-          JSValue row = JS_GetPropertyUint32(context->ctx, ret, i);
-
-          put_returned_row(state, row, context->ctx);
-          JS_FreeValue(context->ctx, row);
-        }
-      } else {
-        put_returned_row(state, ret, context->ctx);
+        MemoryContextSwitchTo(execution_context);
       }
-
-      MemoryContextSwitchTo(execution_context);
     }
+    PG_FINALLY();
+    {
+      JS_FreeValue(context->ctx, ret);
+    }
+    PG_END_TRY();
   }
-
-  JS_FreeValue(context->ctx, ret);
 
   SPI_finish();
 
@@ -2007,11 +2088,75 @@ static Datum call_srf_function(FunctionCallInfo fcinfo, pljs_context *context,
  * @returns #JSValue of the exception
  */
 JSValue js_throw(const char *message, JSContext *ctx) {
+  ErrorData *fatal_error = pljs_fatal_error();
+
+  /* Nothing JavaScript can catch; see pljs_throw_fatal_error(). */
+  if (fatal_error != NULL) {
+    return js_throw_uncatchable(fatal_error, ctx);
+  }
+
   JSValue error = JS_NewError(ctx);
   JSValue message_value = JS_NewString(ctx, message);
   JS_SetPropertyStr(ctx, error, "message", message_value);
 
   return JS_Throw(ctx, error);
+}
+
+/*
+ * Throws an exception that no catch or finally block sees, for the error the
+ * running call has to end with; see pljs_throw_fatal_error().
+ */
+static JSValue js_throw_uncatchable(ErrorData *edata, JSContext *ctx) {
+  JSValue error = JS_NewError(ctx);
+
+  JS_SetPropertyStr(ctx, error, "message",
+                    JS_NewString(ctx, edata->message ? edata->message : ""));
+  JS_SetUncatchableError(ctx, error, true);
+
+  return JS_Throw(ctx, error);
+}
+
+/**
+ * @brief Ends the running call with the PostgreSQL error being handled.
+ *
+ * For a PG_CATCH whose error JavaScript must not catch, because what raised it
+ * left behind state that only ending the query cleans up.  A window object's
+ * methods run the executor of the query that called the window function -- to
+ * read its partition, and to evaluate its arguments, which can call any
+ * function -- and a function that raised there left its SPI connection on the
+ * stack.  JavaScript caught the error and carried on with that: "transaction
+ * left non-empty SPI stack", and a result for one row computed without the
+ * row that raised.  Nothing can roll the query back to a savepoint, and
+ * re-throwing the error from a function QuickJS called unwinds past its live
+ * frames; see pljs_return_next().
+ *
+ * So the error is kept in the call's storage, and JavaScript gets an exception
+ * that no catch or finally block sees.  QuickJS unwinds to the call handler,
+ * which raises the kept error in place of the exception; see
+ * pljs_ereport_js_error().  Until then every exception pljs throws is
+ * uncatchable as well, since C code can replace the pending exception with one
+ * of its own, and a call that returns all the same raises the kept error; see
+ * dispatch_call().
+ *
+ * @param ctx #JSContext - Javascript context
+ * @returns #JSValue - JS_EXCEPTION
+ */
+JSValue pljs_throw_fatal_error(JSContext *ctx) {
+  MemoryContext old_context =
+      MemoryContextSwitchTo(current_storage->execution_memory_context);
+  ErrorData *edata = CopyErrorData();
+
+  FlushErrorState();
+  MemoryContextSwitchTo(old_context);
+
+  /* The first error is the one the call ends with. */
+  if (current_storage->fatal_error == NULL) {
+    current_storage->fatal_error = edata;
+  } else {
+    FreeErrorData(edata);
+  }
+
+  return js_throw_uncatchable(current_storage->fatal_error, ctx);
 }
 
 /*
@@ -2022,6 +2167,17 @@ JSValue js_throw(const char *message, JSContext *ctx) {
  * nested pljs.execute() boundary instead of collapsing to the message alone.
  */
 JSValue js_throw_error_data(ErrorData *edata, JSContext *ctx) {
+  ErrorData *fatal_error = pljs_fatal_error();
+
+  /*
+   * Nothing JavaScript can catch, whatever the error: pljs.execute() or
+   * return_next() that caught the kept error itself, raised on the way out of
+   * a conversion; see pljs_throw_fatal_error().
+   */
+  if (fatal_error != NULL) {
+    return js_throw_uncatchable(fatal_error, ctx);
+  }
+
   JSValue error = JS_NewError(ctx);
 
   JS_SetPropertyStr(ctx, error, "message",

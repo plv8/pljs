@@ -56,6 +56,19 @@ CREATE FUNCTION scd_next_null() RETURNS SETOF scd_nn_pair LANGUAGE pljs AS $$
 $$;
 SELECT * FROM scd_next_null();
 
+-- A null row the function returns, rather than passes to return_next(), is
+-- left out, as for any other composite set -- once the domain has allowed it.
+-- A NOT NULL domain's set dropped it without a word.
+CREATE FUNCTION scd_returned_null() RETURNS SETOF scd_nn_pair LANGUAGE pljs AS $$
+  return [{a: 9, b: 'nine'}, null];
+$$;
+SELECT * FROM scd_returned_null();
+
+CREATE FUNCTION scd_returned_null_ok() RETURNS SETOF scd_dpair LANGUAGE pljs AS $$
+  return [{a: 10, b: 'ten'}, null, undefined];
+$$;
+SELECT * FROM scd_returned_null_ok();
+
 -- 4) A domain over a single-column composite type is still checked.
 CREATE TYPE scd_single AS (a int4);
 CREATE DOMAIN scd_dsingle AS scd_single CHECK ((VALUE).a > 0);
@@ -73,6 +86,7 @@ $$;
 SELECT * FROM scd_ints();
 
 DROP FUNCTION scd_returned(), scd_returned_bad(), scd_next(), scd_next_bad(),
-  scd_next_missing(), scd_next_null(), scd_single_bad(), scd_ints();
+  scd_next_missing(), scd_next_null(), scd_returned_null(),
+  scd_returned_null_ok(), scd_single_bad(), scd_ints();
 DROP DOMAIN scd_dpair, scd_nn_pair, scd_dsingle, scd_dints;
 DROP TYPE scd_pair, scd_single, scd_ints;

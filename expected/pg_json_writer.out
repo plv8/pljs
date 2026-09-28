@@ -158,6 +158,79 @@ SELECT jw_dates();
  {"plain": "2020-01-02T03:04:05.000Z", "custom": {"custom": true}, "invalid": null, "no_to_json": {}}
 (1 row)
 
+-- 7) Any object's toJSON() is called, with its key, and a Number, String or
+-- Boolean object is written as its value, as JSON.stringify() writes them,
+-- so json and jsonb agree.  Only a Date's toJSON() was called, and jsonb wrote
+-- any other object as its own properties: `new String('s')` as {"0": "s"}.
+CREATE FUNCTION jw_to_json_jsonb() RETURNS jsonb LANGUAGE pljs AS $$
+  class Money {
+    constructor(cents) { this.cents = cents; }
+    toJSON(key) { return key + ': ' + (this.cents / 100).toFixed(2); }
+  }
+  return {
+    price: new Money(500),
+    list: [new Money(1), new Number(2), new String('s'), new Boolean(false)],
+    boxed: {n: new Number(1.5), s: new String('x'), b: new Boolean(true)},
+    replaced: {toJSON() { return {with: [1, 2]}; }},
+    gone: {toJSON() { return undefined; }}
+  };
+$$;
+CREATE FUNCTION jw_to_json_json() RETURNS json LANGUAGE pljs AS $$
+  class Money {
+    constructor(cents) { this.cents = cents; }
+    toJSON(key) { return key + ': ' + (this.cents / 100).toFixed(2); }
+  }
+  return {
+    price: new Money(500),
+    list: [new Money(1), new Number(2), new String('s'), new Boolean(false)],
+    boxed: {n: new Number(1.5), s: new String('x'), b: new Boolean(true)},
+    replaced: {toJSON() { return {with: [1, 2]}; }},
+    gone: {toJSON() { return undefined; }}
+  };
+$$;
+SELECT jw_to_json_jsonb();
+                                                           jw_to_json_jsonb                                                           
+--------------------------------------------------------------------------------------------------------------------------------------
+ {"list": ["0: 0.01", 2, "s", false], "boxed": {"b": true, "n": 1.5, "s": "x"}, "price": "price: 5.00", "replaced": {"with": [1, 2]}}
+(1 row)
+
+SELECT jw_to_json_jsonb() = jw_to_json_json()::jsonb AS same_as_json;
+ same_as_json 
+--------------
+ t
+(1 row)
+
+-- The value itself: its key is "".
+CREATE FUNCTION jw_to_json_top() RETURNS jsonb LANGUAGE pljs AS $$
+  return {toJSON(key) { return 'key [' + key + ']'; }};
+$$;
+SELECT jw_to_json_top();
+ jw_to_json_top 
+----------------
+ "key []"
+(1 row)
+
+-- A BigInt's too, which is how JSON.stringify() is taught to write one.
+CREATE FUNCTION jw_to_json_bigint() RETURNS jsonb LANGUAGE pljs AS $$
+  BigInt.prototype.toJSON = function () { return this.toString(); };
+  return {big: 12345678901234567890n};
+$$;
+SELECT jw_to_json_bigint();
+        jw_to_json_bigint        
+---------------------------------
+ {"big": "12345678901234567890"}
+(1 row)
+
+DO $$ delete BigInt.prototype.toJSON; $$ LANGUAGE pljs;
+-- A toJSON() that throws is an error, as it is for JSON.stringify().
+CREATE FUNCTION jw_to_json_throws() RETURNS jsonb LANGUAGE pljs AS $$
+  return {a: {toJSON() { throw new Error('no JSON for you'); }}};
+$$;
+SELECT jw_to_json_throws();
+ERROR:  no JSON for you
+DETAIL:  Error: no JSON for you
+    at toJSON (<function>:3:41)
+
 SELECT 1 AS still_connected;
  still_connected 
 -----------------
@@ -167,4 +240,5 @@ SELECT 1 AS still_connected;
 DROP FUNCTION jw_members(), jw_members_json(), jw_enumerable(), jw_fn_jsonb(),
   jw_fn_json(), jw_sym_json(), jw_cycle(), jw_cycle_array(), jw_shared(),
   jw_deep(), jw_numbers(), jw_nan(), jw_nul_value(), jw_nul_key(),
-  jw_dates();
+  jw_dates(), jw_to_json_jsonb(), jw_to_json_json(), jw_to_json_top(),
+  jw_to_json_bigint(), jw_to_json_throws();

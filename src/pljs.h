@@ -144,6 +144,7 @@ typedef struct pljs_storage {
   FunctionCallInfo fcinfo;
   WindowObject window_object;
   MemoryContext execution_memory_context;
+  ErrorData *fatal_error; // ends the call; see pljs_throw_fatal_error()
 } pljs_storage;
 
 typedef struct pljs_window_storage {
@@ -178,6 +179,8 @@ void pljs_register_js_classes(JSRuntime *rt);
 JSValue js_throw(const char *, JSContext *);
 // Throw a Javascript error carrying a Postgres ErrorData's detail/hint/sqlstate
 JSValue js_throw_error_data(ErrorData *, JSContext *);
+// End the running call with the Postgres error being handled
+JSValue pljs_throw_fatal_error(JSContext *);
 // Raise the pending Javascript exception as a Postgres error
 pg_noreturn void pljs_ereport_js_exception(JSContext *);
 
@@ -229,6 +232,8 @@ JSValue pljs_spi_result_to_jsvalue(int, JSContext *);
 Datum pljs_jsvalue_to_array(pljs_type *, JSValue, JSContext *, int32);
 Datum pljs_jsvalue_to_datum(Oid rettype, JSValue val, bool *is_null,
                             JSContext *ctx, FunctionCallInfo fcinfo);
+Datum pljs_jsvalue_to_datum_free(Oid rettype, JSValue val, bool *is_null,
+                                 JSContext *ctx);
 Datum pljs_jsvalue_to_record(pljs_type *type, JSValue val, bool *is_null,
                              TupleDesc tupdesc, JSContext *ctx);
 Datum *pljs_jsvalue_to_datums(pljs_type *type, JSValue val, bool **is_null,

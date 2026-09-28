@@ -102,7 +102,10 @@ REGRESS = init-extension function json jsonb json_conv types bytea context \
 	pg_fallback_scratch_memory \
 	pg_fallback_round_trip \
 	pg_builtin_conversion_errors \
-	pg_argument_leak
+	pg_argument_leak \
+	pg_window_executor_error \
+	pg_conversion_error_leaks \
+	pg_array_length_range
 
 all: deps/quickjs/quickjs.h deps/quickjs/libquickjs.a pljs--$(PLJS_VERSION).sql
 

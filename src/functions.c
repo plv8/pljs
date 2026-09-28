@@ -384,6 +384,31 @@ static JSValue pljs_execute(JSContext *ctx, JSValueConst this_val, int argc,
 }
 
 /**
+ * @brief Converts an array of parameters to their types.
+ *
+ * Each element is released however its conversion ends; see
+ * pljs_jsvalue_to_datum_free().
+ *
+ * @param params #JSValueConst - the array of parameters
+ * @param nparams @c int - how many there are
+ * @param types #Oid* - the type of each
+ * @param values #Datum* - filled with each value
+ * @param nulls @c char* - filled with 'n' for each null value, ' ' otherwise
+ * @param ctx #JSContext - Javascript context to execute in
+ */
+static void pljs_params_to_datums(JSValueConst params, int nparams,
+                                  const Oid *types, Datum *values, char *nulls,
+                                  JSContext *ctx) {
+  for (int i = 0; i < nparams; i++) {
+    bool is_null;
+
+    values[i] = pljs_jsvalue_to_datum_free(
+        types[i], JS_GetPropertyUint32(ctx, params, i), &is_null, ctx);
+    nulls[i] = is_null ? 'n' : ' ';
+  }
+}
+
+/**
  * @brief Executes a query with parameters and returns the status.
  *
  * Accepts a query and parameters and executes the query via SPI.
@@ -452,16 +477,8 @@ static int pljs_execute_params(const char *sql, JSValue params,
                              parstate.nparams, nparams)));
     }
 
-    for (int i = 0; i < nparams; i++) {
-      JSValue param = JS_GetPropertyUint32(ctx, params, i);
-      bool is_null;
-
-      values[i] = pljs_jsvalue_to_datum(parstate.param_types[i], param,
-                                        &is_null, ctx, NULL);
-      nulls[i] = is_null ? 'n' : ' ';
-
-      JS_FreeValue(ctx, param);
-    }
+    pljs_params_to_datums(params, nparams, parstate.param_types, values, nulls,
+                          ctx);
 
     ParamListInfo param_li =
         pljs_setup_variable_paramlist(&parstate, values, nulls);
@@ -541,6 +558,59 @@ void pljs_register_js_classes(JSRuntime *runtime) {
   JS_NewClassID(&js_prepared_statement_handle_id);
   JS_NewClass(runtime, js_prepared_statement_handle_id,
               &pljs_plan_handle_class);
+}
+
+/**
+ * @brief Converts the parameters of plan.execute() or plan.cursor().
+ *
+ * Called under the caller's PG_TRY, which hands an error back to JavaScript,
+ * with the context current that the values are to be allocated in.
+ *
+ * The count is checked, and the parameters' types are read, before any
+ * JavaScript runs: converting a value can run a getter, which can free the
+ * plan -- plan.free(), or `p.plan = null` dropping the last reference to its
+ * handle.  Whether the plan survived the conversion is checked after it; see
+ * pljs_plan_execute().
+ *
+ * @param plan #pljs_plan - the plan
+ * @param handle #JSValueConst - the plan's handle, which the caller holds
+ * @param params #JSValueConst - the array of parameters
+ * @param nparams @c int - how many there are
+ * @param values #Datum** - set to the values
+ * @param nulls @c char** - set to their nulls, as SPI takes them
+ * @param ctx #JSContext - Javascript context to execute in
+ */
+static void pljs_plan_params_to_datums(pljs_plan *plan, JSValueConst handle,
+                                       JSValueConst params, int nparams,
+                                       Datum **values, char **nulls,
+                                       JSContext *ctx) {
+  int argcount =
+      plan->parstate ? plan->parstate->nparams : SPI_getargcount(plan->plan);
+  Oid *types;
+
+  if (argcount != nparams) {
+    ereport(ERROR,
+            (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+             errmsg("plan expected %d arguments but %d were passed instead",
+                    argcount, nparams)));
+  }
+
+  *values = palloc0(sizeof(Datum) * nparams);
+  *nulls = palloc(sizeof(char) * nparams);
+  types = palloc(sizeof(Oid) * nparams);
+
+  for (int i = 0; i < nparams; i++) {
+    types[i] = plan->parstate ? plan->parstate->param_types[i]
+                              : SPI_getargtypeid(plan->plan, i);
+  }
+
+  pljs_params_to_datums(params, nparams, types, *values, *nulls, ctx);
+
+  if (JS_GetOpaque(handle, js_prepared_statement_handle_id) != plan) {
+    ereport(ERROR,
+            (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+             errmsg("plan was freed while its parameters were converted")));
+  }
 }
 
 /**
@@ -645,41 +715,11 @@ static JSValue pljs_plan_execute(JSContext *ctx, JSValueConst this_val,
      * here, they become ordinary JavaScript exceptions like every other error
      * from plan.execute().
      */
-    int argcount =
-        plan->parstate ? plan->parstate->nparams : SPI_getargcount(plan->plan);
+    Datum *values;
+    char *nulls;
 
-    if (argcount != nparams) {
-      ereport(ERROR,
-              (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-               errmsg("plan expected %d arguments but %d were passed instead",
-                      argcount, nparams)));
-    }
-
-    Datum *values = palloc0(sizeof(Datum) * nparams);
-    char *nulls = palloc(sizeof(char) * nparams);
-    Oid *types = palloc(sizeof(Oid) * nparams);
-
-    /* Read before any JavaScript runs; see above. */
-    for (int i = 0; i < nparams; i++) {
-      types[i] = plan->parstate ? plan->parstate->param_types[i]
-                                : SPI_getargtypeid(plan->plan, i);
-    }
-
-    for (int i = 0; i < nparams; i++) {
-      JSValue param = JS_GetPropertyUint32(ctx, params, i);
-      bool is_null;
-
-      values[i] = pljs_jsvalue_to_datum(types[i], param, &is_null, ctx, NULL);
-      nulls[i] = is_null ? 'n' : ' ';
-
-      JS_FreeValue(ctx, param);
-    }
-
-    if (JS_GetOpaque(handle, js_prepared_statement_handle_id) != plan) {
-      ereport(ERROR,
-              (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-               errmsg("plan was freed while its parameters were converted")));
-    }
+    pljs_plan_params_to_datums(plan, handle, params, nparams, &values, &nulls,
+                               ctx);
 
     int status;
 
@@ -829,6 +869,14 @@ static JSValue pljs_prepare(JSContext *ctx, JSValueConst this_val, int argc,
     return JS_UNDEFINED;
   }
 
+  /*
+   * An undefined or null list of type names is none, rather than one type
+   * named "undefined".
+   */
+  if (argc == 2 && (JS_IsUndefined(argv[1]) || JS_IsNull(argv[1]))) {
+    argc = 1;
+  }
+
   if (argc >= 2) {
     if (JS_IsArray(ctx, argv[1])) {
       params = argv[1];
@@ -837,9 +885,11 @@ static JSValue pljs_prepare(JSContext *ctx, JSValueConst this_val, int argc,
       params = pljs_values_to_array(argv, argc, 1, ctx);
       cleanup_params = true;
     }
-  }
 
-  nparams = pljs_js_array_length(params, ctx);
+    nparams = pljs_js_array_length(params, ctx);
+  } else {
+    nparams = 0;
+  }
 
   /* Reading the array's length threw: hand that back to JavaScript. */
   if (nparams < 0) {
@@ -870,9 +920,11 @@ static JSValue pljs_prepare(JSContext *ctx, JSValueConst this_val, int argc,
    * parameters' types, as plv8 does.  This was the other way round: type names
    * were parsed and then ignored, so `pljs.prepare('SELECT $1 AS x', ['int4'])`
    * bound $1 as text, and a parameter declared as a domain was never checked
-   * against it.
+   * against it.  An empty list of type names, or undefined, names none, so
+   * the parser infers them for it too: prepared with no types at all, the plan
+   * could not have used a parameter.
    */
-  if (argc < 2) {
+  if (nparams == 0) {
     parstate =
         MemoryContextAllocZero(CacheMemoryContext, sizeof(pljs_param_state));
     parstate->memory_context = CacheMemoryContext;
@@ -1101,50 +1153,13 @@ static JSValue pljs_plan_cursor(JSContext *ctx, JSValueConst this_val, int argc,
 
     /*
      * The argument-count check and the bind-parameter conversion run inside
-     * the PG_TRY, not before it.  Both can raise -- and since the conversion
-     * layer rejects an out-of-range number, a bad boolean string, an embedded
-     * NUL or a nested array, they raise for ordinary bad input.  This is a C
-     * function QuickJS called: an ereport that escapes it siglongjmps past the
-     * interpreter's live frames and the next Error built in the session
-     * (return_next's, for one) walks that dead list and segfaults.  Caught
-     * here, they become ordinary JavaScript exceptions like every other error
-     * from plan.cursor().
+     * the PG_TRY, not before it; see pljs_plan_execute().
      */
-    int argcount =
-        plan->parstate ? plan->parstate->nparams : SPI_getargcount(plan->plan);
+    Datum *values;
+    char *nulls;
 
-    if (argcount != nparams) {
-      ereport(ERROR,
-              (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-               errmsg("plan expected %d arguments but %d were passed instead",
-                      argcount, nparams)));
-    }
-
-    Datum *values = palloc0(sizeof(Datum) * nparams);
-    char *nulls = palloc(sizeof(char) * nparams);
-    Oid *types = palloc(sizeof(Oid) * nparams);
-
-    /* Read before any JavaScript runs; see pljs_plan_execute(). */
-    for (int i = 0; i < nparams; i++) {
-      types[i] = plan->parstate ? plan->parstate->param_types[i]
-                                : SPI_getargtypeid(plan->plan, i);
-    }
-
-    for (int i = 0; i < nparams; i++) {
-      JSValue param = JS_GetPropertyUint32(ctx, params, i);
-      bool is_null;
-
-      values[i] = pljs_jsvalue_to_datum(types[i], param, &is_null, ctx, NULL);
-      nulls[i] = is_null ? 'n' : ' ';
-
-      JS_FreeValue(ctx, param);
-    }
-
-    if (JS_GetOpaque(handle, js_prepared_statement_handle_id) != plan) {
-      ereport(ERROR,
-              (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-               errmsg("plan was freed while its parameters were converted")));
-    }
+    pljs_plan_params_to_datums(plan, handle, params, nparams, &values, &nulls,
+                               ctx);
 
     if (plan->parstate) {
       ParamListInfo param_li =
@@ -1924,12 +1939,10 @@ static JSValue pljs_return_next_internal(JSContext *ctx,
     }
 
     bool is_null = false;
-    Datum result = pljs_jsvalue_to_datum(coltype, value, &is_null, ctx, NULL);
+    Datum result = pljs_jsvalue_to_datum_free(coltype, value, &is_null, ctx);
 
     tuplestore_putvalues(retstate->tuple_store_state, retstate->tuple_desc,
                          &result, &is_null);
-
-    JS_FreeValue(ctx, value);
   }
   return JS_UNDEFINED;
 }
@@ -2060,7 +2073,12 @@ static JSValue pljs_return_next(JSContext *ctx, JSValueConst this_val, int argc,
 static pljs_storage *pljs_window_call_storage(JSContext *ctx) {
   pljs_storage *storage = pljs_current_storage();
 
-  if (storage == NULL || storage->window_object == NULL) {
+  /*
+   * Or of a call ending with an error from the executor, whose state is not
+   * to be used again; see pljs_throw_fatal_error().  js_throw() throws that.
+   */
+  if (storage == NULL || storage->window_object == NULL ||
+      storage->fatal_error != NULL) {
     js_throw("window object used outside of a window function call", ctx);
     return NULL;
   }
@@ -2073,7 +2091,9 @@ static pljs_storage *pljs_window_call_storage(JSContext *ctx) {
  *
  * For the PG_CATCH of a window object's method.  They re-threw what they
  * caught, and an error that escapes a function QuickJS called unwinds past
- * the interpreter's live frames; see pljs_return_next().
+ * the interpreter's live frames; see pljs_return_next().  Only for a method
+ * that leaves nothing behind when it raises: one that runs the executor ends
+ * the call instead; see pljs_window_get_func_arg().
  *
  * @param ctx #JSContext - Javascript context
  * @param mcontext #MemoryContext - the context to copy the error into
@@ -2295,7 +2315,10 @@ static JSValue pljs_window_get_partition_row_count(JSContext *ctx,
   }
   PG_CATCH();
   {
-    return pljs_window_caught_error(ctx, m_mcontext);
+    /* It reads the rest of the partition; see pljs_window_get_func_arg(). */
+    MemoryContextSwitchTo(m_mcontext);
+
+    return pljs_throw_fatal_error(ctx);
   }
   PG_END_TRY();
 
@@ -2371,7 +2394,13 @@ static JSValue pljs_window_rows_are_peers(JSContext *ctx, JSValueConst this_val,
   }
   PG_CATCH();
   {
-    return pljs_window_caught_error(ctx, m_mcontext);
+    /*
+     * It reads the rows into the partition and runs the ORDER BY's equality
+     * functions; see pljs_window_get_func_arg().
+     */
+    MemoryContextSwitchTo(m_mcontext);
+
+    return pljs_throw_fatal_error(ctx);
   }
   PG_END_TRY();
 
@@ -2473,10 +2502,17 @@ typedef enum pljs_window_arg_kind {
 /**
  * @brief Reads a window function's argument and converts it to JavaScript.
  *
- * The conversion is inside the PG_TRY as well as the read.  Converting a
- * value can raise -- a multidimensional array, a value its type's output
- * function cannot render -- and an error that escapes a function QuickJS
- * called unwinds past the interpreter's live frames; see pljs_return_next().
+ * Reading the argument runs the executor of the query that called the window
+ * function, which evaluates the argument's expression and reads rows into the
+ * partition, and either can call any function.  An error there ends the call;
+ * see pljs_throw_fatal_error().  Only a seek type that is not one is checked
+ * first, so that JavaScript can still catch it.
+ *
+ * Converting the value can raise too -- a multidimensional array, a value its
+ * type's output function cannot render -- and an error that escapes a
+ * function QuickJS called unwinds past the interpreter's live frames; see
+ * pljs_return_next().  That one leaves nothing behind, and JavaScript can
+ * catch it.
  *
  * @param ctx #JSContext - Javascript context
  * @param storage #pljs_storage - the window function call's storage
@@ -2495,12 +2531,18 @@ static JSValue pljs_window_get_func_arg(JSContext *ctx, pljs_storage *storage,
   WindowObject winobj = storage->window_object;
   MemoryContext m_mcontext = CurrentMemoryContext;
   JSValue ret = JS_UNDEFINED;
+  bool isnull = false, isout = false;
+  Datum res = (Datum)0;
+
+  /* The message PostgreSQL raises for it. */
+  if (kind != PLJS_WINDOW_ARG_CURRENT && seektype != WINDOW_SEEK_CURRENT &&
+      seektype != WINDOW_SEEK_HEAD && seektype != WINDOW_SEEK_TAIL) {
+    return js_throw(psprintf("unrecognized window seek type: %d", seektype),
+                    ctx);
+  }
 
   PG_TRY();
   {
-    bool isnull = false, isout = false;
-    Datum res;
-
     switch (kind) {
     case PLJS_WINDOW_ARG_IN_PARTITION:
       res = WinGetFuncArgInPartition(winobj, argno, relpos, seektype, set_mark,
@@ -2514,12 +2556,24 @@ static JSValue pljs_window_get_func_arg(JSContext *ctx, pljs_storage *storage,
       res = WinGetFuncArgCurrent(winobj, argno, &isnull);
       break;
     }
+  }
+  PG_CATCH();
+  {
+    MemoryContextSwitchTo(m_mcontext);
 
-    /* Return undefined to tell it's out of the partition or frame. */
-    if (!isout) {
-      ret = pljs_datum_to_jsvalue(pljs_window_arg_type(storage, argno), res,
-                                  isnull, true, ctx);
-    }
+    return pljs_throw_fatal_error(ctx);
+  }
+  PG_END_TRY();
+
+  /* Return undefined to tell it's out of the partition or frame. */
+  if (isout) {
+    return JS_UNDEFINED;
+  }
+
+  PG_TRY();
+  {
+    ret = pljs_datum_to_jsvalue(pljs_window_arg_type(storage, argno), res,
+                                isnull, true, ctx);
   }
   PG_CATCH();
   {

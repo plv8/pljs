@@ -1,6 +1,7 @@
 #include "postgres.h"
 
 #include "catalog/pg_type_d.h"
+#include "common/hashfn.h"
 #include "executor/spi.h"
 #include "fmgr.h"
 #include "funcapi.h"
@@ -42,6 +43,11 @@
 
 // Helper functions that should really exist as part of quickjs.
 static JSClassID JS_CLASS_OBJECT = 1;
+#if JSONB_DIRECT_CONVERSION
+static JSClassID JS_CLASS_NUMBER = 4;
+static JSClassID JS_CLASS_STRING = 5;
+static JSClassID JS_CLASS_BOOLEAN = 6;
+#endif
 static JSClassID JS_CLASS_DATE = 10;
 static JSClassID JS_CLASS_ARRAY_BUFFER = 19;
 static JSClassID JS_CLASS_SHARED_ARRAY_BUFFER = 20;
@@ -135,6 +141,9 @@ static Datum pljs_string_to_datum_via_input(Oid typid, JSValueConst val,
 static Datum pljs_jsvalue_to_datum_typmod(Oid typid, int32 typmod, JSValue val,
                                           bool *is_null, JSContext *ctx,
                                           FunctionCallInfo fcinfo);
+static Datum pljs_jsvalue_to_datum_typmod_free(Oid typid, int32 typmod,
+                                               JSValue val, bool *is_null,
+                                               JSContext *ctx);
 struct pljs_type_io;
 static Datum pljs_jsvalue_to_datum_via_io(struct pljs_type_io *io,
                                           JSValueConst val, int32 typmod,
@@ -157,7 +166,6 @@ static Datum pljs_jsvalue_to_datum_via_io(struct pljs_type_io *io,
  */
 typedef struct pljs_type_io {
   Oid typid;
-  struct pljs_type_io *next;
 
   /* The function's cache context, which owns everything below. */
   MemoryContext mcxt;
@@ -225,11 +233,33 @@ typedef struct pljs_type_io {
  * A pljs function's type cache, kept in its FmgrInfo's fn_extra; see
  * pljs_type_io_enter().
  */
+/* An entry of a pljs_type_io_cache's hash table. */
+typedef struct pljs_type_io_slot {
+  Oid typid; /* the key */
+  char status;
+  pljs_type_io *io;
+} pljs_type_io_slot;
+
+#define SH_PREFIX pljs_type_io_hash
+#define SH_ELEMENT_TYPE pljs_type_io_slot
+#define SH_KEY_TYPE Oid
+#define SH_KEY typid
+#define SH_HASH_KEY(tb, key) murmurhash32(key)
+#define SH_EQUAL(tb, a, b) ((a) == (b))
+#define SH_SCOPE static inline
+#define SH_DECLARE
+#define SH_DEFINE
+#include "lib/simplehash.h"
+
 struct pljs_type_io_cache {
   MemoryContext mcxt;
 
-  /* A function converts a handful of types, so a list does. */
-  pljs_type_io *types;
+  /*
+   * The types converted so far, by OID.  Every value converted looks its type
+   * up here, and a function that reads wide rows converts dozens of types: a
+   * list was scanned from the front for every value.
+   */
+  pljs_type_io_hash_hash *types;
 
   /* See pljs_type_io_scratch_begin(). */
   MemoryContext scratch;
@@ -309,6 +339,8 @@ pljs_type_io_cache *pljs_type_io_enter(FmgrInfo *flinfo) {
 
     cache = MemoryContextAllocZero(mcxt, sizeof(pljs_type_io_cache));
     cache->mcxt = mcxt;
+    cache->types = pljs_type_io_hash_create(mcxt, 16, NULL);
+
     flinfo->fn_extra = cache;
   }
 
@@ -383,19 +415,21 @@ static void pljs_type_io_scratch_end(MemoryContext scratch) {
  */
 static pljs_type_io *pljs_type_io_lookup(Oid typid) {
   pljs_type_io_cache *cache = pljs_type_io_current;
+  pljs_type_io_slot *slot;
   pljs_type_io *entry;
   TypeCacheEntry *typentry;
   char base_category;
   bool is_preferred;
+  bool found;
 
   if (cache == NULL) {
     elog(ERROR, "pljs type conversion outside of a function call");
   }
 
-  for (entry = cache->types; entry != NULL; entry = entry->next) {
-    if (entry->typid == typid) {
-      return entry;
-    }
+  slot = pljs_type_io_hash_lookup(cache->types, typid);
+
+  if (slot != NULL) {
+    return slot->io;
   }
 
   entry = MemoryContextAllocZero(cache->mcxt, sizeof(pljs_type_io));
@@ -443,9 +477,9 @@ static pljs_type_io *pljs_type_io_lookup(Oid typid) {
                             base_category != TYPCATEGORY_ARRAY &&
                             base_category != TYPCATEGORY_COMPOSITE;
 
-  /* Linked only once built, so a build that raised leaves nothing half done. */
-  entry->next = cache->types;
-  cache->types = entry;
+  /* Entered once built, so a build that raised leaves nothing half done. */
+  slot = pljs_type_io_hash_insert(cache->types, typid, &found);
+  slot->io = entry;
 
   return entry;
 }
@@ -591,7 +625,10 @@ Oid pljs_type_base(Oid typid) { return pljs_type_io_lookup(typid)->basetype; }
  *
  * A domain's CHECK constraints can call any function, so converting a value
  * to one can run any SQL, which pljs_return_next() has to know.  That is a
- * domain, or an array or composite type with one inside it.
+ * domain, or an array, composite, range or multirange type with one inside
+ * it.  A range's input function runs its subtype's, which for a domain is
+ * domain_in(); ranges were missed, and a failed CHECK in a range of a domain
+ * left its SPI connection on the stack as any other did.
  *
  * @param typid #Oid - the type
  * @returns @c bool
@@ -606,6 +643,19 @@ bool pljs_type_may_check_domain(Oid typid) {
 
   if (io->category == TYPCATEGORY_ARRAY) {
     return OidIsValid(io->elemtype) && pljs_type_may_check_domain(io->elemtype);
+  }
+
+  if (io->category == TYPCATEGORY_RANGE) {
+    Oid subtype = get_range_subtype(typid);
+
+    /* Not a range, so a multirange: look through it to its range. */
+    if (!OidIsValid(subtype)) {
+      Oid rangetype = get_multirange_range(typid);
+
+      return OidIsValid(rangetype) && pljs_type_may_check_domain(rangetype);
+    }
+
+    return pljs_type_may_check_domain(subtype);
   }
 
   if (io->category == TYPCATEGORY_COMPOSITE) {
@@ -996,23 +1046,42 @@ static const char *pljs_util_spi_status_string(int status) {
  * -1 and leaves the exception pending, for the caller to raise or to hand back
  * to JavaScript.
  *
+ * The length is read as JavaScript reads one, ToLength(): a fraction is cut
+ * off, and a negative length or NaN is 0.  One too long for an int32_t throws
+ * a RangeError.  It was read with ToInt32(), which wrapped a length of 2^31 or
+ * more to a negative number, and every caller took that for a length that had
+ * thrown, with no exception pending to report.
+ *
  * @param obj JSValueConst - Javascript array to check the length of
  * @param ctx #JSContext - Javascript context to execute in
- * @returns @c int32_t length, or -1 if reading it threw
+ * @returns @c int32_t length, or -1 with an exception pending
  */
 int32_t pljs_js_array_length(JSValueConst obj, JSContext *ctx) {
   JSValue length = JS_GetPropertyStr(ctx, obj, "length");
-  int32_t array_length_int;
+  double array_length;
   int failed;
 
   if (JS_IsException(length)) {
     return -1;
   }
 
-  failed = JS_ToInt32(ctx, &array_length_int, length);
+  failed = JS_ToFloat64(ctx, &array_length, length);
   JS_FreeValue(ctx, length);
 
-  return failed < 0 ? -1 : array_length_int;
+  if (failed < 0) {
+    return -1;
+  }
+
+  if (isnan(array_length) || array_length <= 0) {
+    return 0;
+  }
+
+  if (array_length > PG_INT32_MAX) {
+    JS_ThrowRangeError(ctx, "array length %.0f is too large", array_length);
+    return -1;
+  }
+
+  return (int32_t)array_length;
 }
 
 /**
@@ -1554,12 +1623,12 @@ Datum pljs_jsvalue_to_array(pljs_type *type, JSValue val, JSContext *ctx,
      * came back as NULL instead of {1,NULL,4}, as did a date[] holding an
      * invalid Date. With NULL fcinfo the null is reported through the
      * per-element is_null out-parameter, which is what nulls[i] is for.
+     *
+     * JS_GetPropertyUint32() returns an owned reference, which the conversion
+     * releases.
      */
-    values[i] = pljs_jsvalue_to_datum_typmod(type->typid, typmod, elem,
-                                             &nulls[i], ctx, NULL);
-
-    /* JS_GetPropertyUint32() returns an owned reference. */
-    JS_FreeValue(ctx, elem);
+    values[i] = pljs_jsvalue_to_datum_typmod_free(type->typid, typmod, elem,
+                                                  &nulls[i], ctx);
   }
 
   result = construct_md_array(values, nulls, 1, ndims, lbs, type->typid,
@@ -1740,20 +1809,17 @@ Datum *pljs_jsvalue_to_datums(pljs_type *type, JSValue val, bool **is_null,
     // considered `NULL`.  The column's typmod applies: a trigger's NEW, or a
     // composite with a varchar(n) or bit(n) column, is not re-checked by the
     // executor.
-    values[c] = pljs_jsvalue_to_datum_typmod(
+    //
+    // JS_GetPropertyStr() returns an owned reference, so it has to be released
+    // whatever the column's value, and whether or not it converts.  Leaking it
+    // costs one QuickJS reference per column per row, on every composite
+    // return and every return_next() of a row object, which is the hottest
+    // allocation path in the extension.  Because QuickJS runs on the libc
+    // allocator the loss is invisible to pg_backend_memory_contexts; it counts
+    // against pljs.memory_limit and is not returned until the backend exits.
+    values[c] = pljs_jsvalue_to_datum_typmod_free(
         TupleDescAttr(tupdesc, c)->atttypid,
-        TupleDescAttr(tupdesc, c)->atttypmod, o, &(*is_null)[c], ctx, NULL);
-
-    /*
-     * JS_GetPropertyStr() returns an owned reference, so it has to be released
-     * whatever the column's value.  Leaking it costs one QuickJS reference per
-     * column per row, on every composite return and every return_next() of a
-     * row object, which is the hottest allocation path in the extension.
-     * Because QuickJS runs on the libc allocator the loss is invisible to
-     * pg_backend_memory_contexts; it counts against pljs.memory_limit and is
-     * not returned until the backend exits.
-     */
-    JS_FreeValue(ctx, o);
+        TupleDescAttr(tupdesc, c)->atttypmod, o, &(*is_null)[c], ctx);
   }
 
   if (cleanup_tupdesc) {
@@ -1819,11 +1885,9 @@ Datum pljs_jsvalue_to_record(pljs_type *type, JSValue val, bool *is_null,
       continue;
     }
 
-    values[c] = pljs_jsvalue_to_datum_typmod(
+    values[c] = pljs_jsvalue_to_datum_typmod_free(
         TupleDescAttr(tupdesc, c)->atttypid,
-        TupleDescAttr(tupdesc, c)->atttypmod, o, &nulls[c], ctx, NULL);
-
-    JS_FreeValue(ctx, o);
+        TupleDescAttr(tupdesc, c)->atttypmod, o, &nulls[c], ctx);
   }
 
   // Form a Tuple from the values and nulls using the tuple descriptor
@@ -2489,13 +2553,9 @@ static Datum pljs_jsvalue_to_datum_internal(pljs_type_io *io, int32 typmod,
     JSValueConst *argv = &val;
 #if JSONB_DIRECT_CONVERSION
     {
-      /* As JSONOID: JSON.stringify() has no JSON for these. */
-      if (JS_IsFunction(ctx, val) || JS_IsSymbol(val)) {
-        return pljs_null_datum(is_null, fcinfo);
-      }
-
       Jsonb *obj = convert_object(argv[0], ctx);
 
+      /* As JSONOID: JSON.stringify() has no JSON for a function, say. */
       if (obj == NULL) {
         return pljs_null_datum(is_null, fcinfo);
       }
@@ -2814,6 +2874,59 @@ static Datum pljs_jsvalue_to_datum_typmod(Oid typid, int32 typmod, JSValue val,
 Datum pljs_jsvalue_to_datum(Oid rettype, JSValue val, bool *is_null,
                             JSContext *ctx, FunctionCallInfo fcinfo) {
   return pljs_jsvalue_to_datum_typmod(rettype, -1, val, is_null, ctx, fcinfo);
+}
+
+/**
+ * @brief Converts a value of a given typmod, and releases it.
+ *
+ * For a value read from an array or object -- an element, a column, a
+ * parameter -- whose reference the caller owns.  It is released whether the
+ * conversion returns or raises.  Released only after a conversion returned, a
+ * value that could not be converted stayed in the runtime for the life of the
+ * backend, and a return_next() in a loop that caught its errors ran
+ * pljs.memory_limit out; the domain and typmod checks raise for ordinary bad
+ * input.
+ *
+ * @param typid #Oid - the target type
+ * @param typmod @c int32 - the target's typmod, or -1
+ * @param val #JSValue - the value, which is released
+ * @param is_null @c bool* - set to whether the result is null
+ * @param ctx #JSContext - Javascript context to execute in
+ * @returns #Datum of the Postgres value
+ */
+static Datum pljs_jsvalue_to_datum_typmod_free(Oid typid, int32 typmod,
+                                               JSValue val, bool *is_null,
+                                               JSContext *ctx) {
+  Datum ret;
+
+  PG_TRY();
+  {
+    ret = pljs_jsvalue_to_datum_typmod(typid, typmod, val, is_null, ctx, NULL);
+  }
+  PG_FINALLY();
+  {
+    JS_FreeValue(ctx, val);
+  }
+  PG_END_TRY();
+
+  return ret;
+}
+
+/**
+ * @brief Converts a value, and releases it.
+ *
+ * See pljs_jsvalue_to_datum_typmod_free(); this is the form for a target
+ * without a typmod.
+ *
+ * @param rettype #Oid - the target type
+ * @param val #JSValue - the value, which is released
+ * @param is_null @c bool* - set to whether the result is null
+ * @param ctx #JSContext - Javascript context to execute in
+ * @returns #Datum of the Postgres value
+ */
+Datum pljs_jsvalue_to_datum_free(Oid rettype, JSValue val, bool *is_null,
+                                 JSContext *ctx) {
+  return pljs_jsvalue_to_datum_typmod_free(rettype, -1, val, is_null, ctx);
 }
 
 /**
@@ -3150,13 +3263,75 @@ static JsonbValue *jsonb_push(JsonbBuildState *pstate, JsonbIteratorToken seq,
 }
 #endif
 
+/*
+ * A QuickJS value that a jsonb conversion holds a reference to, with an
+ * object's property names while its properties are converted.
+ */
+typedef struct jsonb_held {
+  JSValue value;
+  JSPropertyEnum *tab;
+  uint32_t tab_length;
+  bool entered; // an array or object being converted
+} jsonb_held;
+
+/*
+ * A conversion of a JavaScript value to jsonb.
+ *
+ * It holds a reference to every array and object it is inside, and to the
+ * element or property it is converting in each.  Converting one can raise at
+ * any depth -- a getter or toJSON() that threw, a NUL character, a cycle --
+ * and each level released what it held only once the level below it had
+ * returned, so every level above the error leaked, and return_next() in a
+ * loop that caught its errors ran pljs.memory_limit out.  What the conversion
+ * holds is kept here instead, and convert_object() releases it however the
+ * conversion ends.
+ */
+typedef struct jsonb_build {
+  JSContext *ctx;
+  JsonbBuildState pstate;
+  JSAtom to_json;
+  jsonb_held *held; // the last held last
+  int nheld;
+  int maxheld;
+  JsonbValue *result;
+} jsonb_build;
+
 // Forward declarations of the conversion functions.
-static JsonbValue *jsonb_object_from_object(JSValue object,
-                                            JsonbBuildState *pstate,
-                                            JSContext *ctx, List **path);
-static JsonbValue *jsonb_array_from_array(JSValue array,
-                                          JsonbBuildState *pstate,
-                                          JSContext *ctx, List **path);
+static JsonbValue *jsonb_object_from_object(jsonb_build *build,
+                                            JSValueConst object);
+static JsonbValue *jsonb_array_from_array(jsonb_build *build,
+                                          JSValueConst array);
+
+/**
+ * @brief Holds a reference to a value until jsonb_release().
+ *
+ * @param build #jsonb_build - the conversion
+ * @param value #JSValue - an owned reference, which the conversion takes
+ * @returns @c int - the value's place in build->held, which can move
+ */
+static int jsonb_hold(jsonb_build *build, JSValue value) {
+  if (build->nheld == build->maxheld) {
+    build->maxheld *= 2;
+    build->held =
+        repalloc(build->held, sizeof(jsonb_held) * (Size)build->maxheld);
+  }
+
+  build->held[build->nheld] = (jsonb_held){.value = value};
+
+  return build->nheld++;
+}
+
+/**
+ * @brief Releases the value held last, with its property names.
+ *
+ * @param build #jsonb_build - the conversion
+ */
+static void jsonb_release(jsonb_build *build) {
+  jsonb_held held = build->held[--build->nheld];
+
+  pljs_free_prop_enum(build->ctx, held.tab, held.tab_length);
+  JS_FreeValue(build->ctx, held.value);
+}
 
 /**
  * @brief Fills a #JsonbValue with a string, refusing a NUL character.
@@ -3250,47 +3425,125 @@ static JsonbValue *jsonb_from_value(JSValue value, JsonbBuildState *pstate,
 }
 
 /**
- * @brief Returns what JSON writes for a value: a Date's toJSON(), or the value.
+ * @brief Returns the key that JSON.stringify() passes to toJSON().
  *
- * As JSON.stringify() writes a Date: its toJSON(), which is its toISOString(),
- * or null for an invalid Date.  A Date whose toJSON is not a function is
- * written as an object, as JSON.stringify() writes it; it was called anyway,
- * and raised "not a function".
- *
- * A Date used to be sent to jsonb_object_from_object() like any other object,
- * and since it has no properties of its own it was stored as {}.
- *
- * @param value #JSValueConst - the value
  * @param ctx #JSContext - Javascript context to execute in
+ * @param atom #JSAtom - a property's name, or JS_ATOM_NULL
+ * @param index @c int32_t - an element's index, or -1
+ * @returns #JSValue - the name, the index as a string, or "" for the value
+ * being converted
+ */
+static JSValue jsonb_key(JSContext *ctx, JSAtom atom, int32_t index) {
+  char digits[12];
+
+  if (atom != JS_ATOM_NULL) {
+    return JS_AtomToString(ctx, atom);
+  }
+
+  if (index < 0) {
+    return JS_NewString(ctx, "");
+  }
+
+  snprintf(digits, sizeof(digits), "%d", index);
+
+  return JS_NewString(ctx, digits);
+}
+
+/**
+ * @brief Returns the primitive value of a Number, String or Boolean object.
+ *
+ * As JSON.stringify() writes one: `new String('x')` is "x", where it was
+ * written as its properties, {"0": "x"}.  A Number is read as ToNumber() reads
+ * it and a String as ToString() does, as JSON.stringify() reads them, and a
+ * Boolean the same way as a Number, since QuickJS has no call to read its
+ * value directly.
+ *
+ * @param ctx #JSContext - Javascript context to execute in
+ * @param value #JSValue - an owned reference, which is released
  * @returns #JSValue - an owned reference to what to write
  */
-static JSValue jsonb_json_value(JSValueConst value, JSContext *ctx) {
+static JSValue jsonb_unbox(JSContext *ctx, JSValue value) {
+  JSClassID class_id = JS_GetClassID(value);
+  JSValue primitive;
+
+  if (class_id == JS_CLASS_NUMBER || class_id == JS_CLASS_BOOLEAN) {
+    double number;
+
+    if (JS_ToFloat64(ctx, &number, value) < 0) {
+      primitive = JS_EXCEPTION;
+    } else if (class_id == JS_CLASS_NUMBER) {
+      primitive = JS_NewFloat64(ctx, number);
+    } else {
+      primitive = JS_NewBool(ctx, number != 0 && !isnan(number));
+    }
+  } else if (class_id == JS_CLASS_STRING) {
+    primitive = JS_ToString(ctx, value);
+  } else {
+    return value;
+  }
+
+  JS_FreeValue(ctx, value);
+
+  if (JS_IsException(primitive)) {
+    pljs_ereport_js_exception(ctx);
+  }
+
+  return primitive;
+}
+
+/**
+ * @brief Returns what JSON writes for a value.
+ *
+ * As JSON.stringify() finds it: an object's toJSON(), or a BigInt's, is
+ * called with the value's key, and a Number, String or Boolean object is then
+ * written as its primitive value.  A Date's toJSON() gives its toISOString(),
+ * or null for an invalid Date; a Date whose toJSON is not a function is
+ * written as an object.
+ *
+ * Only a Date's toJSON() was called, so any other object with one -- a class
+ * that writes itself as a string, say -- was written as its own properties,
+ * unlike a json column, which writes what JSON.stringify() does.  A Date used
+ * to be written as its properties too, and since it has none it was stored as
+ * {}.
+ *
+ * @param build #jsonb_build - the conversion
+ * @param value #JSValueConst - the value
+ * @param atom #JSAtom - the value's key in an object, or JS_ATOM_NULL
+ * @param index @c int32_t - its index in an array, or -1
+ * @returns #JSValue - an owned reference to what to write
+ */
+static JSValue jsonb_json_value(jsonb_build *build, JSValueConst value,
+                                JSAtom atom, int32_t index) {
+  JSContext *ctx = build->ctx;
   JSValue to_json;
   JSValue json;
 
-  if (!Is_Date(value)) {
+  if (!JS_IsObject(value) && !JS_IsBigInt(ctx, value)) {
     return JS_DupValue(ctx, value);
   }
 
-  to_json = JS_GetPropertyStr(ctx, value, "toJSON");
+  to_json = JS_GetProperty(ctx, value, build->to_json);
 
   if (JS_IsException(to_json)) {
     pljs_ereport_js_exception(ctx);
   }
 
-  if (!JS_IsFunction(ctx, to_json)) {
-    JS_FreeValue(ctx, to_json);
-    return JS_DupValue(ctx, value);
+  if (JS_IsFunction(ctx, to_json)) {
+    JSValue key = jsonb_key(ctx, atom, index);
+
+    json = JS_Call(ctx, to_json, value, 1, &key);
+    JS_FreeValue(ctx, key);
+  } else {
+    json = JS_DupValue(ctx, value);
   }
 
-  json = JS_Call(ctx, to_json, value, 0, NULL);
   JS_FreeValue(ctx, to_json);
 
   if (JS_IsException(json)) {
     pljs_ereport_js_exception(ctx);
   }
 
-  return json;
+  return jsonb_unbox(ctx, json);
 }
 
 /**
@@ -3316,200 +3569,193 @@ static bool jsonb_has_no_value(JSValueConst value, JSContext *ctx) {
 /**
  * @brief Converts a value to JSONB: an array, an object or a scalar.
  *
- * @param value #JSValue - the value, after jsonb_json_value()
- * @param pstate #JsonbBuildState - the parse state of the `JSONB` object
+ * @param build #jsonb_build - the conversion, which holds the value last
+ * @param value #JSValueConst - the value, after jsonb_json_value()
  * @param type #JsonbIteratorToken - WJB_VALUE or WJB_ELEM, for a scalar
- * @param ctx #JSContext - Javascript context to execute in
- * @param path @c List** - the arrays and objects being converted
  * @returns #JsonbValue of the value
  */
-static JsonbValue *jsonb_from_any(JSValue value, JsonbBuildState *pstate,
-                                  JsonbIteratorToken type, JSContext *ctx,
-                                  List **path) {
-  if (JS_IsArray(ctx, value)) {
-    return jsonb_array_from_array(value, pstate, ctx, path);
+static JsonbValue *jsonb_from_any(jsonb_build *build, JSValueConst value,
+                                  JsonbIteratorToken type) {
+  if (JS_IsArray(build->ctx, value)) {
+    return jsonb_array_from_array(build, value);
   }
 
   if (JS_IsObject(value)) {
-    return jsonb_object_from_object(value, pstate, ctx, path);
+    return jsonb_object_from_object(build, value);
   }
 
-  return jsonb_from_value(value, pstate, type, ctx);
+  return jsonb_from_value(value, &build->pstate, type, build->ctx);
 }
 
 /**
- * @brief Starts converting an array or object, refusing a cycle.
+ * @brief Starts converting the array or object held last, refusing a cycle.
  *
  * JSON.stringify() raises "circular reference" for an object that contains
  * itself, and jsonb recursed into it until the stack overflowed and the
  * backend crashed; so did an object nested deeply enough.
  *
- * @param value #JSValueConst - the array or object
- * @param path @c List** - the arrays and objects being converted
+ * @param build #jsonb_build - the conversion
+ * @returns @c int - the array's or object's place in build->held
  */
-static void jsonb_enter(JSValueConst value, List **path) {
-  void *ptr = JS_VALUE_GET_PTR(value);
+static int jsonb_enter(jsonb_build *build) {
+  int entering = build->nheld - 1;
+  void *ptr = JS_VALUE_GET_PTR(build->held[entering].value);
 
   check_stack_depth();
 
-  if (list_member_ptr(*path, ptr)) {
-    ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-                    errmsg("cannot convert a circular structure to jsonb")));
+  for (int i = 0; i < entering; i++) {
+    if (build->held[i].entered &&
+        JS_VALUE_GET_PTR(build->held[i].value) == ptr) {
+      ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                      errmsg("cannot convert a circular structure to jsonb")));
+    }
   }
 
-  *path = lappend(*path, ptr);
+  build->held[entering].entered = true;
+
+  return entering;
+}
+
+/**
+ * @brief Reads an element of an array or a property of an object, and holds
+ * what JSON writes for it.
+ *
+ * @param build #jsonb_build - the conversion
+ * @param holder #JSValueConst - the array or object
+ * @param atom #JSAtom - the property's name, or JS_ATOM_NULL for an element
+ * @param index @c int32_t - the element's index, or -1 for a property
+ * @returns #JSValue - what to write, which the conversion holds last
+ */
+static JSValue jsonb_member_json(jsonb_build *build, JSValueConst holder,
+                                 JSAtom atom, int32_t index) {
+  JSContext *ctx = build->ctx;
+  JSValue member = atom != JS_ATOM_NULL
+                       ? JS_GetProperty(ctx, holder, atom)
+                       : JS_GetPropertyUint32(ctx, holder, index);
+  JSValue json;
+
+  /*
+   * A getter that threw.  Its JS_EXCEPTION went on to be stored as an empty
+   * string.
+   */
+  if (JS_IsException(member)) {
+    pljs_ereport_js_exception(ctx);
+  }
+
+  jsonb_hold(build, member);
+  json = jsonb_json_value(build, member, atom, index);
+  jsonb_release(build);
+
+  jsonb_hold(build, json);
+
+  return json;
 }
 
 /**
  * @brief Converts a #JSValue `Array` to a #JsonbValue array.
  *
- * @param array #JSValue - `Array` to convert
- * @param pstate #JsonbBuildState - the parse state of the `JSONB` object
- * @param ctx #JSContext - Javascript context to execute in
- * @param path @c List** - the arrays and objects being converted
+ * @param build #jsonb_build - the conversion, which holds the array last
+ * @param array #JSValueConst - `Array` to convert
  * @returns #JsonbValue of the `JSONB` array
  */
-static JsonbValue *jsonb_array_from_array(JSValue array,
-                                          JsonbBuildState *pstate,
-                                          JSContext *ctx, List **path) {
-  jsonb_enter(array, path);
+static JsonbValue *jsonb_array_from_array(jsonb_build *build,
+                                          JSValueConst array) {
+  JSContext *ctx = build->ctx;
+  int32_t array_length;
+
+  jsonb_enter(build);
 
   // Push the beginning of the array into the parse state.
-  JsonbValue *value = jsonb_push(pstate, WJB_BEGIN_ARRAY, NULL);
+  jsonb_push(&build->pstate, WJB_BEGIN_ARRAY, NULL);
 
   // Get the length of the `Array`.
-  int32_t array_length = pljs_js_array_length(array, ctx);
+  array_length = pljs_js_array_length(array, ctx);
 
   if (array_length < 0) {
     pljs_ereport_js_exception(ctx);
   }
 
   // Iterate through the `Array`.
-  for (int i = 0; i < array_length; i++) {
-    // Get the current element.
-    JSValue elem = JS_GetPropertyUint32(ctx, array, i);
-
-    if (JS_IsException(elem)) {
-      pljs_ereport_js_exception(ctx);
-    }
-
-    JSValue json = jsonb_json_value(elem, ctx);
-
-    JS_FreeValue(ctx, elem);
+  for (int32_t i = 0; i < array_length; i++) {
+    JSValue json = jsonb_member_json(build, array, JS_ATOM_NULL, i);
 
     if (jsonb_has_no_value(json, ctx)) {
-      value = jsonb_from_value(JS_NULL, pstate, WJB_ELEM, ctx);
+      jsonb_from_value(JS_NULL, &build->pstate, WJB_ELEM, ctx);
     } else {
-      value = jsonb_from_any(json, pstate, WJB_ELEM, ctx, path);
+      jsonb_from_any(build, json, WJB_ELEM);
     }
 
-    JS_FreeValue(ctx, json);
+    jsonb_release(build);
   }
 
   // Set the value to the end of the array.
-  value = jsonb_push(pstate, WJB_END_ARRAY, NULL);
-
-  *path = list_delete_last(*path);
-
-  return value;
+  return jsonb_push(&build->pstate, WJB_END_ARRAY, NULL);
 }
 
 /**
  * @brief Converts a #JSValue `Object` to a #JsonbValue object.
  *
- * @param object #JSValue - `Object` to convert
- * @param pstate #JsonbBuildState - the parse state of the `JSONB` object
- * @param ctx #JSContext - Javascript context to execute in
- * @param path @c List** - the arrays and objects being converted
+ * @param build #jsonb_build - the conversion, which holds the object last
+ * @param object #JSValueConst - `Object` to convert
  * @returns #JsonbValue of the `JSONB` object
  */
-static JsonbValue *jsonb_object_from_object(JSValue object,
-                                            JsonbBuildState *pstate,
-                                            JSContext *ctx, List **path) {
-  jsonb_enter(object, path);
+static JsonbValue *jsonb_object_from_object(jsonb_build *build,
+                                            JSValueConst object) {
+  JSContext *ctx = build->ctx;
+  int held = jsonb_enter(build);
+  JSPropertyEnum *tab = NULL;
+  uint32_t tab_length = 0;
 
-  // Push the beginning of the object intp the parse state.
-  JsonbValue *value = jsonb_push(pstate, WJB_BEGIN_OBJECT, NULL);
-  uint32_t object_keys_length = 0;
-  JSPropertyEnum *tab;
+  // Push the beginning of the object into the parse state.
+  jsonb_push(&build->pstate, WJB_BEGIN_OBJECT, NULL);
 
   /*
    * Get the keys of the `Object`: its own enumerable string keys, which are
    * what JSON.stringify() writes.  Without JS_GPN_ENUM_ONLY a function's
    * `prototype` was one of them, which is how converting a function never
-   * ended.
+   * ended.  The conversion holds them with the object.
    */
-  if (JS_GetOwnPropertyNames(ctx, &tab, &object_keys_length, object,
+  if (JS_GetOwnPropertyNames(ctx, &tab, &tab_length, object,
                              JS_GPN_STRING_MASK | JS_GPN_ENUM_ONLY) < 0) {
     pljs_ereport_js_exception(ctx);
   }
 
+  build->held[held].tab = tab;
+  build->held[held].tab_length = tab_length;
+
   // Iterate through the `Object` keys.
-  for (uint32_t object_key = 0; object_key < object_keys_length; object_key++) {
-    // Get the value.
-    JSValue o =
-        JS_GetPropertyInternal(ctx, object, tab[object_key].atom, object, 0);
+  for (uint32_t object_key = 0; object_key < tab_length; object_key++) {
+    JSAtom atom = tab[object_key].atom;
+    JSValue json = jsonb_member_json(build, object, atom, -1);
 
-    /*
-     * A getter that threw.  Its JS_EXCEPTION went on to be stored as an empty
-     * string.
-     */
-    if (JS_IsException(o)) {
-      pljs_free_prop_enum(ctx, tab, object_keys_length);
-      pljs_ereport_js_exception(ctx);
+    if (!jsonb_has_no_value(json, ctx)) {
+      /*
+       * The key with its length: a key holding "\u0000" was cut short at it by
+       * strlen().
+       */
+      JSValue key_value = JS_AtomToString(ctx, atom);
+      size_t key_length;
+      const char *key = JS_ToCStringLen(ctx, &key_length, key_value);
+      JsonbValue key_jsonb;
+
+      JS_FreeValue(ctx, key_value);
+
+      if (key == NULL) {
+        pljs_ereport_js_exception(ctx);
+      }
+
+      jsonb_string_value(&key_jsonb, key, key_length, ctx);
+      JS_FreeCString(ctx, key);
+
+      jsonb_push(&build->pstate, WJB_KEY, &key_jsonb);
+      jsonb_from_any(build, json, WJB_VALUE);
     }
 
-    JSValue json = jsonb_json_value(o, ctx);
-
-    JS_FreeValue(ctx, o);
-
-    if (jsonb_has_no_value(json, ctx)) {
-      JS_FreeValue(ctx, json);
-      continue;
-    }
-
-    /*
-     * The key with its length: a key holding "\u0000" was cut short at it by
-     * strlen().
-     */
-    JSValue key_value = JS_AtomToValue(ctx, tab[object_key].atom);
-    size_t key_length;
-    const char *key = JS_ToCStringLen(ctx, &key_length, key_value);
-
-    JS_FreeValue(ctx, key_value);
-
-    if (key == NULL) {
-      JS_FreeValue(ctx, json);
-      pljs_free_prop_enum(ctx, tab, object_keys_length);
-      pljs_ereport_js_exception(ctx);
-    }
-
-    JsonbValue key_jsonb;
-
-    /* It raises; release this level's values first, as for a getter. */
-    if (memchr(key, '\0', key_length) != NULL) {
-      JS_FreeValue(ctx, json);
-      pljs_free_prop_enum(ctx, tab, object_keys_length);
-    }
-
-    jsonb_string_value(&key_jsonb, key, key_length, ctx);
-    JS_FreeCString(ctx, key);
-
-    value = jsonb_push(pstate, WJB_KEY, &key_jsonb);
-    value = jsonb_from_any(json, pstate, WJB_VALUE, ctx, path);
-
-    // Free up the memory.
-    JS_FreeValue(ctx, json);
+    jsonb_release(build);
   }
 
-  pljs_free_prop_enum(ctx, tab, object_keys_length);
-
   // Push that we are at the end of an object.
-  value = jsonb_push(pstate, WJB_END_OBJECT, NULL);
-
-  *path = list_delete_last(*path);
-
-  return value;
+  return jsonb_push(&build->pstate, WJB_END_OBJECT, NULL);
 }
 
 /**
@@ -3524,37 +3770,66 @@ static Jsonb *convert_object(JSValue object, JSContext *ctx) {
   // Create a new memory context for conversion.
   MemoryContext oldcontext = CurrentMemoryContext;
   MemoryContext conversion_context;
+  jsonb_build *build;
+  Jsonb *ret;
+
   conversion_context = AllocSetContextCreate(
       CurrentMemoryContext, "JSONB Conversion Context", ALLOCSET_SMALL_SIZES);
 
   MemoryContextSwitchTo(conversion_context);
 
-  JsonbBuildState parse_state = {0};
-  JsonbValue *value = NULL;
-  List *path = NIL;
-  JSValue json = jsonb_json_value(object, ctx);
+  /* Not on the stack: the PG_CATCH reads what the conversion holds. */
+  build = palloc0(sizeof(jsonb_build));
+  build->ctx = ctx;
+  build->to_json = JS_NewAtom(ctx, "toJSON");
+  build->maxheld = 16;
+  build->held = palloc(sizeof(jsonb_held) * build->maxheld);
 
-  // Check the type and get its value.
-  if (jsonb_has_no_value(json, ctx)) {
-    value = NULL;
-  } else if (JS_IsArray(ctx, json)) {
-    value = jsonb_array_from_array(json, &parse_state, ctx, &path);
-  } else if (JS_IsObject(json)) {
-    value = jsonb_object_from_object(json, &parse_state, ctx, &path);
-  } else {
-    jsonb_push(&parse_state, WJB_BEGIN_ARRAY, NULL);
-    jsonb_from_value(json, &parse_state, WJB_ELEM, ctx);
-    value = jsonb_push(&parse_state, WJB_END_ARRAY, NULL);
-    value->val.array.rawScalar = true;
+  PG_TRY();
+  {
+    JSValue json = jsonb_json_value(build, object, JS_ATOM_NULL, -1);
+
+    jsonb_hold(build, json);
+
+    // Check the type and get its value.
+    if (jsonb_has_no_value(json, ctx)) {
+      build->result = NULL;
+    } else if (JS_IsArray(ctx, json)) {
+      build->result = jsonb_array_from_array(build, json);
+    } else if (JS_IsObject(json)) {
+      build->result = jsonb_object_from_object(build, json);
+    } else {
+      jsonb_push(&build->pstate, WJB_BEGIN_ARRAY, NULL);
+      jsonb_from_value(json, &build->pstate, WJB_ELEM, ctx);
+      build->result = jsonb_push(&build->pstate, WJB_END_ARRAY, NULL);
+      build->result->val.array.rawScalar = true;
+    }
+
+    jsonb_release(build);
   }
+  PG_CATCH();
+  {
+    /* What every level the error unwound through held. */
+    while (build->nheld > 0) {
+      jsonb_release(build);
+    }
 
-  JS_FreeValue(ctx, json);
+    JS_FreeAtom(ctx, build->to_json);
+
+    MemoryContextSwitchTo(oldcontext);
+    MemoryContextDelete(conversion_context);
+
+    PG_RE_THROW();
+  }
+  PG_END_TRY();
+
+  JS_FreeAtom(ctx, build->to_json);
 
   // Switch back to our old #MemoryContext.
   MemoryContextSwitchTo(oldcontext);
 
   // Create the #Jsonb object to return.
-  Jsonb *ret = value != NULL ? JsonbValueToJsonb(value) : NULL;
+  ret = build->result != NULL ? JsonbValueToJsonb(build->result) : NULL;
 
   // Delete the conversion #MemoryContext.
   MemoryContextDelete(conversion_context);
