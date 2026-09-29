@@ -190,8 +190,7 @@ CREATE FUNCTION cuc_row_ambiguous() RETURNS TABLE (a int4) LANGUAGE pljs AS $$
   return [{ x: 1, y: 2 }];
 $$;
 SELECT * FROM cuc_row_ambiguous();
-ERROR:  returned row: object does not identify a value for the single result column (give an object with one property, or the bare value)
-DETAIL:  could not convert a JavaScript value
+ERROR:  returned row: object does not identify a value for the result column "a" (property names are case sensitive; a single-column set also accepts the bare value)
 -- A json column still takes the object as its value.
 CREATE FUNCTION cuc_json_rows() RETURNS TABLE (j jsonb) LANGUAGE pljs AS $$
   return [{ j: 1 }, { x: 2 }];

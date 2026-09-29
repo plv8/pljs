@@ -95,7 +95,39 @@ DO $$
   }
 $$ LANGUAGE pljs;
 
+-- A seek before the mark raises before anything is evaluated, and leaves
+-- nothing behind: JavaScript can catch it, as it can from set_mark_position().
+CREATE FUNCTION wee_before_mark(v int4) RETURNS text WINDOW LANGUAGE pljs AS $$
+  const w = pljs.get_window_object();
+
+  w.get_func_arg_in_partition(0, 1, w.SEEK_HEAD, true);
+
+  try {
+    w.get_func_arg_in_partition(0, 0, w.SEEK_HEAD, false);
+    return 'not raised';
+  } catch (e) {
+    return 'caught: ' + e.message;
+  }
+$$;
+
+SELECT wee_before_mark(i) OVER () FROM generate_series(1, 2) AS i;
+
+-- So does a position outside of the window, which rows_are_peers() raises for
+-- itself.
+CREATE FUNCTION wee_peers_out(v int4) RETURNS text WINDOW LANGUAGE pljs AS $$
+  const w = pljs.get_window_object();
+
+  try {
+    w.rows_are_peers(0, 100);
+    return 'not raised';
+  } catch (e) {
+    return 'caught: ' + e.message;
+  }
+$$;
+
+SELECT wee_peers_out(i) OVER (ORDER BY i) FROM generate_series(1, 2) AS i;
+
 SELECT 1 AS still_connected;
 
 DROP FUNCTION wee_check(int4), wee_sum(int4), wee_count(int4), wee_outer(),
-  wee_seek(int4);
+  wee_seek(int4), wee_before_mark(int4), wee_peers_out(int4);

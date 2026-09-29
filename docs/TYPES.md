@@ -44,6 +44,9 @@ CREATE FUNCTION shout(m mood) RETURNS text LANGUAGE pljs AS $$
 $$;
 ```
 
+A `void` value, such as the column of `SELECT pg_sleep(0) AS v`, has nothing
+to convert and arrives as `undefined`.
+
 Because the type parses the value on the way back, returning something it does
 not accept raises rather than storing a corrupted value:
 
@@ -111,7 +114,19 @@ A value is written to `json` and `jsonb` as `JSON.stringify()` writes it:
 - `NaN` and the infinities are `null`;
 - a `Date` is written through its `toJSON()`, as an ISO 8601 string, or
   `null` for an invalid `Date`;
+- a `BigInt`, or a `BigInt` object, raises, as `JSON.stringify()` throws for
+  one, unless `BigInt.prototype.toJSON` is defined;
 - only an object's own enumerable properties are written.
+
+Every `int8` reaches JavaScript as a `BigInt`, so a row read with
+`pljs.execute()` cannot be returned as `jsonb` as it is if it has an `int8`
+column. Convert the value, with `Number()` or `String()`, or cast the column in
+the query. `jsonb` used to store a `BigInt` as a string, `"10"`, and a `BigInt`
+object as `{}`, where `json` raised. For `jsonb` the error is "cannot convert a
+BigInt to jsonb", with SQLSTATE `22023` (`invalid_parameter_value`). `json` is
+written by `JSON.stringify()` itself, and raises what it throws, "Do not know
+how to serialize a BigInt", with SQLSTATE `XX000` as any other JavaScript
+error.
 
 An object that contains itself raises "cannot convert a circular structure to
 jsonb", and a string or a key holding `"\u0000"` cannot be stored in `jsonb`,

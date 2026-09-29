@@ -115,8 +115,74 @@ SELECT * FROM scd_ints();
  2 | 20
 (2 rows)
 
+-- 6) A row type altered while its set is being returned.  Its rows were built
+-- with the row type as the catalog had it then, and read as the row type the
+-- call began with: a column altered from text to bigint was read as text,
+-- and the backend could crash.  The two have to match, as they do for
+-- PL/pgSQL.
+CREATE TYPE scd_altered AS (a int4, b text);
+CREATE DOMAIN scd_daltered AS scd_altered CHECK ((VALUE).a > 0);
+CREATE FUNCTION scd_altered_rows() RETURNS SETOF scd_daltered
+LANGUAGE pljs AS $$
+  pljs.return_next({a: 1, b: 'one'});
+  pljs.execute('ALTER TYPE scd_altered ALTER ATTRIBUTE b TYPE int8');
+  pljs.return_next({a: 2, b: 20});
+$$;
+-- The detail's wording differs between versions of PostgreSQL.
+\set VERBOSITY terse
+SELECT * FROM scd_altered_rows();
+ERROR:  returned record type does not match expected record type
+\set VERBOSITY default
+SELECT 1 AS still_connected;
+ still_connected 
+-----------------
+               1
+(1 row)
+
+-- A table's row type with a column added with a default.  The typcache marks
+-- that column as having a missing value, which needs a conversion one way
+-- between the two row types and not the other, and the conversion needed was
+-- taken to be the other's: it was not there, and the backend crashed.
+CREATE TABLE scd_table (a int4, b text);
+ALTER TABLE scd_table ADD COLUMN c int4 DEFAULT 5;
+CREATE DOMAIN scd_dtable AS scd_table CHECK ((VALUE).a > 0);
+CREATE FUNCTION scd_table_rows() RETURNS SETOF scd_dtable LANGUAGE pljs AS $$
+  pljs.return_next({a: 1, b: 'one', c: 2});
+  return [{a: 3, b: 'three', c: 4}];
+$$;
+SELECT * FROM scd_table_rows();
+ a |   b   | c 
+---+-------+---
+ 1 | one   | 2
+ 3 | three | 4
+(2 rows)
+
+-- 7) Each column of a row is read once.  A row was read to check that it had
+-- every column, and again to convert it, which ran a Proxy's get trap twice
+-- for each.
+CREATE FUNCTION scd_reads() RETURNS SETOF scd_dpair LANGUAGE pljs AS $$
+  let reads = 0;
+
+  pljs.return_next(new Proxy({a: 1, b: 'one'}, {
+    get(target, key) {
+      reads++;
+      return Reflect.get(target, key);
+    }
+  }));
+  pljs.return_next({a: 2, b: reads + ' reads'});
+$$;
+SELECT * FROM scd_reads();
+ a |    b    
+---+---------
+ 1 | one
+ 2 | 2 reads
+(2 rows)
+
 DROP FUNCTION scd_returned(), scd_returned_bad(), scd_next(), scd_next_bad(),
   scd_next_missing(), scd_next_null(), scd_returned_null(),
-  scd_returned_null_ok(), scd_single_bad(), scd_ints();
-DROP DOMAIN scd_dpair, scd_nn_pair, scd_dsingle, scd_dints;
-DROP TYPE scd_pair, scd_single, scd_ints;
+  scd_returned_null_ok(), scd_single_bad(), scd_ints(), scd_altered_rows(),
+  scd_table_rows(), scd_reads();
+DROP DOMAIN scd_dpair, scd_nn_pair, scd_dsingle, scd_dints, scd_daltered,
+  scd_dtable;
+DROP TYPE scd_pair, scd_single, scd_ints, scd_altered;
+DROP TABLE scd_table;

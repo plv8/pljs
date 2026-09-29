@@ -49,7 +49,28 @@ DO $$
   }
 $$ LANGUAGE pljs;
 
+-- 5) void has no value.  Its output function writes an empty string, which is
+-- what a void column arrived as once only record was taken for a row.
+DO $$
+  const row = pljs.execute('SELECT pg_sleep(0) AS v, 1 AS w')[0];
+
+  pljs.elog(NOTICE, JSON.stringify(row) + ' ' + ('v' in row) + ' ' +
+            (row.v === undefined));
+$$ LANGUAGE pljs;
+
+-- 6) anyarray, compressed: its element type is read from the header alone.
+CREATE TABLE ptv_wide AS
+  SELECT repeat('x', 500) || g AS x FROM generate_series(1, 1000) AS g;
+ANALYZE ptv_wide;
+DO $$
+  const h = pljs.execute("SELECT histogram_bounds AS h FROM pg_stats " +
+                         "WHERE tablename = 'ptv_wide' AND attname = 'x'")[0].h;
+
+  pljs.elog(NOTICE, Array.isArray(h) + ' ' + h.length + ' ' + h[0].length);
+$$ LANGUAGE pljs;
+
 SELECT 1 AS still_connected;
 
+DROP TABLE ptv_wide;
 DROP TABLE ptv_stats;
 DROP FUNCTION ptv_records(record[]);

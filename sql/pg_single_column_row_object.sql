@@ -30,20 +30,132 @@ $$ LANGUAGE pljs;
 
 SELECT t FROM sc_text();
 
--- Resolution is by arity, not by name, and that is not a shortcut: a
--- single-column RETURNS TABLE collapses to a scalar return type, so the
--- descriptor carries no column name to match against. A one-property object is
--- unambiguous regardless, which is what makes it safe to accept.
---
--- An object with several properties therefore cannot be resolved, and saying so
--- is the point -- that is the case that used to store 0.
-\set VERBOSITY terse
+-- A single-column RETURNS TABLE collapses to a scalar return type, so the
+-- descriptor carries no column name to match against, but the function names
+-- its column, and a row object is read by that name, as a composite set's is.
+-- It was resolved by arity alone, so an object with the column and anything
+-- else was refused.
 CREATE FUNCTION sc_extra() RETURNS TABLE(a int) AS $$
   pljs.return_next({ a: 7, ignored: 'x' });
 $$ LANGUAGE pljs;
 
 SELECT a FROM sc_extra();
+
+-- An object with several properties, none of them the column, cannot be
+-- resolved, and saying so is the point -- that is the case that used to store
+-- 0.
+\set VERBOSITY terse
+CREATE FUNCTION sc_extra_unnamed() RETURNS TABLE(a int) AS $$
+  pljs.return_next({ b: 7, ignored: 'x' });
+$$ LANGUAGE pljs;
+
+SELECT a FROM sc_extra_unnamed();
 \set VERBOSITY default
+
+-- With the SQLSTATE a set of several columns gives the same mistake.  It was
+-- thrown to JavaScript, and came out as XX000.
+DO $$
+BEGIN
+  PERFORM * FROM sc_extra_unnamed();
+EXCEPTION WHEN datatype_mismatch THEN
+  RAISE NOTICE 'datatype_mismatch';
+END $$;
+
+-- A method named as the column is not its value, and no other property is
+-- either: the column's name decides.  A class instance's method was taken for
+-- the column, and its source stored as text, and NaN as a float8; and then
+-- its one other property was, without a word.
+\set VERBOSITY terse
+CREATE FUNCTION sc_method_text() RETURNS TABLE(value text) AS $$
+  class Holder {
+    constructor() { this.x = 'hello'; }
+    value() { return 1; }
+  }
+  pljs.return_next(new Holder());
+$$ LANGUAGE pljs;
+
+SELECT value FROM sc_method_text();
+
+CREATE FUNCTION sc_method_float() RETURNS TABLE(value float8) AS $$
+  class Holder {
+    constructor() { this.v = 2.5; }
+    value() { return 1; }
+  }
+  return [new Holder()];
+$$ LANGUAGE pljs;
+
+SELECT value FROM sc_method_float();
+\set VERBOSITY default
+
+-- An instance of a class that converts itself is a value.  Only an object
+-- whose one property was its own toString() or valueOf() was one, and the
+-- instance's one field was stored in its place.
+CREATE FUNCTION sc_converts_by_class() RETURNS SETOF numeric AS $$
+  class Money {
+    constructor(cents) { this.cents = cents; }
+    valueOf() { return this.cents / 100; }
+  }
+  pljs.return_next(new Money(1234));
+$$ LANGUAGE pljs;
+
+SELECT * FROM sc_converts_by_class();
+
+-- What tells an object converts itself is not the global Symbol, which any
+-- function can replace, and not what every object inherits, whatever that
+-- has been made.  One function that replaced Symbol had every one-property
+-- row object of every function fail, and a toPrimitive defined for every
+-- object made every one convert itself.
+CREATE FUNCTION sc_replaced_symbol() RETURNS SETOF int4 AS $$
+  const saved = globalThis.Symbol;
+  const primitive = Symbol.toPrimitive;
+
+  globalThis.Symbol = undefined;
+
+  try {
+    pljs.return_next({b: 6});
+  } finally {
+    globalThis.Symbol = saved;
+  }
+
+  Object.prototype[primitive] = function() { return 99; };
+
+  try {
+    pljs.return_next({b: 8});
+  } finally {
+    delete Object.prototype[primitive];
+  }
+$$ LANGUAGE pljs;
+
+SELECT * FROM sc_replaced_symbol();
+
+-- A getter of the row's class is the column, as it is for a composite set.
+-- Only an own, enumerable property was read, and the instance's one property
+-- was stored in its place without a word.
+CREATE FUNCTION sc_getter() RETURNS TABLE(total int) AS $$
+  class Order {
+    constructor(qty) { this.qty = qty; }
+    get total() { return this.qty * 10; }
+  }
+  pljs.return_next(new Order(3));
+$$ LANGUAGE pljs;
+
+SELECT total FROM sc_getter();
+
+-- A function in the column is not a value, and the object is not one that
+-- converts itself: it was converted whole, and "[object Object]" stored.
+\set VERBOSITY terse
+CREATE FUNCTION sc_function_column() RETURNS TABLE(a text) AS $$
+  pljs.return_next({a: () => 5});
+$$ LANGUAGE pljs;
+
+SELECT a FROM sc_function_column();
+\set VERBOSITY default
+
+CREATE FUNCTION sc_converts_itself() RETURNS TABLE(a text) AS $$
+  pljs.return_next({toString() { return 'itself'; }});
+$$ LANGUAGE pljs;
+
+SELECT a FROM sc_converts_itself();
 
 -- A single-attribute *composite* set is different: it goes through the
 -- multi-column path, which does have names, so it resolves by name and ignores
@@ -94,6 +206,10 @@ $$ LANGUAGE pljs;
 
 SELECT a, b FROM sc_two();
 
-DROP FUNCTION sc_int, sc_text, sc_extra, sc_composite, sc_bare, sc_setof, sc_jsonb,
+DROP FUNCTION sc_int, sc_text, sc_extra, sc_extra_unnamed, sc_method_text,
+              sc_method_float, sc_converts_by_class, sc_replaced_symbol,
+              sc_getter,
+              sc_function_column,
+              sc_converts_itself, sc_composite, sc_bare, sc_setof, sc_jsonb,
               sc_date, sc_two;
 DROP TYPE sc_one;

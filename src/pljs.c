@@ -7,6 +7,7 @@
 #include "commands/trigger.h"
 #include "executor/spi.h"
 #include "funcapi.h"
+#include "mb/pg_wchar.h"
 #include "miscadmin.h"
 #include "nodes/parsenodes.h"
 #include "tcop/tcopprot.h"
@@ -39,6 +40,7 @@ static Datum call_srf_function(PG_FUNCTION_ARGS, pljs_context *context,
 static Datum convert_result(FunctionCallInfo fcinfo, pljs_context *context,
                             Oid rettype, JSValue ret);
 
+static void pljs_source_to_utf8(StringInfoData *src);
 static void pljs_build_function_source(StringInfoData *src,
                                        pljs_context *context, bool is_trigger);
 static void call_anonymous_function(const char *, JSContext *);
@@ -49,6 +51,10 @@ static int interrupt_handler(JSRuntime *rt, void *opaque);
 static void setup_storage(pljs_storage *storage, pljs_func *function,
                           FunctionCallInfo fcinfo);
 static JSValue js_throw_uncatchable(ErrorData *edata, JSContext *ctx);
+static void pljs_run_with_storage(pljs_func *function, FunctionCallInfo fcinfo,
+                                  bool own_spi, void (*run)(void *), void *arg);
+static void pljs_raise_if_ending(void);
+static bool pljs_argmode_is_input(char argmode);
 
 /** \brief QuickJS Runtime */
 JSRuntime *rt = NULL;
@@ -148,6 +154,15 @@ void _PG_init(void) {
     JS_SetMaxStackSize(rt, js_stack_size);
   }
 
+  /*
+   * Stop JavaScript for a cancel or a termination; see interrupt_handler().
+   * Here, once, rather than before each call: a new backend's pljs.start_proc
+   * and a function's top-level code both run before any call, and ran with no
+   * handler at all, so a statement_timeout never stopped them, and nor did
+   * pg_terminate_backend().
+   */
+  JS_SetInterruptHandler(rt, interrupt_handler, NULL);
+
   // Register runtime JS classes (must happen before any JSContext is created,
   // so every context sees the class; e.g. the prepared-statement handle whose
   // finalizer reclaims otherwise-leaked SPI plans).
@@ -229,6 +244,41 @@ void pljs_guc_init(void) {
  * PostgreSQL error that passed through JavaScript is re-raised under its own
  * SQLSTATE instead of collapsing to XX000.
  */
+/*
+ * Reads a property of a thrown error as a palloc'd string, or NULL if it has
+ * none.  A getter that throws, or a value whose toString() does, is taken for
+ * none, and its exception released: it was left pending in the context, and
+ * kept what it threw alive until the next exception replaced it.
+ */
+static char *dump_error_property(JSContext *ctx, JSValueConst error,
+                                 const char *name) {
+  JSValue value = JS_GetPropertyStr(ctx, error, name);
+  const char *str;
+  char *ret;
+
+  if (JS_IsException(value)) {
+    JS_FreeValue(ctx, JS_GetException(ctx));
+    return NULL;
+  }
+
+  if (JS_IsUndefined(value)) {
+    return NULL;
+  }
+
+  str = JS_ToCString(ctx, value);
+  JS_FreeValue(ctx, value);
+
+  if (str == NULL) {
+    JS_FreeValue(ctx, JS_GetException(ctx));
+    return NULL;
+  }
+
+  ret = pstrdup(str);
+  JS_FreeCString(ctx, str);
+
+  return ret;
+}
+
 static char *dump_error(JSContext *ctx, char **message_out, char **detail_out,
                         char **sqlstate_out) {
   JSValue exception_val, val;
@@ -288,21 +338,11 @@ static char *dump_error(JSContext *ctx, char **message_out, char **detail_out,
      * error (see js_throw_error_data): callers surface it as errdetail so the
      * original explanation survives a nested pljs.execute() re-raise.
      */
-    JSValue detailval = JS_GetPropertyStr(ctx, exception_val, "detail");
+    char *detail = dump_error_property(ctx, exception_val, "detail");
 
-    if (!JS_IsUndefined(detailval)) {
-      const char *detailstr = JS_ToCString(ctx, detailval);
-
-      if (detailstr && detailstr[0]) {
-        *detail_out = pstrdup(detailstr);
-      }
-
-      if (detailstr) {
-        JS_FreeCString(ctx, detailstr);
-      }
+    if (detail && detail[0]) {
+      *detail_out = detail;
     }
-
-    JS_FreeValue(ctx, detailval);
   }
 
   if (sqlstate_out && is_error) {
@@ -312,21 +352,11 @@ static char *dump_error(JSContext *ctx, char **message_out, char **detail_out,
      * Error(...)` from user code -- has no such property and is left for the
      * caller to report as ERRCODE_INTERNAL_ERROR.
      */
-    JSValue sqlstateval = JS_GetPropertyStr(ctx, exception_val, "sqlstate");
+    char *sqlstate = dump_error_property(ctx, exception_val, "sqlstate");
 
-    if (!JS_IsUndefined(sqlstateval)) {
-      const char *sqlstatestr = JS_ToCString(ctx, sqlstateval);
-
-      if (sqlstatestr && strlen(sqlstatestr) == 5) {
-        *sqlstate_out = pstrdup(sqlstatestr);
-      }
-
-      if (sqlstatestr) {
-        JS_FreeCString(ctx, sqlstatestr);
-      }
+    if (sqlstate && strlen(sqlstate) == 5) {
+      *sqlstate_out = sqlstate;
     }
-
-    JS_FreeValue(ctx, sqlstateval);
   }
 
   if (message_out) {
@@ -335,21 +365,11 @@ static char *dump_error(JSContext *ctx, char **message_out, char **detail_out,
      * throw value for non-Error throws or a missing/empty message.
      */
     if (is_error) {
-      JSValue msgval = JS_GetPropertyStr(ctx, exception_val, "message");
+      char *message = dump_error_property(ctx, exception_val, "message");
 
-      if (!JS_IsUndefined(msgval)) {
-        const char *msgstr = JS_ToCString(ctx, msgval);
-
-        if (msgstr && msgstr[0]) {
-          *message_out = pstrdup(msgstr);
-        }
-
-        if (msgstr) {
-          JS_FreeCString(ctx, msgstr);
-        }
+      if (message && message[0]) {
+        *message_out = message;
       }
-
-      JS_FreeValue(ctx, msgval);
     }
 
     if (*message_out == NULL) {
@@ -408,6 +428,7 @@ pg_noreturn static void pljs_ereport_js_error(const char *message,
                                               const char *sqlstate,
                                               const char *fallback) {
   int sqlerrcode = ERRCODE_INTERNAL_ERROR;
+  const char *emessage = (message && message[0]) ? message : fallback;
   const char *edetail = (pg_detail && pg_detail[0]) ? pg_detail : detail;
   ErrorData *fatal_error = pljs_fatal_error();
 
@@ -421,9 +442,22 @@ pg_noreturn static void pljs_ereport_js_error(const char *message,
                                sqlstate[3], sqlstate[4]);
   }
 
-  ereport(ERROR, (errcode(sqlerrcode),
-                  errmsg("%s", (message && message[0]) ? message : fallback),
-                  errdetail("%s", edetail ? edetail : fallback)));
+  /*
+   * What JavaScript wrote is UTF-8, and a message in another database
+   * encoding had every accented letter as the two bytes of its UTF-8.  Never
+   * raising, which would replace the error being reported; see
+   * pljs_utf8_to_server_lossy().
+   */
+  emessage = pljs_utf8_to_server_lossy(emessage, strlen(emessage));
+
+  if (edetail == NULL) {
+    edetail = fallback;
+  }
+
+  edetail = pljs_utf8_to_server_lossy(edetail, strlen(edetail));
+
+  ereport(ERROR, (errcode(sqlerrcode), errmsg("%s", emessage),
+                  errdetail("%s", edetail)));
   pg_unreachable();
 }
 
@@ -441,6 +475,14 @@ pg_noreturn static void pljs_ereport_js_error(const char *message,
 void pljs_ereport_js_exception(JSContext *ctx) {
   char *message = NULL, *pg_detail = NULL, *sqlstate = NULL;
   char *detail = dump_error(ctx, &message, &pg_detail, &sqlstate);
+
+  /*
+   * The exception can be QuickJS's "interrupted", thrown for a pending cancel
+   * or termination -- a statement_timeout while a getter or toString() ran
+   * for a conversion.  Raise the real error, as the call paths do, so it
+   * keeps its SQLSTATE rather than becoming an internal error.
+   */
+  CHECK_FOR_INTERRUPTS();
 
   pljs_ereport_js_error(message, pg_detail, detail, sqlstate,
                         "could not convert a JavaScript value");
@@ -549,10 +591,6 @@ static bool setup_function(FunctionCallInfo fcinfo, HeapTuple proctuple,
     pljs_function->rettype = pg_proc_entry->prorettype;
   }
 
-  // Get the call type class
-  if (fcinfo) {
-    pljs_function->typeclass = get_call_result_type(fcinfo, NULL, NULL);
-  }
   // Get all of the argument information.
   nargs = get_func_arg_info(proctuple, &argtypes, &arguments, &argmodes);
 
@@ -569,19 +607,27 @@ static bool setup_function(FunctionCallInfo fcinfo, HeapTuple proctuple,
       context->arguments[i] = NULL;
     }
 
-    /* Resolve polymorphic types, if this is an actual call context. */
-    if (fcinfo && IsPolymorphicType(argtype)) {
-      argtype = get_fn_expr_argtype(fcinfo->flinfo, i);
-    }
-
-    pljs_function->argtypes[i] = argtype;
-    pljs_function->argmodes[i] = argmode;
-
     // We differentiate input arguments from output only.
-    if (argmode == PROARGMODE_IN || argmode == PROARGMODE_INOUT ||
-        argmode == PROARGMODE_VARIADIC) {
+    if (pljs_argmode_is_input(argmode)) {
+      /*
+       * Resolve polymorphic types, if this is an actual call context.  By the
+       * input argument's place in the call, which has no OUT arguments; see
+       * pljs_resolve_argtype().
+       */
+      if (fcinfo && IsPolymorphicType(argtype)) {
+        argtype = get_fn_expr_argtype(fcinfo->flinfo, inargs);
+      }
+
+      /*
+       * By its place in the call, as a window object's methods ask for one;
+       * see pljs_window_arg_type().  It was kept by its place among all of
+       * the arguments, and an OUT argument before it moved it.
+       */
+      pljs_function->argtypes[inargs] = argtype;
       inargs++;
     }
+
+    pljs_function->argmodes[i] = argmode;
   }
 
   pljs_function->inargs = inargs;
@@ -658,18 +704,68 @@ bool pljs_has_permission_to_execute(const char *signature) {
  * Finds, verifies, and executes a `pljs.start_proc` if one is set.
  * This is executed whenever a new context is created.
  */
+/* What pljs_run_with_storage() runs for setup_start_proc(). */
+typedef struct pljs_start_proc_run {
+  JSContext *ctx;
+  JSValue func;
+} pljs_start_proc_run;
+
+/**
+ * @brief Calls the pljs.start_proc; see setup_start_proc().
+ *
+ * @param arg #pljs_start_proc_run - the context and the function, which is
+ * released
+ */
+static void run_start_proc(void *arg) {
+  pljs_start_proc_run *run = (pljs_start_proc_run *)arg;
+  JSValue ret = JS_Call(run->ctx, run->func, JS_UNDEFINED, 0, NULL);
+
+  if (JS_IsException(ret)) {
+    char *message = NULL, *pg_detail = NULL, *sqlstate = NULL;
+    char *detail = dump_error(run->ctx, &message, &pg_detail, &sqlstate);
+
+    /*
+     * Release the JavaScript side before reporting: the report does not
+     * return, so anything freed after it is never freed at all.
+     */
+    JS_FreeValue(run->ctx, ret);
+    JS_FreeValue(run->ctx, run->func);
+
+    /* Surface a pending cancel/terminate as the real PostgreSQL error. */
+    CHECK_FOR_INTERRUPTS();
+
+    pljs_ereport_js_error(message, pg_detail, detail, sqlstate,
+                          "start proc execution error");
+  }
+
+  /*
+   * The function reference and the call's result both belong to this
+   * function. Neither was released, so every context creation with
+   * pljs.start_proc set leaked both.
+   */
+  JS_FreeValue(run->ctx, ret);
+  JS_FreeValue(run->ctx, run->func);
+}
+
 static void setup_start_proc(JSContext *ctx) {
-  JSValue func = JS_UNDEFINED;
+  pljs_start_proc_run run = {.ctx = ctx, .func = JS_UNDEFINED};
+  volatile Oid funcoid = InvalidOid;
 
   // Get a copy of the current memory context, we will need to switch to it in
   // case of an error.
   MemoryContext memory_context = CurrentMemoryContext;
 
+  /*
+   * A start_proc that cannot be found, or that the user may not run, is
+   * warned of.  Only finding it: compiling it runs any code at the top level
+   * of its source, and an error there -- a statement_timeout included --
+   * was taken for a failure to find it, logged, and forgotten, and the
+   * statement ran on past its timeout.  It raises as running it does.
+   */
   PG_TRY();
   {
     // Check to see if we have permission to execute the startup procedure
     if (pljs_has_permission_to_execute(configuration.start_proc)) {
-      Oid funcoid;
       if (strchr(configuration.start_proc, '(') == NULL) {
         funcoid = DatumGetObjectId(DirectFunctionCall1(
             regprocin, CStringGetDatum(configuration.start_proc)));
@@ -677,8 +773,6 @@ static void setup_start_proc(JSContext *ctx) {
         funcoid = DatumGetObjectId(DirectFunctionCall1(
             regprocedurein, CStringGetDatum(configuration.start_proc)));
       }
-
-      func = pljs_find_js_function(funcoid, ctx);
     }
   }
   PG_CATCH();
@@ -698,56 +792,86 @@ static void setup_start_proc(JSContext *ctx) {
   }
   PG_END_TRY();
 
-  if (JS_IsUndefined(func)) {
+  if (OidIsValid(funcoid)) {
+    run.func = pljs_find_js_function(funcoid, ctx);
+  }
+
+  if (JS_IsUndefined(run.func)) {
     elog(DEBUG3, "javascript function is not found for \"%s\"",
          configuration.start_proc);
-  } else {
-    /*
-     * The start_proc runs with storage of its own, as a DO block does, with
-     * no set to return and no window.  A context is created on the first
-     * call a user makes, which can be a call made from inside another --
-     * pljs.execute() after SET ROLE -- and the start_proc saw that call's
-     * storage: its pljs.return_next() added rows to the other call's set.
-     */
-    pljs_storage storage;
-    pljs_storage *previous_storage = current_storage;
-
-    setup_storage(&storage, NULL, NULL);
-    current_storage = &storage;
-
-    PG_TRY();
-    {
-      JSValue ret = JS_Call(ctx, func, JS_UNDEFINED, 0, NULL);
-
-      if (JS_IsException(ret)) {
-        char *message = NULL, *pg_detail = NULL, *sqlstate = NULL;
-        char *detail = dump_error(ctx, &message, &pg_detail, &sqlstate);
-
-        /*
-         * Release the JavaScript side before reporting: the report does not
-         * return, so anything freed after it is never freed at all.
-         */
-        JS_FreeValue(ctx, ret);
-        JS_FreeValue(ctx, func);
-
-        pljs_ereport_js_error(message, pg_detail, detail, sqlstate,
-                              "start proc execution error");
-      }
-
-      /*
-       * The function reference and the call's result both belong to this
-       * function. Neither was released, so every context creation with
-       * pljs.start_proc set leaked both.
-       */
-      JS_FreeValue(ctx, ret);
-      JS_FreeValue(ctx, func);
-    }
-    PG_FINALLY();
-    {
-      current_storage = previous_storage;
-    }
-    PG_END_TRY();
+    return;
   }
+
+  /*
+   * The start_proc runs with storage of its own, as a DO block does, with no
+   * set to return and no window.  A context is created on the first call a
+   * user makes, which can be a call made from inside another --
+   * pljs.execute() after SET ROLE -- and the start_proc saw that call's
+   * storage: its pljs.return_next() added rows to the other call's set.
+   */
+  pljs_run_with_storage(NULL, NULL, true, run_start_proc, &run);
+}
+
+/**
+ * @brief Creates the running user's JSContext, runs pljs.start_proc in it,
+ * and caches it.
+ *
+ * A start_proc that raises -- one that throws, or times out, whether when it
+ * is called or in code at the top level of its source -- leaves the context
+ * uncached, and it is freed rather than lost: a function that failed because
+ * of its user's start_proc created a context on every call, and kept none.
+ *
+ * @returns #JSContext - the new context
+ */
+static JSContext *pljs_create_context(void) {
+  /* Whose it is, before the start_proc can SET ROLE. */
+  Oid user_id = GetUserId();
+  JSContext *ctx = JS_NewContext(rt);
+
+  if (ctx == NULL) {
+    elog(ERROR, "could not create a JavaScript context");
+  }
+
+  PG_TRY();
+  {
+    // Set up the namespace, globals and functions available inside the
+    // context.
+    pljs_setup_namespace(ctx);
+
+    // Check to see if there is a start_proc, if there is, attempt to apply
+    // it.
+    if (configuration.start_proc != NULL &&
+        strlen(configuration.start_proc) != 0) {
+      setup_start_proc(ctx);
+    }
+
+    /*
+     * Save the context in the cache for this user id.  Inside the PG_TRY: a
+     * start_proc that made a nested call as the same user cached a context of
+     * its own, and adding this one raised, and lost it.
+     */
+    pljs_cache_context_add(user_id, ctx);
+  }
+  PG_CATCH();
+  {
+    JS_FreeContext(ctx);
+    PG_RE_THROW();
+  }
+  PG_END_TRY();
+
+  return ctx;
+}
+
+/**
+ * @brief Whether an argument of a mode is an input argument, and so one of
+ * the call's.
+ *
+ * @param argmode @c char - the argument's mode
+ * @returns @c bool
+ */
+static bool pljs_argmode_is_input(char argmode) {
+  return argmode == PROARGMODE_IN || argmode == PROARGMODE_INOUT ||
+         argmode == PROARGMODE_VARIADIC;
 }
 
 /**
@@ -758,7 +882,8 @@ static void setup_start_proc(JSContext *ctx) {
  *
  * @param fcinfo #FunctionCallInfo - the call in progress, may be NULL
  * @param argtype #Oid - the argument's declared type
- * @param argno @c int - which argument
+ * @param argno @c int - which input argument: its place in the call, which
+ * has no OUT arguments
  * @returns #Oid of the type the datum actually has
  */
 static Oid pljs_resolve_argtype(FunctionCallInfo fcinfo, Oid argtype,
@@ -814,40 +939,38 @@ static JSValueConst *convert_arguments_to_javascript(FunctionCallInfo fcinfo,
 
   PG_TRY();
   {
-    if (WindowObjectIsValid(window_obj)) {
-      for (int i = 0; i < nargs; i++) {
-        bool is_null;
-        Datum arg = WinGetFuncArgCurrent(window_obj, i, &is_null);
+    /*
+     * The input arguments, by their place in the call: a window's, or fcinfo's,
+     * which have no OUT arguments.  They were read, and their polymorphic
+     * types resolved, by their place among all of the arguments, and an OUT
+     * argument before one moved it: f(OUT r int, a anyelement, b anyarray)
+     * took a for an int4[], and read the int 5 it was passed as an array's
+     * address, and a window function read past the end of its arguments.
+     */
+    bool is_window = WindowObjectIsValid(window_obj);
 
-        Oid argtype = pljs_resolve_argtype(fcinfo, argtypes[i], i);
+    for (int i = 0; i < nargs; i++) {
+      Datum arg;
+      bool is_null;
 
-        // Window functions: expand_composite=false (skip composite expansion)
-        argv[i] =
-            pljs_datum_to_jsvalue(argtype, arg, is_null, false, context->ctx);
+      if (!pljs_argmode_is_input(argmodes ? argmodes[i] : PROARGMODE_IN)) {
+        continue;
       }
-    } else {
-      for (int i = 0; i < nargs; i++) {
-        Oid argtype = argtypes[i];
-        char argmode = argmodes ? argmodes[i] : PROARGMODE_IN;
 
-        switch (argmode) {
-        case PROARGMODE_IN:
-        case PROARGMODE_INOUT:
-        case PROARGMODE_VARIADIC:
-          break;
-        default:
-          continue;
-        }
-
-        argtype = pljs_resolve_argtype(fcinfo, argtype, i);
-
-        bool is_null = (fcinfo->args[inargs].isnull == 1);
-        // Regular functions: expand_composite=true (expand composite types)
-        argv[inargs] = pljs_datum_to_jsvalue(
-            argtype, fcinfo->args[inargs].value, is_null, true, context->ctx);
-
-        inargs++;
+      if (is_window) {
+        arg = WinGetFuncArgCurrent(window_obj, inargs, &is_null);
+      } else {
+        arg = fcinfo->args[inargs].value;
+        is_null = fcinfo->args[inargs].isnull;
       }
+
+      // Window functions: expand_composite=false (skip composite expansion),
+      // regular functions: expand_composite=true (expand composite types)
+      argv[inargs] = pljs_datum_to_jsvalue(
+          pljs_resolve_argtype(fcinfo, argtypes[i], inargs), arg, is_null,
+          !is_window, context->ctx);
+
+      inargs++;
     }
   }
   PG_CATCH();
@@ -907,6 +1030,108 @@ static void setup_storage(pljs_storage *storage, pljs_func *function,
 }
 
 /**
+ * @brief Runs JavaScript with storage of its own.
+ *
+ * What every entry point into JavaScript does around it: a call, a DO block,
+ * a pljs.start_proc, and code at the top level of a function's source, which
+ * runs as it is compiled.  The storage is installed; the error the call has to
+ * end with is raised, should the JavaScript run to its end all the same,
+ * since C code can catch the exception that was to end it (see
+ * pljs_throw_fatal_error()); and the storage that was installed before is
+ * restored however it ends.  Each entry point had a copy of these steps, and
+ * the copies had drifted apart.
+ *
+ * @param function #pljs_func - the function being called, or NULL
+ * @param fcinfo #FunctionCallInfo - the call, or NULL
+ * @param run - runs the JavaScript
+ * @param arg - @p run's argument
+ */
+static void pljs_run_with_storage(pljs_func *function, FunctionCallInfo fcinfo,
+                                  bool own_spi, void (*run)(void *),
+                                  void *arg) {
+  pljs_storage storage;
+  pljs_storage *previous_storage = current_storage;
+  volatile bool connected = false;
+
+  setup_storage(&storage, function, fcinfo);
+  current_storage = &storage;
+
+  PG_TRY();
+  {
+    /*
+     * Code with no call of its own -- a function's top-level code, a
+     * start_proc -- gets a connection to SPI of its own, as a call's does, and
+     * its stack is measured from here; see call_function().  It ran on
+     * whatever connection was on top of the stack, a PL/pgSQL loop's
+     * included, where pljs.execute() failed with "improper call to
+     * spi_printtup", and against a stack anchored by some other call.  Atomic:
+     * it cannot commit.
+     */
+    if (own_spi) {
+      /*
+       * Re-anchoring gives QuickJS its whole budget again from here, so the C
+       * stack below has to be checked first: nothing else on the way checks
+       * it when pljs.find_function() compiles a function from inside
+       * JavaScript, and recursion through it re-anchored at every level until
+       * the backend crashed.
+       */
+      check_stack_depth();
+
+      if (SPI_connect() != SPI_OK_CONNECT) {
+        elog(ERROR, "could not connect to spi manager");
+      }
+
+      connected = true;
+      JS_UpdateStackTop(rt);
+    }
+
+    run(arg);
+
+    if (connected) {
+      connected = false;
+      SPI_finish();
+    }
+
+    if (storage.fatal_error != NULL) {
+      ReThrowError(storage.fatal_error);
+    }
+  }
+  PG_FINALLY();
+  {
+    /*
+     * The connection is finished on the way out with an error too.  Only
+     * rolling back a subtransaction begun around this finished it otherwise,
+     * and where none can be begun -- pljs.find_function() compiling a
+     * function in parallel mode, before PostgreSQL 17 -- JavaScript that
+     * caught the error went on with it on top of the SPI stack: the call's
+     * own SPI_finish() finished it in place of the call's connection, and
+     * the transaction ended with "transaction left non-empty SPI stack".
+     * The error is being handled in ErrorContext, which is gone back to.
+     */
+    if (connected) {
+      MemoryContext error_context = CurrentMemoryContext;
+
+      SPI_finish();
+      MemoryContextSwitchTo(error_context);
+    }
+
+    /*
+     * The key of a set's column, kept for the call; see
+     * pljs_single_column_value().  Read through current_storage, which is
+     * this call's still, and not a local the PG_TRY wrote.
+     */
+    if (current_storage->return_state != NULL &&
+        current_storage->return_state->column_atom != JS_ATOM_NULL) {
+      JS_FreeAtomRT(rt, current_storage->return_state->column_atom);
+      current_storage->return_state->column_atom = JS_ATOM_NULL;
+    }
+
+    current_storage = previous_storage;
+  }
+  PG_END_TRY();
+}
+
+/**
  * @brief Call Javascript from PostgreSQL.
  *
  * Calls Javascript in some form from PostgreSQL, returning the result on
@@ -918,8 +1143,11 @@ static void setup_storage(pljs_storage *storage, pljs_func *function,
  * @returns #Datum of the result
  */
 Datum pljs_call_handler(PG_FUNCTION_ARGS) {
-  pljs_type_io_cache *types = pljs_type_io_enter(fcinfo->flinfo);
+  pljs_type_io_cache *types;
   Datum retval;
+
+  pljs_encoding_init();
+  types = pljs_type_io_enter(fcinfo->flinfo);
 
   PG_TRY();
   {
@@ -940,11 +1168,36 @@ Datum pljs_call_handler(PG_FUNCTION_ARGS) {
  * @param fcinfo #FunctionCallInfo - the call
  * @returns #Datum of the result
  */
+/* What pljs_run_with_storage() runs for dispatch_call(). */
+typedef struct pljs_dispatch_run {
+  FunctionCallInfo fcinfo;
+  pljs_context *context;
+  JSValueConst *argv;
+  bool is_trigger;
+  Datum retval;
+} pljs_dispatch_run;
+
+/**
+ * @brief Calls a function, procedure or trigger; see dispatch_call().
+ *
+ * @param arg #pljs_dispatch_run - the call, whose retval is set
+ */
+static void dispatch_run(void *arg) {
+  pljs_dispatch_run *run = (pljs_dispatch_run *)arg;
+
+  if (run->is_trigger) {
+    run->retval = call_trigger(run->fcinfo, run->context);
+  } else if (run->context->function->is_srf) {
+    run->retval = call_srf_function(run->fcinfo, run->context, run->argv);
+  } else {
+    run->retval = call_function(run->fcinfo, run->context, run->argv);
+  }
+}
+
 static Datum dispatch_call(FunctionCallInfo fcinfo) {
   Oid fn_oid = fcinfo->flinfo->fn_oid;
   HeapTuple proctuple;
   JSContext *ctx;
-  Datum retval;
   /* Read in the PG_FINALLY below. */
   JSValueConst *volatile argv = NULL;
   volatile int argc = 0;
@@ -973,22 +1226,7 @@ static Datum dispatch_call(FunctionCallInfo fcinfo) {
     if (entry) {
       ctx = entry->ctx;
     } else {
-      // Create a new execution context.
-      ctx = JS_NewContext(rt);
-
-      // Set up the namespace, globals and functions available inside the
-      // context.
-      pljs_setup_namespace(ctx);
-
-      // Check to see if there is a start_proc, if there is, attempt to apply
-      // it.
-      if (configuration.start_proc != NULL &&
-          strlen(configuration.start_proc) != 0) {
-        setup_start_proc(ctx);
-      }
-
-      // Save the context in the cache for this user id.
-      pljs_cache_context_add(GetUserId(), ctx);
+      ctx = pljs_create_context();
     }
 
     context.ctx = ctx;
@@ -999,15 +1237,20 @@ static Datum dispatch_call(FunctionCallInfo fcinfo) {
     // Compile the function.
     context.js_function = pljs_compile_function(&context, is_trigger);
 
-    // If there was a problem creating the function, we'll just return VOID.
-    if (JS_IsUndefined(context.js_function)) {
-      /*
-       * This early return bypassed the per-branch ReleaseSysCache() below, so a
-       * function whose body failed to compile leaked the pg_proc pin for the
-       * rest of the transaction.
-       */
+    /*
+     * The source evaluates to the function it declares, unless its top-level
+     * code replaced that: `} f = undefined; function z() {`.  That returned
+     * void, a zero Datum not marked NULL, whatever the function's type, and
+     * the caller took it for a pointer to text and crashed the backend.
+     */
+    if (!JS_IsFunction(context.ctx, context.js_function)) {
+      JS_FreeValue(context.ctx, context.js_function);
       ReleaseSysCache(proctuple);
-      PG_RETURN_VOID();
+
+      ereport(ERROR, (errcode(ERRCODE_INVALID_FUNCTION_DEFINITION),
+                      errmsg("the source of function %s does not evaluate to "
+                             "a function",
+                             context.function->proname)));
     }
 
     // Create the cache entry for the function.
@@ -1045,14 +1288,14 @@ static Datum dispatch_call(FunctionCallInfo fcinfo) {
 
   ReleaseSysCache(proctuple);
 
-  pljs_storage storage;
-  pljs_storage *previous_storage = current_storage;
-
-  setup_storage(&storage, context.function, fcinfo);
-  current_storage = &storage;
+  pljs_dispatch_run run = {.fcinfo = fcinfo,
+                           .context = &context,
+                           .argv = argv,
+                           .is_trigger = is_trigger};
 
   /*
-   * The storage MUST be restored even when the call raises.
+   * The storage is restored even when the call raises; see
+   * pljs_run_with_storage().
    *
    * A call that raised used to leave its own storage installed permanently --
    * pointing at this call's fcinfo, its return_state and its execution memory
@@ -1075,33 +1318,17 @@ static Datum dispatch_call(FunctionCallInfo fcinfo) {
    */
   PG_TRY();
   {
-    if (is_trigger) {
-      retval = call_trigger(fcinfo, &context);
-    } else if (context.function->is_srf) {
-      retval = call_srf_function(fcinfo, &context, argv);
-    } else {
-      retval = call_function(fcinfo, &context, argv);
-    }
-
-    /*
-     * A call that has to end with an error, whose exception C code caught on
-     * the way out -- it still ends with it; see pljs_throw_fatal_error().
-     */
-    if (storage.fatal_error != NULL) {
-      ReThrowError(storage.fatal_error);
-    }
+    pljs_run_with_storage(context.function, fcinfo, false, dispatch_run, &run);
   }
   PG_FINALLY();
   {
-    current_storage = previous_storage;
-
     for (int i = 0; i < argc; i++) {
       JS_FreeValue(context.ctx, argv[i]);
     }
   }
   PG_END_TRY();
 
-  return retval;
+  return run.retval;
 }
 
 /**
@@ -1114,7 +1341,10 @@ static Datum dispatch_call(FunctionCallInfo fcinfo) {
  * @returns #Datum containing `VOID`
  */
 Datum pljs_inline_handler(PG_FUNCTION_ARGS) {
-  pljs_type_io_cache *types = pljs_type_io_enter(fcinfo->flinfo);
+  pljs_type_io_cache *types;
+
+  pljs_encoding_init();
+  types = pljs_type_io_enter(fcinfo->flinfo);
 
   PG_TRY();
   {
@@ -1134,6 +1364,23 @@ Datum pljs_inline_handler(PG_FUNCTION_ARGS) {
  *
  * @param fcinfo #FunctionCallInfo - the inline handler's call
  */
+/* What pljs_run_with_storage() runs for run_inline(). */
+typedef struct pljs_inline_run {
+  const char *source;
+  JSContext *ctx;
+} pljs_inline_run;
+
+/**
+ * @brief Runs a DO block's code; see run_inline().
+ *
+ * @param arg #pljs_inline_run - the code and the context to run it in
+ */
+static void inline_run(void *arg) {
+  pljs_inline_run *run = (pljs_inline_run *)arg;
+
+  call_anonymous_function(run->source, run->ctx);
+}
+
 static void run_inline(FunctionCallInfo fcinfo) {
   pljs_context_cache_value *entry = pljs_cache_context_find(GetUserId());
 
@@ -1150,22 +1397,7 @@ static void run_inline(FunctionCallInfo fcinfo) {
   if (entry) {
     ctx = entry->ctx;
   } else {
-    // Create a new execution context.
-    ctx = JS_NewContext(rt);
-
-    // Set up the namespace, globals and functions available inside the
-    // context.
-    pljs_setup_namespace(ctx);
-
-    // Check to see if there is a start_proc, if there is, attempt to apply
-    // it.
-    if (configuration.start_proc != NULL &&
-        strlen(configuration.start_proc) != 0) {
-      setup_start_proc(ctx);
-    }
-
-    // Save the context
-    pljs_cache_context_add(GetUserId(), ctx);
+    ctx = pljs_create_context();
   }
 
   if (SPI_connect_ext(nonatomic ? SPI_OPT_NONATOMIC : 0) != SPI_OK_CONNECT) {
@@ -1178,21 +1410,9 @@ static void run_inline(FunctionCallInfo fcinfo) {
    * pljs.return_next() from a DO block run by pljs.execute() added rows to
    * the set of the function that ran it.
    */
-  pljs_storage storage;
-  pljs_storage *previous_storage = current_storage;
+  pljs_inline_run run = {.source = sourcecode, .ctx = ctx};
 
-  setup_storage(&storage, NULL, fcinfo);
-  current_storage = &storage;
-
-  PG_TRY();
-  {
-    call_anonymous_function(sourcecode, ctx);
-  }
-  PG_FINALLY();
-  {
-    current_storage = previous_storage;
-  }
-  PG_END_TRY();
+  pljs_run_with_storage(NULL, fcinfo, false, inline_run, &run);
 
   SPI_finish();
 }
@@ -1237,6 +1457,8 @@ Datum pljs_call_validator(PG_FUNCTION_ARGS) {
     PG_RETURN_VOID();
   }
 
+  pljs_encoding_init();
+
   /* check_function_bodies = off means "create it, do not compile it". */
   if (!check_function_bodies) {
     PG_RETURN_VOID();
@@ -1250,21 +1472,14 @@ Datum pljs_call_validator(PG_FUNCTION_ARGS) {
 
   is_trigger = ((Form_pg_proc)GETSTRUCT(proctuple))->prorettype == TRIGGEROID;
 
-  ctx = JS_NewContext(rt);
-
-  if (ctx == NULL) {
-    ReleaseSysCache(proctuple);
-    elog(ERROR, "could not create a JavaScript context");
-  }
-
-  context.ctx = ctx;
-
   /*
    * Fills in proname, prosrc and the argument names, which the wrapper needs.
    * Passing NULL fcinfo is the same thing pljs_find_js_function() does.
+   *
+   * Before the context is created: building the source converts it to UTF-8,
+   * which can raise, and the context was lost when it did.
    */
   if (!setup_function(NULL, proctuple, &context)) {
-    JS_FreeContext(ctx);
     ReleaseSysCache(proctuple);
     PG_RETURN_VOID();
   }
@@ -1272,6 +1487,14 @@ Datum pljs_call_validator(PG_FUNCTION_ARGS) {
   pljs_build_function_source(&src, &context, is_trigger);
 
   ReleaseSysCache(proctuple);
+
+  ctx = JS_NewContext(rt);
+
+  if (ctx == NULL) {
+    elog(ERROR, "could not create a JavaScript context");
+  }
+
+  context.ctx = ctx;
 
   JSValue val = JS_Eval(ctx, src.data, strlen(src.data), "<function>",
                         JS_EVAL_FLAG_COMPILE_ONLY);
@@ -1314,6 +1537,27 @@ Datum pljs_call_validator(PG_FUNCTION_ARGS) {
 }
 
 /**
+ * @brief Converts JavaScript source from the database's encoding to UTF-8.
+ *
+ * QuickJS reads its source as UTF-8, and a function's body, its name and its
+ * arguments' names are in the database's encoding.  In a LATIN1 database a
+ * string literal 'é' in a body became U+FFFD, and so did an accented letter
+ * in a name.
+ *
+ * @param src #StringInfoData - the source, replaced by its conversion
+ */
+static void pljs_source_to_utf8(StringInfoData *src) {
+  char *utf8 = pljs_server_to_utf8(src->data, src->len);
+
+  if (utf8 != src->data) {
+    pfree(src->data);
+    src->data = utf8;
+    src->len = strlen(utf8);
+    src->maxlen = src->len + 1;
+  }
+}
+
+/**
  * @brief Compile a javascript function and return a pointer to it.
  *
  * Sets up the arguments and code of a javascript function, compiles
@@ -1350,6 +1594,12 @@ static void pljs_build_function_source(StringInfoData *src,
 
   int inarg = 0;
   for (i = 0; i < context->function->nargs; i++) {
+    /*
+     * Every argument but an OUT one.  A RETURNS TABLE column is a parameter
+     * too, which the call leaves undefined: bodies assign to them, as to
+     * variables of their own, and left out they became globals of the user's
+     * context, or failed in strict mode.
+     */
     if (context->function->argmodes[i] == PROARGMODE_OUT) {
       continue;
     }
@@ -1381,31 +1631,73 @@ static void pljs_build_function_source(StringInfoData *src,
 
   appendStringInfo(src, ") {\n%s\n}\n %s;\n", context->function->prosrc,
                    context->function->proname);
+
+  pljs_source_to_utf8(src);
+}
+
+/**
+ * @brief Compiles a function, running any code at the top level of its source.
+ *
+ * A body can close the function it is wrapped in -- `} code(); function x() {`
+ * -- and the code between runs as the source is compiled, before any call.  It
+ * gets storage of its own, as a pljs.start_proc does, with no set to return
+ * and no window.  It ran with none at all on a function's first call from a
+ * query, where a failed commit of a subtransaction it started crashed the
+ * backend, and with the storage of the call that compiled it on one from
+ * inside another call, where its return_next() added rows to that call's set.
+ *
+ * @param context #pljs_context - the function
+ * @param is_trigger @c bool - whether it is a trigger
+ * @returns #JSValue of the compiled function
+ */
+/* What pljs_run_with_storage() runs for pljs_compile_function(). */
+typedef struct pljs_compile_run {
+  pljs_context *context;
+  StringInfoData src;
+  JSValue val;
+} pljs_compile_run;
+
+/**
+ * @brief Compiles a function's source; see pljs_compile_function().
+ *
+ * @param arg #pljs_compile_run - the function and its source, which is freed;
+ * its val is set
+ */
+static void compile_run(void *arg) {
+  pljs_compile_run *run = (pljs_compile_run *)arg;
+  JSContext *ctx = run->context->ctx;
+  JSValue val =
+      JS_Eval(ctx, run->src.data, strlen(run->src.data), "<function>", 0);
+
+  pfree(run->src.data);
+
+  if (JS_IsException(val)) {
+    char *message = NULL, *pg_detail = NULL, *sqlstate = NULL;
+    char *detail = dump_error(ctx, &message, &pg_detail, &sqlstate);
+
+    /* Surface a pending cancel/terminate as the real PostgreSQL error. */
+    CHECK_FOR_INTERRUPTS();
+
+    pljs_ereport_js_error(message, pg_detail, detail, sqlstate,
+                          "execution error");
+  }
+
+  /* Its call ends with an error all the same; see pljs_run_with_storage(). */
+  if (current_storage->fatal_error != NULL) {
+    JS_FreeValue(ctx, val);
+    return;
+  }
+
+  run->val = val;
 }
 
 JSValue pljs_compile_function(pljs_context *context, bool is_trigger) {
-  StringInfoData src;
+  pljs_compile_run run = {.context = context, .val = JS_UNDEFINED};
 
-  pljs_build_function_source(&src, context, is_trigger);
+  pljs_build_function_source(&run.src, context, is_trigger);
+  pljs_run_with_storage(NULL, NULL, true, compile_run, &run);
 
-  JSValue val =
-      JS_Eval(context->ctx, src.data, strlen(src.data), "<function>", 0);
-
-  pfree(src.data);
-
-  if (!JS_IsException(val)) {
-    return val;
-  }
-
-  char *message = NULL, *pg_detail = NULL, *sqlstate = NULL;
-  char *detail = dump_error(context->ctx, &message, &pg_detail, &sqlstate);
-
-  JS_FreeValue(context->ctx, val);
-
-  pljs_ereport_js_error(message, pg_detail, detail, sqlstate,
-                        "execution error");
-
-  return JS_UNDEFINED;
+  return run.val;
 }
 
 /**
@@ -1424,6 +1716,7 @@ static void call_anonymous_function(const char *source, JSContext *ctx) {
 
   // generate the function as javascript with all of its arguments
   appendStringInfo(&src, "(function () {%s})();", source);
+  pljs_source_to_utf8(&src);
 
   /*
    * Re-anchor QuickJS's stack measurement here, at the C-stack depth this call
@@ -1435,7 +1728,6 @@ static void call_anonymous_function(const char *source, JSContext *ctx) {
    * for exactly this.
    */
   JS_UpdateStackTop(JS_GetRuntime(ctx));
-  JS_SetInterruptHandler(JS_GetRuntime(ctx), interrupt_handler, NULL);
 
   JSValue val = JS_Eval(ctx, src.data, strlen(src.data), "<function>", 0);
 
@@ -1482,7 +1774,6 @@ static Datum call_trigger(FunctionCallInfo fcinfo, pljs_context *context) {
   TriggerData *trig = (TriggerData *)fcinfo->context;
   Relation rel = trig->tg_relation;
   TriggerEvent event = trig->tg_event;
-  JSValueConst argv[10];
   Datum result = (Datum)0;
 
   MemoryContext execution_context = AllocSetContextCreate(
@@ -1490,85 +1781,115 @@ static Datum call_trigger(FunctionCallInfo fcinfo, pljs_context *context) {
       ALLOCSET_SMALL_SIZES);
   MemoryContext old_context = MemoryContextSwitchTo(execution_context);
 
-  if (TRIGGER_FIRED_FOR_ROW(event)) {
-    TupleDesc tupdesc = RelationGetDescr(rel);
+  /*
+   * Every argument is undefined until it is made, and all of them are released
+   * if one cannot be: an OLD that did not convert, once NEW had, left NEW in
+   * the runtime for every attempt.  Allocated rather than on the stack, so the
+   * PG_CATCH reads what the PG_TRY wrote.
+   */
+  JSValueConst *argv = palloc(sizeof(JSValueConst) * 10);
 
-    if (TRIGGER_FIRED_BY_INSERT(event)) {
-      result = PointerGetDatum(trig->tg_trigtuple);
-      // NEW
-      argv[0] =
-          pljs_tuple_to_jsvalue(tupdesc, trig->tg_trigtuple, context->ctx);
-      // OLD
-      argv[1] = JS_UNDEFINED;
-    } else if (TRIGGER_FIRED_BY_DELETE(event)) {
-      result = PointerGetDatum(trig->tg_trigtuple);
-      // NEW
-      argv[0] = JS_UNDEFINED;
-      // OLD
-      argv[1] =
-          pljs_tuple_to_jsvalue(tupdesc, trig->tg_trigtuple, context->ctx);
-    } else if (TRIGGER_FIRED_BY_UPDATE(event)) {
-      result = PointerGetDatum(trig->tg_newtuple);
-      // NEW
-      argv[0] = pljs_tuple_to_jsvalue(tupdesc, trig->tg_newtuple, context->ctx);
-      // OLD
-      argv[1] =
-          pljs_tuple_to_jsvalue(tupdesc, trig->tg_trigtuple, context->ctx);
+  for (int i = 0; i < 10; i++) {
+    argv[i] = JS_UNDEFINED;
+  }
+
+  if (TRIGGER_FIRED_FOR_ROW(event)) {
+    result =
+        PointerGetDatum(TRIGGER_FIRED_BY_UPDATE(event) ? trig->tg_newtuple
+                                                       : trig->tg_trigtuple);
+  }
+
+  PG_TRY();
+  {
+    if (TRIGGER_FIRED_FOR_ROW(event)) {
+      TupleDesc tupdesc = RelationGetDescr(rel);
+
+      if (TRIGGER_FIRED_BY_INSERT(event)) {
+        // NEW
+        argv[0] =
+            pljs_tuple_to_jsvalue(tupdesc, trig->tg_trigtuple, context->ctx);
+      } else if (TRIGGER_FIRED_BY_DELETE(event)) {
+        // OLD
+        argv[1] =
+            pljs_tuple_to_jsvalue(tupdesc, trig->tg_trigtuple, context->ctx);
+      } else if (TRIGGER_FIRED_BY_UPDATE(event)) {
+        // NEW
+        argv[0] =
+            pljs_tuple_to_jsvalue(tupdesc, trig->tg_newtuple, context->ctx);
+        // OLD
+        argv[1] =
+            pljs_tuple_to_jsvalue(tupdesc, trig->tg_trigtuple, context->ctx);
+      }
     }
-  } else {
-    argv[0] = argv[1] = JS_UNDEFINED;
+
+    /*
+     * Names and arguments in UTF-8, as QuickJS reads them; see
+     * pljs_server_to_utf8().
+     */
+    const char *name = trig->tg_trigger->tgname;
+
+    // 2: TG_NAME
+    argv[2] = pljs_new_server_string(context->ctx, name, strlen(name));
+
+    // 3: TG_WHEN
+    if (TRIGGER_FIRED_BEFORE(event)) {
+      argv[3] = JS_NewString(context->ctx, "BEFORE");
+    } else {
+      argv[3] = JS_NewString(context->ctx, "AFTER");
+    }
+    // 4: TG_LEVEL
+    if (TRIGGER_FIRED_FOR_ROW(event)) {
+      argv[4] = JS_NewString(context->ctx, "ROW");
+    } else {
+      argv[4] = JS_NewString(context->ctx, "STATEMENT");
+    }
+
+    // 5: TG_OP
+    if (TRIGGER_FIRED_BY_INSERT(event)) {
+      argv[5] = JS_NewString(context->ctx, "INSERT");
+    } else if (TRIGGER_FIRED_BY_DELETE(event)) {
+      argv[5] = JS_NewString(context->ctx, "DELETE");
+    } else if (TRIGGER_FIRED_BY_UPDATE(event)) {
+      argv[5] = JS_NewString(context->ctx, "UPDATE");
+    } else if (TRIGGER_FIRED_BY_TRUNCATE(event)) {
+      argv[5] = JS_NewString(context->ctx, "TRUNCATE");
+    } else {
+      argv[5] = JS_NewString(context->ctx, "?");
+    }
+
+    // 6: TG_RELID, unsigned: an OID of 2^31 or more was a negative number.
+    argv[6] = JS_NewUint32(context->ctx, RelationGetRelid(rel));
+
+    // 7: TG_TABLE_NAME
+    name = RelationGetRelationName(rel);
+    argv[7] = pljs_new_server_string(context->ctx, name, strlen(name));
+
+    // 8: TG_TABLE_SCHEMA
+    name = get_namespace_name(RelationGetNamespace(rel));
+    argv[8] = pljs_new_server_string(context->ctx, name, strlen(name));
+
+    // 9: TG_ARGV
+    argv[9] = JS_NewArray(context->ctx);
+
+    for (int i = 0; i < trig->tg_trigger->tgnargs; i++) {
+      name = trig->tg_trigger->tgargs[i];
+
+      /* Defined, not set; see pljs_datum_to_object(). */
+      JS_DefinePropertyValueUint32(
+          context->ctx, argv[9], i,
+          pljs_new_server_string(context->ctx, name, strlen(name)),
+          JS_PROP_C_W_E);
+    }
   }
+  PG_CATCH();
+  {
+    for (int i = 0; i < 10; i++) {
+      JS_FreeValue(context->ctx, argv[i]);
+    }
 
-  // 2: TG_NAME
-  argv[2] = JS_NewString(context->ctx, trig->tg_trigger->tgname);
-
-  // 3: TG_WHEN
-  if (TRIGGER_FIRED_BEFORE(event)) {
-    argv[3] = JS_NewString(context->ctx, "BEFORE");
-  } else {
-    argv[3] = JS_NewString(context->ctx, "AFTER");
+    PG_RE_THROW();
   }
-  // 4: TG_LEVEL
-  if (TRIGGER_FIRED_FOR_ROW(event)) {
-    argv[4] = JS_NewString(context->ctx, "ROW");
-  } else {
-    argv[4] = JS_NewString(context->ctx, "STATEMENT");
-  }
-
-  // 5: TG_OP
-  if (TRIGGER_FIRED_BY_INSERT(event)) {
-    argv[5] = JS_NewString(context->ctx, "INSERT");
-  } else if (TRIGGER_FIRED_BY_DELETE(event)) {
-    argv[5] = JS_NewString(context->ctx, "DELETE");
-  } else if (TRIGGER_FIRED_BY_UPDATE(event)) {
-    argv[5] = JS_NewString(context->ctx, "UPDATE");
-  } else if (TRIGGER_FIRED_BY_TRUNCATE(event)) {
-    argv[5] = JS_NewString(context->ctx, "TRUNCATE");
-  } else {
-    argv[5] = JS_NewString(context->ctx, "?");
-  }
-
-  // 6: TG_RELID
-  argv[6] = JS_NewInt32(context->ctx, RelationGetRelid(rel));
-
-  // 7: TG_TABLE_NAME
-  argv[7] = JS_NewString(context->ctx, RelationGetRelationName(rel));
-
-  // 8: TG_TABLE_SCHEMA
-  argv[8] =
-      JS_NewString(context->ctx, get_namespace_name(RelationGetNamespace(rel)));
-
-  // 9: TG_ARGV
-  JSValue tgargv = JS_NewArray(context->ctx);
-
-  for (int i = 0; i < trig->tg_trigger->tgnargs; i++) {
-    /* Defined, not set; see pljs_datum_to_object(). */
-    JS_DefinePropertyValueUint32(
-        context->ctx, tgargv, i,
-        JS_NewString(context->ctx, trig->tg_trigger->tgargs[i]), JS_PROP_C_W_E);
-  }
-
-  argv[9] = tgargv;
+  PG_END_TRY();
 
   /*
    * Connect to SPI, which call_trigger() never did -- so pljs.execute(),
@@ -1595,7 +1916,6 @@ static Datum call_trigger(FunctionCallInfo fcinfo, pljs_context *context) {
    * for exactly this.
    */
   JS_UpdateStackTop(JS_GetRuntime(context->ctx));
-  JS_SetInterruptHandler(JS_GetRuntime(context->ctx), interrupt_handler, NULL);
 
   JSValue ret =
       JS_Call(context->ctx, context->js_function, JS_UNDEFINED, 10, argv);
@@ -1643,6 +1963,8 @@ static Datum call_trigger(FunctionCallInfo fcinfo, pljs_context *context) {
 
   PG_TRY();
   {
+    pljs_raise_if_ending();
+
     if (JS_IsNull(ret) || !TRIGGER_FIRED_FOR_ROW(event)) {
       result = PointerGetDatum(NULL);
     } else if (!JS_IsUndefined(ret)) {
@@ -1718,7 +2040,6 @@ static Datum call_function(FunctionCallInfo fcinfo, pljs_context *context,
    * for exactly this.
    */
   JS_UpdateStackTop(JS_GetRuntime(context->ctx));
-  JS_SetInterruptHandler(JS_GetRuntime(context->ctx), interrupt_handler, NULL);
 
   JSValue ret = JS_Call(context->ctx, context->js_function, JS_UNDEFINED,
                         context->function->inargs, argv);
@@ -1807,6 +2128,8 @@ static Datum convert_result(FunctionCallInfo fcinfo, pljs_context *context,
                             Oid rettype, JSValue ret) {
   Datum datum;
 
+  pljs_raise_if_ending();
+
   if (rettype == RECORDOID) {
     TupleDesc tupdesc;
 
@@ -1863,14 +2186,26 @@ static Datum convert_result(FunctionCallInfo fcinfo, pljs_context *context,
  */
 static void put_returned_row(pljs_return_state *state, JSValueConst row,
                              JSContext *ctx) {
+  pljs_raise_if_ending();
   /* A getter on the returned array that threw. */
   if (JS_IsException(row)) {
     pljs_ereport_js_exception(ctx);
   }
 
+  /*
+   * A row of a composite set is an object naming every column, as
+   * return_next() requires, which is checked as it is converted.  Anything
+   * else but null was stored as a row of NULLs: `return [5, 'oops']`.
+   */
+  if (state->is_composite && !JS_IsNull(row) && !JS_IsUndefined(row) &&
+      !JS_IsObject(row)) {
+    ereport(ERROR, (errcode(ERRCODE_DATATYPE_MISMATCH),
+                    errmsg("returned row must be an object")));
+  }
+
   if (state->is_domain) {
     if (!JS_IsNull(row) && !JS_IsUndefined(row)) {
-      pljs_put_domain_row(state, row, ctx);
+      pljs_put_domain_row(state, row, ctx, "returned row");
     } else {
       /*
        * A null row is left out, as it is for any other composite set -- but
@@ -1884,8 +2219,8 @@ static void put_returned_row(pljs_return_state *state, JSValueConst row,
     }
   } else if (state->is_composite) {
     bool *nulls = (bool *)palloc0(sizeof(bool) * state->tuple_desc->natts);
-    Datum *values =
-        pljs_jsvalue_to_datums(NULL, row, &nulls, state->tuple_desc, ctx);
+    Datum *values = pljs_jsvalue_to_datums(NULL, row, &nulls, state->tuple_desc,
+                                           ctx, "returned row");
 
     if (values != NULL) {
       tuplestore_putvalues(state->tuple_store_state, state->tuple_desc, values,
@@ -1895,8 +2230,7 @@ static void put_returned_row(pljs_return_state *state, JSValueConst row,
 
     pfree(nulls);
   } else {
-    JSValue value =
-        pljs_single_column_value(ctx, row, state->tuple_desc, "returned row");
+    JSValue value = pljs_single_column_value(ctx, row, state, "returned row");
     bool is_null = false;
     Datum result;
 
@@ -1981,20 +2315,40 @@ static Datum call_srf_function(FunctionCallInfo fcinfo, pljs_context *context,
                            "allowed in this context")));
   }
 
-  if (context->function->rettype == RECORDOID) {
-    if (context->function->typeclass != TYPEFUNC_COMPOSITE) {
-      ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-                      errmsg("function returning record called in context "
-                             "that cannot accept type record")));
-    }
-  }
-
   MemoryContextSwitchTo(rsinfo->econtext->ecxt_per_query_memory);
 
-  TupleDesc tuple_desc;
-  state = (pljs_return_state *)palloc(sizeof(pljs_return_state));
+  TypeFuncClass typeclass;
 
-  get_call_result_type(fcinfo, &state->rettype, &tuple_desc);
+  /*
+   * Only the set itself, and its descriptor, have to outlive the call.  The
+   * state was kept with them, for as long as the query ran: a set-returning
+   * function called once for each row of a LATERAL join left one for every
+   * row.
+   */
+  state = (pljs_return_state *)MemoryContextAlloc(execution_context,
+                                                  sizeof(pljs_return_state));
+
+  /*
+   * The result type is resolved for this call rather than taken from the
+   * function's cache entry.  A polymorphic function -- SETOF anyelement --
+   * returns a different type at each call site, and the class its first call
+   * resolved to was kept for every later one: after f(1), f(ROW(1, 2)::pair)
+   * was put as a single column, and the tuplestore read the second off the
+   * stack.  The check for a record read its return type from the cache entry
+   * too, which never copied it, so every cached call compared uninitialized
+   * memory.
+   *
+   * No descriptor is asked for, which would be a copy of the row type made in
+   * the query's memory for every call; the set's is rsinfo's.
+   */
+  typeclass = get_call_result_type(fcinfo, &state->rettype, NULL);
+
+  /* A record with no column definition list to say what its columns are. */
+  if (typeclass == TYPEFUNC_RECORD) {
+    ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                    errmsg("function returning record called in context "
+                           "that cannot accept type record")));
+  }
 
   state->tuple_store_state = tuplestore_begin_heap(true, false, work_mem);
 
@@ -2014,9 +2368,30 @@ static Datum call_srf_function(FunctionCallInfo fcinfo, pljs_context *context,
    * stack, and the backend was killed.  The domain's constraints were never
    * checked either.
    */
-  state->is_domain = context->function->typeclass == TYPEFUNC_COMPOSITE_DOMAIN;
-  state->is_composite =
-      context->function->typeclass == TYPEFUNC_COMPOSITE || state->is_domain;
+  state->is_domain = typeclass == TYPEFUNC_COMPOSITE_DOMAIN;
+  state->is_composite = typeclass == TYPEFUNC_COMPOSITE || state->is_domain;
+  state->row_context =
+      state->is_domain
+          ? AllocSetContextCreate(execution_context, "PLJS Domain Row",
+                                  ALLOCSET_SMALL_SIZES)
+          : NULL;
+  state->row_context_busy = false;
+  state->domain_map_known = false;
+  state->domain_rowtype_id = 0;
+  state->domain_context = NULL;
+  state->domain_rowtype = NULL;
+  state->domain_map = NULL;
+
+  /*
+   * A single-column set's column is named when a row object first needs it;
+   * see pljs_single_column_value().
+   */
+  state->fn_oid = fcinfo->flinfo->fn_oid;
+  state->column_known = false;
+  state->column_name = NULL;
+  state->column_atom = JS_ATOM_NULL;
+  state->column_type_known = false;
+  state->column_takes_objects = false;
 
   /*
    * Whether converting a row can run a domain's CHECK constraint, which can
@@ -2044,7 +2419,6 @@ static Datum call_srf_function(FunctionCallInfo fcinfo, pljs_context *context,
    * for exactly this.
    */
   JS_UpdateStackTop(JS_GetRuntime(context->ctx));
-  JS_SetInterruptHandler(JS_GetRuntime(context->ctx), interrupt_handler, NULL);
 
   JSValue ret = JS_Call(context->ctx, context->js_function, JS_UNDEFINED,
                         context->function->inargs, argv);
@@ -2079,7 +2453,13 @@ static Datum call_srf_function(FunctionCallInfo fcinfo, pljs_context *context,
     PG_TRY();
     {
       if (!JS_IsUndefined(ret) && !JS_IsNull(ret)) {
-        MemoryContextSwitchTo(rsinfo->econtext->ecxt_per_query_memory);
+        /*
+         * In this call's memory, as return_next() converts a row: the
+         * tuplestore copies each row into its own.  They were converted in
+         * the query's, where what converting them allocated stayed for as long
+         * as the query ran -- for every call of a LATERAL join's.
+         */
+        MemoryContextSwitchTo(execution_context);
 
         // JS can return a single row or an array of rows.
         if (JS_IsArray(context->ctx, ret)) {
@@ -2136,10 +2516,29 @@ JSValue js_throw(const char *message, JSContext *ctx) {
   }
 
   JSValue error = JS_NewError(ctx);
-  JSValue message_value = JS_NewString(ctx, message);
+
+  /*
+   * A message can name a column or a type, in the database's encoding, and
+   * QuickJS reads UTF-8; see pljs_server_to_utf8().  So for every message
+   * PostgreSQL hands JavaScript.
+   */
+  JSValue message_value =
+      pljs_new_message_string(ctx, message, strlen(message));
   JS_SetPropertyStr(ctx, error, "message", message_value);
 
   return JS_Throw(ctx, error);
+}
+
+/*
+ * Makes a JavaScript string of part of a PostgreSQL error, which is in the
+ * database's encoding; see js_throw().  NULL is the empty string.
+ */
+static JSValue js_error_string(JSContext *ctx, const char *text) {
+  if (text == NULL) {
+    text = "";
+  }
+
+  return pljs_new_message_string(ctx, text, strlen(text));
 }
 
 /*
@@ -2150,7 +2549,7 @@ static JSValue js_throw_uncatchable(ErrorData *edata, JSContext *ctx) {
   JSValue error = JS_NewError(ctx);
 
   JS_SetPropertyStr(ctx, error, "message",
-                    JS_NewString(ctx, edata->message ? edata->message : ""));
+                    js_error_string(ctx, edata->message));
   JS_SetUncatchableError(ctx, error, true);
 
   return JS_Throw(ctx, error);
@@ -2182,9 +2581,18 @@ static JSValue js_throw_uncatchable(ErrorData *edata, JSContext *ctx) {
  * @returns #JSValue - JS_EXCEPTION
  */
 JSValue pljs_throw_fatal_error(JSContext *ctx) {
-  MemoryContext old_context =
+  MemoryContext old_context;
+  ErrorData *edata;
+
+  /*
+   * JavaScript only runs with storage installed, top-level code as its
+   * function is compiled included; see pljs_compile_function().
+   */
+  Assert(current_storage != NULL);
+
+  old_context =
       MemoryContextSwitchTo(current_storage->execution_memory_context);
-  ErrorData *edata = CopyErrorData();
+  edata = CopyErrorData();
 
   FlushErrorState();
   MemoryContextSwitchTo(old_context);
@@ -2197,6 +2605,72 @@ JSValue pljs_throw_fatal_error(JSContext *ctx) {
   }
 
   return js_throw_uncatchable(current_storage->fatal_error, ctx);
+}
+
+/*
+ * Ends the running call with a copy of an error that has been caught and
+ * flushed; see pljs_throw_fatal_error().  ReThrowError() puts the copy back
+ * where pljs_throw_fatal_error() takes the error being handled from.
+ */
+JSValue pljs_throw_fatal_error_data(ErrorData *edata, JSContext *ctx) {
+  MemoryContext old_context = CurrentMemoryContext;
+
+  PG_TRY();
+  {
+    ReThrowError(edata);
+  }
+  PG_CATCH();
+  {
+    MemoryContextSwitchTo(old_context);
+
+    return pljs_throw_fatal_error(ctx);
+  }
+  PG_END_TRY();
+
+  pg_unreachable();
+}
+
+/**
+ * @brief Raises the error the running call has to end with, if it has one.
+ *
+ * Before what JavaScript returned is converted.  JavaScript can run on after
+ * the exception that was to end the call -- a Promise's executor turns it
+ * into a rejection -- and return all the same, and an error converting what
+ * it returned replaced the one the call had to end with: a timeout came back
+ * as "returned row must be an object".
+ */
+static void pljs_raise_if_ending(void) {
+  ErrorData *fatal_error = pljs_fatal_error();
+
+  if (fatal_error != NULL) {
+    ReThrowError(fatal_error);
+  }
+}
+
+/**
+ * @brief Whether the running call has to end with an error.
+ *
+ * Only an exception that is thrown cannot be caught, and JavaScript runs on
+ * until one is: a Promise's executor turns the exception that was to end the
+ * call into a rejection, and the code after it ran -- its pljs.execute(),
+ * whose nextval() or advisory lock outlived the call that failed, and its
+ * pljs.commit(), which committed that call's work.  So every builtin that
+ * runs SQL refuses once the call has to end with an error, with
+ * pljs_throw_ending().  See pljs_throw_fatal_error().
+ *
+ * @returns @c bool
+ */
+bool pljs_call_is_ending(void) { return pljs_fatal_error() != NULL; }
+
+/**
+ * @brief Throws the error the running call has to end with; see
+ * pljs_call_is_ending().
+ *
+ * @param ctx #JSContext - Javascript context
+ * @returns #JSValue - JS_EXCEPTION
+ */
+JSValue pljs_throw_ending(JSContext *ctx) {
+  return js_throw_uncatchable(pljs_fatal_error(), ctx);
 }
 
 /*
@@ -2218,17 +2692,28 @@ JSValue js_throw_error_data(ErrorData *edata, JSContext *ctx) {
     return js_throw_uncatchable(fatal_error, ctx);
   }
 
+  /*
+   * A cancel -- statement_timeout, pg_cancel_backend() -- ends the call.  By
+   * the time it is raised it is no longer pending, and nothing interrupts
+   * JavaScript that caught it again: a function that caught a timeout from
+   * pljs.execute() and went on looping ran for ever.
+   */
+  if (edata->sqlerrcode == ERRCODE_QUERY_CANCELED && current_storage != NULL) {
+    return pljs_throw_fatal_error_data(edata, ctx);
+  }
+
   JSValue error = JS_NewError(ctx);
 
   JS_SetPropertyStr(ctx, error, "message",
-                    JS_NewString(ctx, edata->message ? edata->message : ""));
+                    js_error_string(ctx, edata->message));
 
   if (edata->detail) {
-    JS_SetPropertyStr(ctx, error, "detail", JS_NewString(ctx, edata->detail));
+    JS_SetPropertyStr(ctx, error, "detail",
+                      js_error_string(ctx, edata->detail));
   }
 
   if (edata->hint) {
-    JS_SetPropertyStr(ctx, error, "hint", JS_NewString(ctx, edata->hint));
+    JS_SetPropertyStr(ctx, error, "hint", js_error_string(ctx, edata->hint));
   }
 
   /*
@@ -2250,6 +2735,49 @@ JSValue js_throw_error_data(ErrorData *edata, JSContext *ctx) {
                     JS_NewString(ctx, unpack_sql_state(edata->sqlerrcode)));
 
   return JS_Throw(ctx, error);
+}
+
+/**
+ * @brief Compiles a function pljs_find_js_function() found, in a
+ * subtransaction.
+ *
+ * Compiling runs any code at the top level of the source, which can hold
+ * anything -- a catalog pin, a relation lock -- when it raises, and only
+ * rolling back releases it.  pljs.find_function() catches the error, and left
+ * what it held, which COMMIT warned of.  Only compiling needs one: a function
+ * already compiled is found without.  Where none can be begun, it compiles
+ * without one, as it did before; see pljs_subxact_begin().
+ *
+ * @param context #pljs_context - the function
+ * @returns #JSValue of the compiled function
+ */
+static JSValue pljs_compile_found_function(pljs_context *context) {
+  pljs_subxact sx;
+  JSValue func = JS_UNDEFINED;
+  ErrorData *edata;
+
+  pljs_subxact_init(&sx);
+
+  PG_TRY();
+  {
+    pljs_subxact_begin(&sx, true);
+
+    func = pljs_compile_function(context, false);
+  }
+  PG_CATCH();
+  {
+    ReThrowError(pljs_subxact_abort(&sx));
+  }
+  PG_END_TRY();
+
+  edata = pljs_subxact_commit(&sx);
+
+  if (edata != NULL) {
+    JS_FreeValue(context->ctx, func);
+    ReThrowError(edata);
+  }
+
+  return func;
 }
 
 /**
@@ -2349,13 +2877,19 @@ JSValue pljs_find_js_function(Oid fn_oid, JSContext *ctx) {
 
     setup_function(NULL, functuple, &context);
 
-    func = pljs_compile_function(&context, false);
-
+    /*
+     * Released before compiling, which runs any code at the top level of the
+     * source and can raise: pljs.find_function() catches that, and the pin
+     * was left, which COMMIT warned of.
+     */
     ReleaseSysCache(functuple);
+
+    func = pljs_compile_found_function(&context);
   }
 
-  // If there was a problem creating the function, we'll just return VOID.
-  if (JS_IsUndefined(func)) {
+  // What is not a function is not found; see dispatch_call().
+  if (!JS_IsFunction(context.ctx, func)) {
+    JS_FreeValue(context.ctx, func);
     return JS_UNDEFINED;
   }
 

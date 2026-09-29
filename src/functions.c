@@ -3,6 +3,7 @@
 
 #include "postgres.h"
 
+#include "access/tupconvert.h"
 #include "access/xact.h"
 #include "executor/spi.h"
 #include "fmgr.h"
@@ -15,6 +16,7 @@
 #include "utils/memutils.h"
 #include "utils/palloc.h"
 #include "utils/resowner.h"
+#include "utils/typcache.h"
 #include "windowapi.h"
 
 #include "pljs.h"
@@ -25,6 +27,7 @@
 static JSValue pljs_elog(JSContext *, JSValueConst, int, JSValueConst *);
 static JSValue pljs_execute(JSContext *, JSValueConst, int, JSValueConst *);
 static JSValue pljs_prepare(JSContext *, JSValueConst, int, JSValueConst *);
+static JSValue pljs_window_caught_error(JSContext *ctx, MemoryContext mcontext);
 static JSValue pljs_plan_execute(JSContext *, JSValueConst, int,
                                  JSValueConst *);
 static int pljs_execute_params(const char *, JSValue, JSContext *);
@@ -89,6 +92,273 @@ PG_FUNCTION_INFO_V1(pljs_version);
 PG_FUNCTION_INFO_V1(pljs_info);
 
 /**
+ * @brief Takes the PostgreSQL error being handled off the error stack.
+ *
+ * The first thing a builtin's PG_CATCH does.  The error is copied into
+ * @p mcontext -- errfinish() leaves ErrorContext current, and a copy made
+ * there is freed under the caller -- and flushed, since PG_CATCH() does not pop
+ * the errordata stack, and the sixth error left on it PANICs the cluster.
+ *
+ * Only then is a failed subtransaction rolled back, and the error thrown to
+ * JavaScript with pljs_throw_caught_error().  Throwing can raise the error
+ * again, for a cancel, and did so on top of the unflushed error, inside the
+ * subtransaction that had failed, where some builtins threw it first.
+ *
+ * @param mcontext #MemoryContext - the builtin's own, to copy the error into
+ * @returns #ErrorData - the error, for pljs_throw_caught_error()
+ */
+static ErrorData *pljs_catch_error(MemoryContext mcontext) {
+  ErrorData *edata;
+
+  MemoryContextSwitchTo(mcontext);
+  edata = CopyErrorData();
+  FlushErrorState();
+
+  return edata;
+}
+
+/**
+ * @brief Throws an error pljs_catch_error() took to JavaScript, and frees it.
+ *
+ * The last thing a builtin's PG_CATCH does; see pljs_catch_error().  A window
+ * object's methods that leave nothing behind when they raise use it too; one
+ * that runs the executor ends the call instead; see
+ * pljs_window_get_func_arg().
+ *
+ * @param edata #ErrorData - what pljs_catch_error() returned
+ * @param ctx #JSContext - Javascript context
+ * @returns #JSValue - JS_EXCEPTION
+ */
+static JSValue pljs_throw_caught_error(ErrorData *edata, JSContext *ctx) {
+  JSValue error = js_throw_error_data(edata, ctx);
+
+  FreeErrorData(edata);
+
+  return error;
+}
+
+/**
+ * @brief Whether an internal subtransaction can be begun.
+ *
+ * Not in parallel mode before PostgreSQL 17, which refuses one there.
+ *
+ * @returns @c bool
+ */
+static bool pljs_can_begin_subtransaction(void) {
+#if PG_VERSION_NUM >= 170000
+  return true;
+#else
+  return !IsInParallelMode();
+#endif
+}
+
+/**
+ * @brief Sets up an internal subtransaction, before the PG_TRY that begins it.
+ *
+ * It notes the memory context and resource owner that are current, which
+ * are restored however the subtransaction ends.
+ *
+ * @param sx #pljs_subxact - the subtransaction
+ */
+void pljs_subxact_init(pljs_subxact *sx) {
+  sx->mcontext = CurrentMemoryContext;
+  sx->resowner = CurrentResourceOwner;
+  sx->begun = false;
+}
+
+/**
+ * @brief Begins an internal subtransaction for a builtin's work, in its
+ * PG_TRY.
+ *
+ * Catching an error is safe only once whatever raised it has let go of what
+ * it held -- the portal and snapshot of a query that failed, a catalog pin,
+ * a relation lock, a nested function's SPI connection -- and only rolling
+ * back to a subtransaction releases those.  So every builtin that runs SQL,
+ * or can, does its work in one: pljs_subxact_abort() rolls it back in the
+ * PG_CATCH, and pljs_subxact_commit() commits it after PG_END_TRY.
+ *
+ * Every builtin had its own copy of these steps, and the copies had drifted
+ * apart.  Some rolled back a subtransaction they had failed to begin -- the
+ * caller's, or at the top level none, which is FATAL -- and some began one
+ * where PostgreSQL before 17 refuses to, in parallel mode, so a PARALLEL SAFE
+ * set-returning function failed in return_next().
+ *
+ * @param sx #pljs_subxact - the subtransaction, set up by pljs_subxact_init()
+ * @param optional @c bool - whether the work can be done without one where
+ * none can be begun; otherwise beginning it raises there
+ */
+void pljs_subxact_begin(pljs_subxact *sx, bool optional) {
+  if (optional && !pljs_can_begin_subtransaction()) {
+    return;
+  }
+
+  BeginInternalSubTransaction(NULL);
+  sx->begun = true;
+  MemoryContextSwitchTo(sx->mcontext);
+}
+
+/**
+ * @brief Rolls back the internal subtransaction if one was begun, and
+ * restores the memory context and resource owner.
+ *
+ * For a builtin that rolls back without an error to report --
+ * pljs.subtransaction(), whose callback threw -- or that ends the call with
+ * the error being handled.  Rolling back can raise; the subtransaction counts
+ * as ended all the same, so calling this again only restores.
+ *
+ * @param sx #pljs_subxact - the subtransaction
+ */
+void pljs_subxact_rollback(pljs_subxact *sx) {
+  if (sx->begun) {
+    sx->begun = false;
+    RollbackAndReleaseCurrentSubTransaction();
+  }
+
+  MemoryContextSwitchTo(sx->mcontext);
+  CurrentResourceOwner = sx->resowner;
+}
+
+/**
+ * @brief Takes the error off the stack, and rolls back the internal
+ * subtransaction if one was begun; for the PG_CATCH of the PG_TRY that
+ * began it.
+ *
+ * The error is copied and flushed first; see pljs_catch_error().  Then the
+ * subtransaction is rolled back, as PL/pgSQL rolls back a block's; see
+ * pljs_subxact_rollback().
+ *
+ * @param sx #pljs_subxact - the subtransaction
+ * @returns #ErrorData - the error, for pljs_throw_caught_error()
+ */
+ErrorData *pljs_subxact_abort(pljs_subxact *sx) {
+  ErrorData *edata = pljs_catch_error(sx->mcontext);
+
+  pljs_subxact_rollback(sx);
+
+  return edata;
+}
+
+/**
+ * @brief Commits the internal subtransaction, if one was begun; after the
+ * PG_END_TRY of the PG_TRY that began it.
+ *
+ * Committing can raise -- a subtransaction callback, a foreign server's
+ * RELEASE SAVEPOINT, running out of memory -- and a subtransaction that did
+ * not commit is rolled back, as PL/pgSQL rolls back a block's.  Ending the
+ * call instead left it half committed and current: the session's next
+ * ROLLBACK was FATAL, and a PL/pgSQL block that caught the error rolled back
+ * pljs's subtransaction in place of its own.
+ *
+ * @param sx #pljs_subxact - the subtransaction
+ * @returns #ErrorData - NULL once committed; otherwise the error, rolled
+ * back, for the builtin to release what it holds and throw it with
+ * pljs_throw_caught_error()
+ */
+ErrorData *pljs_subxact_commit(pljs_subxact *sx) {
+  ErrorData *edata = NULL;
+
+  if (sx->begun) {
+    PG_TRY();
+    {
+      ReleaseCurrentSubTransaction();
+      sx->begun = false;
+    }
+    PG_CATCH();
+    {
+      edata = pljs_subxact_abort(sx);
+    }
+    PG_END_TRY();
+  }
+
+  MemoryContextSwitchTo(sx->mcontext);
+  CurrentResourceOwner = sx->resowner;
+
+  return edata;
+}
+
+/**
+ * @brief Rolls back the internal subtransaction, after the builtin's
+ * JavaScript has run, if the call has to end.
+ *
+ * Something the JavaScript called -- a nested return_next(), say -- ended the
+ * call with what its error held left inside this subtransaction, and
+ * committing kept it: "resource was not closed", and "subtransaction left
+ * non-empty SPI stack".  A JavaScript exception that does not end the call
+ * leaves nothing: every builtin cleans up after itself.  A rollback that
+ * fails ends the call with its own error.
+ *
+ * @param sx #pljs_subxact - the subtransaction
+ * @param ctx #JSContext - Javascript context
+ * @returns @c bool - true with the call ending, and the subtransaction rolled
+ * back; false to commit it
+ */
+static bool pljs_subxact_ending(pljs_subxact *sx, JSContext *ctx) {
+  if (!pljs_call_is_ending()) {
+    return false;
+  }
+
+  PG_TRY();
+  {
+    pljs_subxact_rollback(sx);
+  }
+  PG_CATCH();
+  {
+    pljs_subxact_rollback(sx);
+    pljs_throw_fatal_error(ctx);
+    return true;
+  }
+  PG_END_TRY();
+
+  pljs_throw_ending(ctx);
+
+  return true;
+}
+
+/**
+ * @brief Returns the text of a string argument, in the database's encoding.
+ *
+ * SQL text, a type name, a function's signature: QuickJS writes UTF-8, and
+ * these went to PostgreSQL as QuickJS wrote them, while the values beside them
+ * were converted.  In a LATIN1 database a value read from a query and written
+ * back into SQL text no longer equalled itself.  Text the database's encoding
+ * cannot hold -- a lone surrogate, or a character it has no equivalent for --
+ * is thrown to JavaScript, as PostgreSQL raises it.
+ *
+ * @param ctx #JSContext - Javascript context
+ * @param value #JSValueConst - the argument
+ * @returns @c char* - palloc'd, or NULL with an exception pending
+ */
+static char *pljs_string_arg(JSContext *ctx, JSValueConst value) {
+  MemoryContext m_mcontext = CurrentMemoryContext;
+  size_t length;
+  const char *str = JS_ToCStringLen(ctx, &length, value);
+  char *volatile text = NULL;
+
+  if (str == NULL) {
+    return NULL;
+  }
+
+  PG_TRY();
+  {
+    char *server = pljs_utf8_to_server(str, length);
+
+    text = server == str ? pnstrdup(str, length) : server;
+  }
+  PG_CATCH();
+  {
+    JS_FreeCString(ctx, str);
+
+    pljs_throw_caught_error(pljs_catch_error(m_mcontext), ctx);
+    return NULL;
+  }
+  PG_END_TRY();
+
+  JS_FreeCString(ctx, str);
+
+  return text;
+}
+
+/**
  * @brief toString Javascript method for the pljs object.
  *
  * @returns #JSValue containing the string "[object pljs]"
@@ -108,6 +378,9 @@ static JSValue pljs_object_to_string(JSContext *ctx, JSValueConst this_obj,
  * @param ctx #JSContext Javascript context
  */
 void pljs_setup_namespace(JSContext *ctx) {
+  // Before any JavaScript runs in the context.
+  pljs_type_classes_init(ctx);
+
   // Get a copy of the global object.
   JSValue global_obj = JS_GetGlobalObject(ctx);
 
@@ -170,6 +443,12 @@ void pljs_setup_namespace(JSContext *ctx) {
   JS_SetPropertyStr(ctx, global_obj, "NOTICE", JS_NewInt32(ctx, NOTICE));
   JS_SetPropertyStr(ctx, global_obj, "WARNING", JS_NewInt32(ctx, WARNING));
   JS_SetPropertyStr(ctx, global_obj, "ERROR", JS_NewInt32(ctx, ERROR));
+
+  /*
+   * JS_GetGlobalObject() hands back a reference of its own, and keeping it
+   * kept the context: one a start_proc failed in could not be freed.
+   */
+  JS_FreeValue(ctx, global_obj);
 }
 
 /**
@@ -214,29 +493,40 @@ static JSValue pljs_elog(JSContext *ctx, JSValueConst this_val, int argc,
       JSValue str = JS_ToString(ctx, argv[i]);
       const char *cstr = JS_ToCString(ctx, str);
 
+      JS_FreeValue(ctx, str);
+
+      /* A toString() that threw; its NULL was formatted as "(null)". */
+      if (cstr == NULL) {
+        pfree(msg.data);
+        return JS_EXCEPTION;
+      }
+
       appendStringInfo(&msg, "%s", cstr);
 
       JS_FreeCString(ctx, cstr);
-      JS_FreeValue(ctx, str);
     }
 
-    const char *full_message = msg.data;
     MemoryContext m_mcontext = CurrentMemoryContext;
 
     /* ERROR case. */
     PG_TRY();
     {
-      elog(level, "%s", full_message);
+      /*
+       * Only a message that goes somewhere is converted: to the database's
+       * encoding, never raising for a character it cannot hold, which failed
+       * a NOTICE's function; see pljs_utf8_to_server_lossy().  Before elog(),
+       * whose arguments are evaluated once it has begun its message, and
+       * inside the PG_TRY, since running out of memory can raise.
+       */
+      if (message_level_is_interesting(level)) {
+        const char *full_message = pljs_utf8_to_server_lossy(msg.data, msg.len);
+
+        elog(level, "%s", full_message);
+      }
     }
     PG_CATCH();
     {
-      MemoryContextSwitchTo(m_mcontext);
-      ErrorData *edata = CopyErrorData();
-      JSValue error = js_throw_error_data(edata, ctx);
-      FlushErrorState();
-      FreeErrorData(edata);
-
-      return error;
+      return pljs_throw_caught_error(pljs_catch_error(m_mcontext), ctx);
     }
     PG_END_TRY();
   }
@@ -254,20 +544,29 @@ static JSValue pljs_elog(JSContext *ctx, JSValueConst this_val, int argc,
  */
 static JSValue pljs_execute(JSContext *ctx, JSValueConst this_val, int argc,
                             JSValueConst *argv) {
-  const char *sql;
+  /* Nothing runs once the call has to end with an error. */
+  if (pljs_call_is_ending()) {
+    return pljs_throw_ending(ctx);
+  }
+
+  char *sql;
   JSValue ret = JS_UNDEFINED;
-  volatile bool in_subtransaction = false;
   JSValue params = {0};
   int nparam;
-  ResourceOwner m_resowner;
   MemoryContext m_mcontext;
+  pljs_subxact sx;
+  ErrorData *edata;
   bool cleanup_params = false;
 
   if (argc < 1) {
     return JS_UNDEFINED;
   }
 
-  sql = JS_ToCString(ctx, argv[0]);
+  sql = pljs_string_arg(ctx, argv[0]);
+
+  if (sql == NULL) {
+    return JS_EXCEPTION;
+  }
 
   if (argc >= 2) {
     if (JS_IsArray(ctx, argv[1])) {
@@ -287,12 +586,12 @@ static JSValue pljs_execute(JSContext *ctx, JSValueConst this_val, int argc,
       JS_FreeValue(ctx, params);
     }
 
-    JS_FreeCString(ctx, sql);
+    pfree(sql);
     return JS_EXCEPTION;
   }
 
-  m_resowner = CurrentResourceOwner;
   m_mcontext = CurrentMemoryContext;
+  pljs_subxact_init(&sx);
 
   PG_TRY();
   {
@@ -303,9 +602,7 @@ static JSValue pljs_execute(JSContext *ctx, JSValueConst this_val, int argc,
                       errmsg("transaction lock failure")));
     }
 
-    BeginInternalSubTransaction(NULL);
-    in_subtransaction = true;
-    MemoryContextSwitchTo(m_mcontext);
+    pljs_subxact_begin(&sx, false);
 
     if (nparam == 0) {
       status = SPI_exec(sql, 0);
@@ -335,50 +632,31 @@ static JSValue pljs_execute(JSContext *ctx, JSValueConst this_val, int argc,
   }
   PG_CATCH();
   {
-    MemoryContextSwitchTo(m_mcontext);
-
-    /*
-     * The error has to be flushed before anything else runs: PG_CATCH() only
-     * restores PG_exception_stack, it does not pop the errordata stack.
-     * Returning without FlushErrorState() leaks a slot out of the five
-     * ERRORDATA_STACK_SIZE has, and the sixth caught error PANICs the backend.
-     * CopyErrorData() runs first, and in m_mcontext, so the message survives
-     * the reset of ErrorContext.
-     */
-    ErrorData *edata = CopyErrorData();
-    FlushErrorState();
-
-    if (in_subtransaction) {
-      RollbackAndReleaseCurrentSubTransaction();
-      MemoryContextSwitchTo(m_mcontext);
-    }
-
-    CurrentResourceOwner = m_resowner;
+    edata = pljs_subxact_abort(&sx);
 
     if (cleanup_params) {
       JS_FreeValue(ctx, params);
     }
 
-    JS_FreeCString(ctx, sql);
+    pfree(sql);
 
-    JSValue error = js_throw_error_data(edata, ctx);
-    FreeErrorData(edata);
-
-    return error;
+    return pljs_throw_caught_error(edata, ctx);
   }
   PG_END_TRY();
 
-  ReleaseCurrentSubTransaction();
+  edata = pljs_subxact_commit(&sx);
 
-  JS_FreeCString(ctx, sql);
+  pfree(sql);
 
   // If we allocated params, then we need to free it.
   if (cleanup_params) {
     JS_FreeValue(ctx, params);
   }
 
-  MemoryContextSwitchTo(m_mcontext);
-  CurrentResourceOwner = m_resowner;
+  if (edata != NULL) {
+    JS_FreeValue(ctx, ret);
+    return pljs_throw_caught_error(edata, ctx);
+  }
 
   return ret;
 }
@@ -506,6 +784,24 @@ static int pljs_execute_params(const char *sql, JSValue params,
 }
 
 /**
+ * @brief Frees the state of a plan's parameters, whose types the parser
+ * infers, and the types.
+ *
+ * @param parstate #pljs_param_state - the state, or NULL for none
+ */
+static void pljs_free_param_state(pljs_param_state *parstate) {
+  if (parstate == NULL) {
+    return;
+  }
+
+  if (parstate->param_types) {
+    pfree(parstate->param_types);
+  }
+
+  pfree(parstate);
+}
+
+/**
  * @brief Frees a #pljs_plan and everything it owns.
  *
  * Shared by the explicit `plan.free()` path and the GC finalizer.  All of the
@@ -524,12 +820,7 @@ static void pljs_free_plan_struct(pljs_plan *plan) {
     SPI_freeplan(plan->plan);
   }
 
-  if (plan->parstate) {
-    if (plan->parstate->param_types) {
-      pfree(plan->parstate->param_types);
-    }
-    pfree(plan->parstate);
-  }
+  pljs_free_param_state(plan->parstate);
 
   if (plan->param_typmods) {
     pfree(plan->param_typmods);
@@ -636,15 +927,20 @@ static void pljs_plan_params_to_datums(pljs_plan *plan, JSValueConst handle,
  */
 static JSValue pljs_plan_execute(JSContext *ctx, JSValueConst this_val,
                                  int argc, JSValueConst *argv) {
+  /* Nothing runs once the call has to end with an error. */
+  if (pljs_call_is_ending()) {
+    return pljs_throw_ending(ctx);
+  }
+
   pljs_plan *plan = NULL;
   JSValue params = {0};
   int nparams = 0;
   MemoryContext m_mcontext;
   MemoryContext param_context;
-  ResourceOwner m_resowner;
+  pljs_subxact sx;
+  ErrorData *edata;
   bool cleanup_params = false;
   JSValue ret = JS_UNDEFINED;
-  volatile bool in_subtransaction = false;
 
   if (argc) {
     if (JS_IsArray(ctx, argv[0])) {
@@ -687,8 +983,8 @@ static JSValue pljs_plan_execute(JSContext *ctx, JSValueConst this_val,
     return js_throw("Invalid plan", ctx);
   }
 
-  m_resowner = CurrentResourceOwner;
   m_mcontext = CurrentMemoryContext;
+  pljs_subxact_init(&sx);
 
   /*
    * The parameters' values, and anything converting them allocated, belong to
@@ -713,8 +1009,7 @@ static JSValue pljs_plan_execute(JSContext *ctx, JSValueConst this_val,
                       errmsg("transaction lock failure")));
     }
 
-    BeginInternalSubTransaction(NULL);
-    in_subtransaction = true;
+    pljs_subxact_begin(&sx, false);
     MemoryContextSwitchTo(param_context);
 
     /*
@@ -755,18 +1050,7 @@ static JSValue pljs_plan_execute(JSContext *ctx, JSValueConst this_val,
   }
   PG_CATCH();
   {
-    MemoryContextSwitchTo(m_mcontext);
-
-    // See pljs_execute(): flush before the rollback, copy the message first.
-    ErrorData *edata = CopyErrorData();
-    FlushErrorState();
-
-    if (in_subtransaction) {
-      RollbackAndReleaseCurrentSubTransaction();
-      MemoryContextSwitchTo(m_mcontext);
-    }
-
-    CurrentResourceOwner = m_resowner;
+    edata = pljs_subxact_abort(&sx);
 
     MemoryContextDelete(param_context);
     JS_FreeValue(ctx, handle);
@@ -775,24 +1059,23 @@ static JSValue pljs_plan_execute(JSContext *ctx, JSValueConst this_val,
       JS_FreeValue(ctx, params);
     }
 
-    JSValue error = js_throw_error_data(edata, ctx);
-    FreeErrorData(edata);
-
-    return error;
+    return pljs_throw_caught_error(edata, ctx);
   }
 
   PG_END_TRY();
 
-  ReleaseCurrentSubTransaction();
-
-  MemoryContextSwitchTo(m_mcontext);
-  CurrentResourceOwner = m_resowner;
+  edata = pljs_subxact_commit(&sx);
 
   MemoryContextDelete(param_context);
   JS_FreeValue(ctx, handle);
 
   if (cleanup_params) {
     JS_FreeValue(ctx, params);
+  }
+
+  if (edata != NULL) {
+    JS_FreeValue(ctx, ret);
+    return pljs_throw_caught_error(edata, ctx);
   }
 
   return ret;
@@ -810,6 +1093,7 @@ static JSValue pljs_plan_free(JSContext *ctx, JSValueConst this_val, int argc,
                               JSValueConst *argv) {
   pljs_plan *plan;
   JSValue ptr = JS_GetPropertyStr(ctx, this_val, "plan");
+  MemoryContext m_mcontext = CurrentMemoryContext;
 
   plan = JS_GetOpaque(ptr, js_prepared_statement_handle_id);
 
@@ -830,18 +1114,12 @@ static JSValue pljs_plan_free(JSContext *ctx, JSValueConst this_val, int argc,
   }
   PG_CATCH();
   {
-    MemoryContext m_mcontext = CurrentMemoryContext;
-    ErrorData *edata = CopyErrorData();
-    JSValue error = js_throw_error_data(edata, ctx);
-
-    FlushErrorState();
-    FreeErrorData(edata);
-    MemoryContextSwitchTo(m_mcontext);
+    ErrorData *edata = pljs_catch_error(m_mcontext);
 
     JS_SetPropertyStr(ctx, this_val, "plan", JS_NULL);
     JS_FreeValue(ctx, ptr);
 
-    return error;
+    return pljs_throw_caught_error(edata, ctx);
   }
   PG_END_TRY();
 
@@ -869,13 +1147,19 @@ static const JSCFunctionListEntry js_plan_funcs[] = {
  */
 static JSValue pljs_prepare(JSContext *ctx, JSValueConst this_val, int argc,
                             JSValueConst *argv) {
-  const char *sql;
+  /* Nothing runs once the call has to end with an error. */
+  if (pljs_call_is_ending()) {
+    return pljs_throw_ending(ctx);
+  }
+
+  char *sql;
   JSValue params = {0};
   int nparams;
   Oid *types = NULL;
   int32 *typmods = NULL;
   int32 *saved_typmods = NULL;
-  SPIPlanPtr initial = NULL, saved = NULL;
+  SPIPlanPtr initial = NULL;
+  SPIPlanPtr volatile saved = NULL;
   pljs_param_state *parstate = NULL;
   pljs_plan *plan = NULL;
   bool cleanup_params = false;
@@ -920,7 +1204,15 @@ static JSValue pljs_prepare(JSContext *ctx, JSValueConst this_val, int argc,
     typmods = palloc(sizeof(int32) * nparams);
   }
 
-  sql = JS_ToCString(ctx, argv[0]);
+  sql = pljs_string_arg(ctx, argv[0]);
+
+  if (sql == NULL) {
+    if (cleanup_params) {
+      JS_FreeValue(ctx, params);
+    }
+
+    return JS_EXCEPTION;
+  }
 
   /*
    * Allocate parstate in CacheMemoryContext so it survives beyond the current
@@ -946,10 +1238,22 @@ static JSValue pljs_prepare(JSContext *ctx, JSValueConst this_val, int argc,
     parstate->memory_context = CacheMemoryContext;
   }
 
-  MemoryContext m_mcontext = CurrentMemoryContext;
+  pljs_subxact sx;
+  ErrorData *edata = NULL;
+
+  pljs_subxact_init(&sx);
 
   PG_TRY();
   {
+    /*
+     * In a subtransaction, as pljs.execute() runs its query: parsing the
+     * statement and the type names holds catalog pins and relation locks, and
+     * an error -- a column that does not exist, a typmod a type does not take
+     * -- left them, since only rolling back releases them.  COMMIT warned of
+     * each.  Where none can be begun, it does without, as it did before.
+     */
+    pljs_subxact_begin(&sx, true);
+
     /*
      * Inside the PG_TRY: an unknown type name raises, and an error escaping a
      * function QuickJS called unwinds past the interpreter's live frames.
@@ -966,7 +1270,9 @@ static JSValue pljs_prepare(JSContext *ctx, JSValueConst this_val, int argc,
 
       PG_TRY();
       {
-        parseTypeString(str, &types[i], &typmods[i], false);
+        /* In the database's encoding; see pljs_string_arg(). */
+        parseTypeString(pljs_utf8_to_server(str, strlen(str)), &types[i],
+                        &typmods[i], false);
       }
       PG_FINALLY();
       {
@@ -998,22 +1304,39 @@ static JSValue pljs_prepare(JSContext *ctx, JSValueConst this_val, int argc,
      * PG_CATCH() restores PG_exception_stack but does not pop the errordata
      * stack; without FlushErrorState() each caught error leaks one of the five
      * ERRORDATA_STACK_SIZE slots and the sixth PANICs the backend.
+     *
+     * What went wrong -- an unknown type name, say -- is reported below.
      */
-    MemoryContextSwitchTo(m_mcontext);
+    edata = pljs_subxact_abort(&sx);
+  }
 
-    /* Report what went wrong -- an unknown type name, say. */
-    ErrorData *edata = CopyErrorData();
-    JSValue error = js_throw_error_data(edata, ctx);
+  PG_END_TRY();
 
-    FlushErrorState();
-    FreeErrorData(edata);
+  /*
+   * SPI_prepare() and SPI_saveplan() return with CurrentMemoryContext set to
+   * SPI's procedure context, as every SPI entry point does.  Left there, it
+   * outlived this call: a getter on a function's result that called
+   * pljs.prepare() had the rest of the result built in the procedure context,
+   * which SPI_finish() then freed before the result was returned.  Committing
+   * the subtransaction goes back to this call's context, with none as well.
+   *
+   * A subtransaction that did not commit is rolled back, and its error thrown
+   * to JavaScript, which can catch it and prepare the plan again, as for any
+   * other error.  The plan and its parameters' state are freed either way,
+   * since they outlive the rollback, in CacheMemoryContext: each retry after
+   * a commit that failed left a pair of them behind for the life of the
+   * backend.
+   */
+  if (edata == NULL) {
+    edata = pljs_subxact_commit(&sx);
+  }
 
-    if (parstate) {
-      if (parstate->param_types) {
-        pfree(parstate->param_types);
-      }
-      pfree(parstate);
+  if (edata != NULL) {
+    if (saved != NULL) {
+      SPI_freeplan(saved);
     }
+
+    pljs_free_param_state(parstate);
 
     if (types != NULL) {
       pfree(types);
@@ -1024,22 +1347,12 @@ static JSValue pljs_prepare(JSContext *ctx, JSValueConst this_val, int argc,
       JS_FreeValue(ctx, params);
     }
 
-    JS_FreeCString(ctx, sql);
-    return error;
+    pfree(sql);
+
+    return pljs_throw_caught_error(edata, ctx);
   }
 
-  PG_END_TRY();
-
-  /*
-   * SPI_prepare() and SPI_saveplan() return with CurrentMemoryContext set to
-   * SPI's procedure context, as every SPI entry point does.  Left there, it
-   * outlived this call: a getter on a function's result that called
-   * pljs.prepare() had the rest of the result built in the procedure context,
-   * which SPI_finish() then freed before the result was returned.
-   */
-  MemoryContextSwitchTo(m_mcontext);
-
-  JS_FreeCString(ctx, sql);
+  pfree(sql);
 
   /*
    * The typmods the type names declared.  SPI_prepare() takes only the types,
@@ -1098,6 +1411,11 @@ static const JSCFunctionListEntry js_cursor_funcs[] = {
  */
 static JSValue pljs_plan_cursor(JSContext *ctx, JSValueConst this_val, int argc,
                                 JSValueConst *argv) {
+  /* Nothing runs once the call has to end with an error. */
+  if (pljs_call_is_ending()) {
+    return pljs_throw_ending(ctx);
+  }
+
   pljs_plan *plan;
   JSValue params = {0};
   int nparams = 0;
@@ -1110,10 +1428,10 @@ static JSValue pljs_plan_cursor(JSContext *ctx, JSValueConst this_val, int argc,
    */
   Portal volatile cursor = NULL;
   bool cleanup_params = false;
-  ResourceOwner m_resowner;
   MemoryContext m_mcontext;
   MemoryContext param_context;
-  volatile bool in_subtransaction = false;
+  pljs_subxact sx;
+  ErrorData *edata;
 
   /* Held until the cursor is open; see pljs_plan_execute(). */
   JSValue handle = JS_GetPropertyStr(ctx, this_val, "plan");
@@ -1150,8 +1468,8 @@ static JSValue pljs_plan_cursor(JSContext *ctx, JSValueConst this_val, int argc,
     return JS_EXCEPTION;
   }
 
-  m_resowner = CurrentResourceOwner;
   m_mcontext = CurrentMemoryContext;
+  pljs_subxact_init(&sx);
 
   /*
    * The portal copies the parameters, so they are needed only to open it; see
@@ -1180,8 +1498,7 @@ static JSValue pljs_plan_cursor(JSContext *ctx, JSValueConst this_val, int argc,
      * is what cleans that up.  On success the subtransaction is released and
      * the portal is reassigned to the parent, so the cursor outlives it.
      */
-    BeginInternalSubTransaction(NULL);
-    in_subtransaction = true;
+    pljs_subxact_begin(&sx, false);
     MemoryContextSwitchTo(param_context);
 
     /*
@@ -1206,17 +1523,7 @@ static JSValue pljs_plan_cursor(JSContext *ctx, JSValueConst this_val, int argc,
 
   PG_CATCH();
   {
-    MemoryContextSwitchTo(m_mcontext);
-
-    ErrorData *edata = CopyErrorData();
-    FlushErrorState();
-
-    if (in_subtransaction) {
-      RollbackAndReleaseCurrentSubTransaction();
-      MemoryContextSwitchTo(m_mcontext);
-    }
-
-    CurrentResourceOwner = m_resowner;
+    edata = pljs_subxact_abort(&sx);
 
     /*
      * This path rolls back only an internal subtransaction and then returns a
@@ -1230,20 +1537,25 @@ static JSValue pljs_plan_cursor(JSContext *ctx, JSValueConst this_val, int argc,
       JS_FreeValue(ctx, params);
     }
 
-    JSValue error = js_throw_error_data(edata, ctx);
-    FreeErrorData(edata);
-
-    return error;
+    return pljs_throw_caught_error(edata, ctx);
   }
 
   PG_END_TRY();
 
-  ReleaseCurrentSubTransaction();
-  MemoryContextSwitchTo(m_mcontext);
-  CurrentResourceOwner = m_resowner;
+  edata = pljs_subxact_commit(&sx);
 
   /* The portal holds its own copies; these were only needed for the open. */
   MemoryContextDelete(param_context);
+
+  if (edata != NULL) {
+    JS_FreeValue(ctx, handle);
+
+    if (cleanup_params) {
+      JS_FreeValue(ctx, params);
+    }
+
+    return pljs_throw_caught_error(edata, ctx);
+  }
 
   JSValue ret = JS_NewObject(ctx);
   JSValue str = JS_NewString(ctx, cursor->name);
@@ -1283,6 +1595,48 @@ static JSValue pljs_plan_cursor(JSContext *ctx, JSValueConst this_val, int argc,
 }
 
 /**
+ * @brief Reads the count of rows that `cursor.fetch()` or `cursor.move()` is
+ * given, and its direction.
+ *
+ * Before the cursor is found: reading it runs the value's valueOf(), which
+ * can close the cursor, and the portal found first was used after it had
+ * been dropped.  A valueOf() that threw was ignored, and the rows fetched
+ * with the count left at 0 while its exception was pending.
+ *
+ * The count is read as a number, with the fraction cut off, and one larger
+ * than an int is as many rows as an int can count, forward or backward.  It
+ * was read with ToInt32(), which wraps: 2**31 fetched backward, 2**32 + 2
+ * fetched two rows, and Infinity fetched none.
+ *
+ * @param ctx #JSContext - Javascript context
+ * @param value #JSValueConst - the count, negative to go backward
+ * @param count @c int* - set to the number of rows
+ * @param forward @c bool* - set to whether to go forward
+ * @returns @c bool - false with an exception pending
+ */
+static bool pljs_cursor_count(JSContext *ctx, JSValueConst value, int *count,
+                              bool *forward) {
+  double rows;
+
+  if (JS_ToFloat64(ctx, &rows, value) < 0) {
+    return false;
+  }
+
+  if (isnan(rows)) {
+    rows = 0;
+  }
+
+  if (rows < 0) {
+    rows = -rows;
+    *forward = false;
+  }
+
+  *count = rows >= PG_INT32_MAX ? PG_INT32_MAX : (int)rows;
+
+  return true;
+}
+
+/**
  * @brief Javascript function `cursor.fetch`.
  *
  * Javascript function that executes a fetch on a cursor.
@@ -1291,29 +1645,38 @@ static JSValue pljs_plan_cursor(JSContext *ctx, JSValueConst this_val, int argc,
  */
 static JSValue pljs_plan_cursor_fetch(JSContext *ctx, JSValueConst this_val,
                                       int argc, JSValueConst *argv) {
-  JSValue name = JS_GetPropertyStr(ctx, this_val, "name");
-  const char *plan_name = JS_ToCString(ctx, name);
+  /* Nothing runs once the call has to end with an error. */
+  if (pljs_call_is_ending()) {
+    return pljs_throw_ending(ctx);
+  }
 
   int nfetch = 1;
   bool forward = true, wantarray = false;
 
+  /* See pljs_cursor_count(). */
+  if (argc >= 1) {
+    wantarray = true;
+
+    if (!pljs_cursor_count(ctx, argv[0], &nfetch, &forward)) {
+      return JS_EXCEPTION;
+    }
+  }
+
+  JSValue name = JS_GetPropertyStr(ctx, this_val, "name");
+  const char *plan_name = JS_ToCString(ctx, name);
+
+  JS_FreeValue(ctx, name);
+
+  if (plan_name == NULL) {
+    return JS_EXCEPTION;
+  }
+
   Portal cursor = SPI_cursor_find(plan_name);
 
   JS_FreeCString(ctx, plan_name);
-  JS_FreeValue(ctx, name);
 
   if (cursor == NULL) {
     return js_throw("Unable to find cursor", ctx);
-  }
-
-  if (argc >= 1) {
-    wantarray = true;
-    JS_ToInt32(ctx, &nfetch, argv[0]);
-
-    if (nfetch < 0) {
-      nfetch = -nfetch;
-      forward = false;
-    }
   }
 
   /*
@@ -1324,15 +1687,18 @@ static JSValue pljs_plan_cursor_fetch(JSContext *ctx, JSValueConst this_val,
    * atomic context, masking the real error (e.g. a division-by-zero that
    * surfaces lazily during the fetch).  With the subtransaction we can roll
    * back cleanly and re-raise the actual error into JS so it is catchable.
+   * Only a subtransaction it began: in parallel mode, before PostgreSQL 17,
+   * none can be, and it rolled back the caller's instead.
    */
-  ResourceOwner m_resowner = CurrentResourceOwner;
-  MemoryContext m_mcontext = CurrentMemoryContext;
   JSValue ret = JS_UNDEFINED;
+  pljs_subxact sx;
+  ErrorData *edata;
+
+  pljs_subxact_init(&sx);
 
   PG_TRY();
   {
-    BeginInternalSubTransaction(NULL);
-    MemoryContextSwitchTo(m_mcontext);
+    pljs_subxact_begin(&sx, false);
     SPI_cursor_fetch(cursor, forward, nfetch);
 
     /* Converted inside the PG_TRY; see pljs_execute(). */
@@ -1341,7 +1707,13 @@ static JSValue pljs_plan_cursor_fetch(JSContext *ctx, JSValueConst this_val,
         ret = pljs_tuple_to_jsvalue(SPI_tuptable->tupdesc,
                                     SPI_tuptable->vals[0], ctx);
       } else {
-        ret = pljs_spi_result_to_jsvalue(SPI_processed, ctx);
+        /*
+         * SPI_cursor_fetch() returns no status, and what it fetched are a
+         * SELECT's rows.  The row count was passed as the status, so a count
+         * that happened to equal a status with rows -- 5 is SPI_OK_SELECT --
+         * gave the rows, and any other gave back the count itself.
+         */
+        ret = pljs_spi_result_to_jsvalue(SPI_OK_SELECT, ctx);
       }
     }
 
@@ -1349,21 +1721,16 @@ static JSValue pljs_plan_cursor_fetch(JSContext *ctx, JSValueConst this_val,
   }
   PG_CATCH();
   {
-    MemoryContextSwitchTo(m_mcontext);
-    ErrorData *edata = CopyErrorData();
-    FlushErrorState();
-    RollbackAndReleaseCurrentSubTransaction();
-    MemoryContextSwitchTo(m_mcontext);
-    CurrentResourceOwner = m_resowner;
-    JSValue error = js_throw_error_data(edata, ctx);
-    FreeErrorData(edata);
-    return error;
+    return pljs_throw_caught_error(pljs_subxact_abort(&sx), ctx);
   }
   PG_END_TRY();
 
-  ReleaseCurrentSubTransaction();
-  MemoryContextSwitchTo(m_mcontext);
-  CurrentResourceOwner = m_resowner;
+  edata = pljs_subxact_commit(&sx);
+
+  if (edata != NULL) {
+    JS_FreeValue(ctx, ret);
+    return pljs_throw_caught_error(edata, ctx);
+  }
 
   return ret;
 }
@@ -1376,15 +1743,31 @@ static JSValue pljs_plan_cursor_fetch(JSContext *ctx, JSValueConst this_val,
  */
 static JSValue pljs_plan_cursor_move(JSContext *ctx, JSValueConst this_val,
                                      int argc, JSValueConst *argv) {
-  JSValue name = JS_GetPropertyStr(ctx, this_val, "name");
-  const char *cursor_name = JS_ToCString(ctx, name);
+  /* Nothing runs once the call has to end with an error. */
+  if (pljs_call_is_ending()) {
+    return pljs_throw_ending(ctx);
+  }
+
   int nmove = 1;
   bool forward = true;
+
+  /* See pljs_cursor_count(). */
+  if (argc >= 1 && !pljs_cursor_count(ctx, argv[0], &nmove, &forward)) {
+    return JS_EXCEPTION;
+  }
+
+  JSValue name = JS_GetPropertyStr(ctx, this_val, "name");
+  const char *cursor_name = JS_ToCString(ctx, name);
+
+  JS_FreeValue(ctx, name);
+
+  if (cursor_name == NULL) {
+    return JS_EXCEPTION;
+  }
 
   Portal cursor = SPI_cursor_find(cursor_name);
 
   JS_FreeCString(ctx, cursor_name);
-  JS_FreeValue(ctx, name);
 
   if (cursor == NULL) {
     return js_throw("Unable to find plan", ctx);
@@ -1394,41 +1777,29 @@ static JSValue pljs_plan_cursor_move(JSContext *ctx, JSValueConst this_val,
     return JS_UNDEFINED;
   }
 
-  JS_ToInt32(ctx, &nmove, argv[0]);
-
-  if (nmove < 0) {
-    nmove = -nmove;
-    forward = false;
-  }
-
   /* Subtransaction guard so a move error rolls back cleanly and re-raises the
    * real error into JS (see pljs_plan_cursor_fetch). */
-  ResourceOwner m_resowner = CurrentResourceOwner;
-  MemoryContext m_mcontext = CurrentMemoryContext;
+  pljs_subxact sx;
+  ErrorData *edata;
+
+  pljs_subxact_init(&sx);
 
   PG_TRY();
   {
-    BeginInternalSubTransaction(NULL);
-    MemoryContextSwitchTo(m_mcontext);
+    pljs_subxact_begin(&sx, false);
     SPI_cursor_move(cursor, forward, nmove);
   }
   PG_CATCH();
   {
-    MemoryContextSwitchTo(m_mcontext);
-    ErrorData *edata = CopyErrorData();
-    JSValue error = js_throw_error_data(edata, ctx);
-    RollbackAndReleaseCurrentSubTransaction();
-    MemoryContextSwitchTo(m_mcontext);
-    CurrentResourceOwner = m_resowner;
-    FlushErrorState();
-    FreeErrorData(edata);
-    return error;
+    return pljs_throw_caught_error(pljs_subxact_abort(&sx), ctx);
   }
   PG_END_TRY();
 
-  ReleaseCurrentSubTransaction();
-  MemoryContextSwitchTo(m_mcontext);
-  CurrentResourceOwner = m_resowner;
+  edata = pljs_subxact_commit(&sx);
+
+  if (edata != NULL) {
+    return pljs_throw_caught_error(edata, ctx);
+  }
 
   return JS_UNDEFINED;
 }
@@ -1443,12 +1814,30 @@ static JSValue pljs_plan_cursor_move(JSContext *ctx, JSValueConst this_val,
  */
 static JSValue pljs_plan_cursor_close(JSContext *ctx, JSValueConst this_val,
                                       int argc, JSValueConst *argv) {
+  /*
+   * Nothing runs once the call has to end with an error: closing a portal can
+   * finish a data-modifying CTE's writes.
+   */
+  if (pljs_call_is_ending()) {
+    return pljs_throw_ending(ctx);
+  }
+
   JSValue name = JS_GetPropertyStr(ctx, this_val, "name");
   const char *cursor_name = JS_ToCString(ctx, name);
+
+  JS_FreeValue(ctx, name);
+
+  /*
+   * A name that could not be read -- a getter that threw, a Symbol -- is
+   * that error, as for fetch() and move(), rather than a cursor not found.
+   */
+  if (cursor_name == NULL) {
+    return JS_EXCEPTION;
+  }
+
   Portal cursor = SPI_cursor_find(cursor_name);
 
   JS_FreeCString(ctx, cursor_name);
-  JS_FreeValue(ctx, name);
 
   if (!cursor) {
     return js_throw("Unable to find cursor", ctx);
@@ -1458,32 +1847,27 @@ static JSValue pljs_plan_cursor_close(JSContext *ctx, JSValueConst this_val,
    * double-finished the connection owned by call_function and raised
    * "invalid transaction termination" in an atomic context (see
    * pljs_plan_cursor_fetch). */
-  ResourceOwner m_resowner = CurrentResourceOwner;
-  MemoryContext m_mcontext = CurrentMemoryContext;
+  pljs_subxact sx;
+  ErrorData *edata;
+
+  pljs_subxact_init(&sx);
 
   PG_TRY();
   {
-    BeginInternalSubTransaction(NULL);
-    MemoryContextSwitchTo(m_mcontext);
+    pljs_subxact_begin(&sx, false);
     SPI_cursor_close(cursor);
   }
   PG_CATCH();
   {
-    MemoryContextSwitchTo(m_mcontext);
-    ErrorData *edata = CopyErrorData();
-    JSValue error = js_throw_error_data(edata, ctx);
-    RollbackAndReleaseCurrentSubTransaction();
-    MemoryContextSwitchTo(m_mcontext);
-    CurrentResourceOwner = m_resowner;
-    FlushErrorState();
-    FreeErrorData(edata);
-    return error;
+    return pljs_throw_caught_error(pljs_subxact_abort(&sx), ctx);
   }
   PG_END_TRY();
 
-  ReleaseCurrentSubTransaction();
-  MemoryContextSwitchTo(m_mcontext);
-  CurrentResourceOwner = m_resowner;
+  edata = pljs_subxact_commit(&sx);
+
+  if (edata != NULL) {
+    return pljs_throw_caught_error(edata, ctx);
+  }
 
   JSValue ret = JS_NewInt32(ctx, 1);
 
@@ -1523,8 +1907,15 @@ static JSValue pljs_plan_to_string(JSContext *ctx, JSValueConst this_val,
  */
 static JSValue pljs_commit(JSContext *ctx, JSValueConst this_val, int argc,
                            JSValueConst *argv) {
-  ResourceOwner m_resowner = CurrentResourceOwner;
   MemoryContext m_mcontext = CurrentMemoryContext;
+
+  /*
+   * Not the work of a call that has to end with an error, which rolls it
+   * back; see pljs_call_is_ending().
+   */
+  if (pljs_call_is_ending()) {
+    return pljs_throw_ending(ctx);
+  }
 
   PG_TRY();
   {
@@ -1553,17 +1944,16 @@ static JSValue pljs_commit(JSContext *ctx, JSValueConst this_val, int argc,
      *
      * Report the real Postgres error rather than a generic string, so the
      * caller can tell a deadlock from a disk-full.
+     *
+     * The resource owner is left as it is.  A commit that failed has rolled
+     * its transaction back and begun the next, whose owner is the current
+     * one; the owner current before it was the failed transaction's, which
+     * went with it, and every builtin after the failure used it again:
+     * "ResourceOwnerEnlarge called after release started".
      */
-    MemoryContextSwitchTo(m_mcontext);
-    ErrorData *edata = CopyErrorData();
-    JSValue error = js_throw_error_data(edata, ctx);
+    ErrorData *edata = pljs_catch_error(m_mcontext);
 
-    FlushErrorState();
-    FreeErrorData(edata);
-    MemoryContextSwitchTo(m_mcontext);
-    CurrentResourceOwner = m_resowner;
-
-    return error;
+    return pljs_throw_caught_error(edata, ctx);
   }
   PG_END_TRY();
 
@@ -1579,8 +1969,12 @@ static JSValue pljs_commit(JSContext *ctx, JSValueConst this_val, int argc,
  */
 static JSValue pljs_rollback(JSContext *ctx, JSValueConst this_val, int argc,
                              JSValueConst *argv) {
-  ResourceOwner m_resowner = CurrentResourceOwner;
   MemoryContext m_mcontext = CurrentMemoryContext;
+
+  /* See pljs_commit(). */
+  if (pljs_call_is_ending()) {
+    return pljs_throw_ending(ctx);
+  }
 
   PG_TRY();
   {
@@ -1597,17 +1991,13 @@ static JSValue pljs_rollback(JSContext *ctx, JSValueConst this_val, int argc,
   }
   PG_CATCH();
   {
-    /* Flush the caught error; see pljs_commit() for why this is mandatory. */
-    MemoryContextSwitchTo(m_mcontext);
-    ErrorData *edata = CopyErrorData();
-    JSValue error = js_throw_error_data(edata, ctx);
+    /*
+     * Flush the caught error, and leave the resource owner as it is; see
+     * pljs_commit().
+     */
+    ErrorData *edata = pljs_catch_error(m_mcontext);
 
-    FlushErrorState();
-    FreeErrorData(edata);
-    MemoryContextSwitchTo(m_mcontext);
-    CurrentResourceOwner = m_resowner;
-
-    return error;
+    return pljs_throw_caught_error(edata, ctx);
   }
   PG_END_TRY();
 
@@ -1623,13 +2013,28 @@ static JSValue pljs_rollback(JSContext *ctx, JSValueConst this_val, int argc,
  */
 static JSValue pljs_find_function(JSContext *ctx, JSValueConst this_val,
                                   int argc, JSValueConst *argv) {
+  /* Nothing runs once the call has to end with an error. */
+  if (pljs_call_is_ending()) {
+    return pljs_throw_ending(ctx);
+  }
+
   if (argc < 1) {
     return JS_UNDEFINED;
   }
-  const char *signature = JS_ToCString(ctx, argv[0]);
+  char *signature = pljs_string_arg(ctx, argv[0]);
   JSValue func = JS_UNDEFINED;
-  ResourceOwner m_resowner = CurrentResourceOwner;
-  MemoryContext m_mcontext = CurrentMemoryContext;
+  pljs_subxact sx;
+
+  if (signature == NULL) {
+    return JS_EXCEPTION;
+  }
+
+  /*
+   * None is begun here, but compiling the function begins one of its own,
+   * and an error can leave another memory context or resource owner current;
+   * see pljs_subxact_abort().
+   */
+  pljs_subxact_init(&sx);
 
   PG_TRY();
   {
@@ -1666,24 +2071,64 @@ static JSValue pljs_find_function(JSContext *ctx, JSValueConst this_val,
      * "javascript function is not found" message also hid unrelated failures,
      * e.g. a permission or syscache error.
      */
-    MemoryContextSwitchTo(m_mcontext);
-    ErrorData *edata = CopyErrorData();
-    JSValue error = js_throw_error_data(edata, ctx);
+    ErrorData *edata = pljs_subxact_abort(&sx);
 
-    FlushErrorState();
-    FreeErrorData(edata);
-    MemoryContextSwitchTo(m_mcontext);
-    CurrentResourceOwner = m_resowner;
+    pfree(signature);
 
-    JS_FreeCString(ctx, signature);
-
-    return error;
+    return pljs_throw_caught_error(edata, ctx);
   }
   PG_END_TRY();
 
-  JS_FreeCString(ctx, signature);
+  pfree(signature);
 
   return func;
+}
+
+/**
+ * @brief Works out the name of a single-column set's column, and its key.
+ *
+ * A single-column RETURNS TABLE collapses to a scalar return type in the
+ * catalog, so the descriptor frequently carries no column name at all, and
+ * the function's own name for it -- TABLE (a int4), or an OUT parameter's --
+ * is used.  Once for the set, when a row object first needs it: it was looked
+ * up for every call, bare values or not, and a key made for every row.  The
+ * key is let go when the call ends; see pljs_run_with_storage().
+ *
+ * @param ctx #JSContext - Javascript context
+ * @param state #pljs_return_state - the set, of one column
+ * @param attr #Form_pg_attribute - its column
+ * @returns @c bool - false with an exception pending
+ */
+static bool pljs_single_column_name(JSContext *ctx, pljs_return_state *state,
+                                    Form_pg_attribute attr) {
+  MemoryContext old_context;
+  char *name;
+
+  if (state->column_known) {
+    return true;
+  }
+
+  old_context = MemoryContextSwitchTo(GetMemoryChunkContext(state));
+  name = NameStr(attr->attname)[0] != '\0'
+             ? pstrdup(NameStr(attr->attname))
+             : get_func_result_name(state->fn_oid);
+  MemoryContextSwitchTo(old_context);
+
+  if (name != NULL) {
+    JSAtom atom = pljs_name_atom(ctx, name);
+
+    if (atom == JS_ATOM_NULL) {
+      pfree(name);
+      return false;
+    }
+
+    state->column_atom = atom;
+  }
+
+  state->column_name = name;
+  state->column_known = true;
+
+  return true;
 }
 
 /**
@@ -1697,14 +2142,16 @@ static JSValue pljs_find_function(JSContext *ctx, JSValueConst this_val,
  * @param ctx #JSContext - Javascript context to execute in
  * @param row #JSValueConst - the row: a bare value, or a `{column: value}`
  * object
- * @param tupdesc #TupleDesc - the set's descriptor, of one column
+ * @param state #pljs_return_state - the set, of one column
  * @param caller @c const char* - what to name in an error
  * @returns #JSValue - an owned reference to the column's value, or
- * JS_EXCEPTION with an error thrown
+ * JS_EXCEPTION with an exception pending -- a getter or trap that threw; a
+ * row that gives no value for the column raises
  */
 JSValue pljs_single_column_value(JSContext *ctx, JSValueConst row,
-                                 TupleDesc tupdesc, const char *caller) {
-  Oid coltype = TupleDescAttr(tupdesc, 0)->atttypid;
+                                 pljs_return_state *state, const char *caller) {
+  Form_pg_attribute attr = TupleDescAttr(state->tuple_desc, 0);
+  Oid coltype = attr->atttypid;
   JSValue value = JS_DupValue(ctx, row);
 
   /*
@@ -1720,69 +2167,131 @@ JSValue pljs_single_column_value(JSContext *ctx, JSValueConst row,
    * Accept both forms.  The row-object reading applies only to a *plain*
    * object (a brand check, so a Date for a timestamp, a typed array for a
    * bytea and an Array for an array type are still values, not row objects)
-   * and only when the column type is not itself object-shaped: a json/jsonb
-   * or composite column takes an object as its legitimate value.  So does a
-   * domain over one, so look through a domain to its base type.
+   * and only when the column type is not itself object-shaped: a json or
+   * jsonb column takes an object as its legitimate value.  So does a domain
+   * over one, so look through a domain to its base type.
+   *
+   * A Proxy is a row object too, as it is for a composite set: it was
+   * converted as the column's value itself, so the same Proxy row that a
+   * two-column set read was "cannot convert NaN" in a single-column one.
+   * Unless it is an array's, which is converted as the array, as it is for a
+   * function that returns one; JS_IsArray() sees through a Proxy, as
+   * Array.isArray() does.
    */
   bool row_object = pljs_jsvalue_is_plain_object(row);
 
-  if (row_object) {
-    Oid colbase = pljs_type_base(coltype);
+  if (pljs_jsvalue_is_proxy(row)) {
+    int is_array = JS_IsArray(ctx, row);
 
-    row_object = colbase != JSONOID && colbase != JSONBOID;
+    /* A revoked Proxy. */
+    if (is_array < 0) {
+      JS_FreeValue(ctx, value);
+      return JS_EXCEPTION;
+    }
+
+    row_object = !is_array;
+  }
+
+  /*
+   * Worked out once for the set: it was looked up for every row.  A set of
+   * one column is never of a composite type, which is a set of its columns.
+   */
+  if (row_object && !state->column_type_known) {
+    state->column_takes_objects = pljs_type_is_json(coltype);
+    state->column_type_known = true;
   }
 
   if (row_object) {
-    pljs_type coltype_info;
-
-    pljs_type_fill(&coltype_info, coltype);
-
-    if (!coltype_info.is_composite) {
-      const char *colname = NameStr(TupleDescAttr(tupdesc, 0)->attname);
-      JSPropertyEnum *props = NULL;
-      uint32_t nprops = 0;
+    if (!state->column_takes_objects) {
       bool resolved = false;
       bool is_value = false;
 
-      if (JS_GetOwnPropertyNames(ctx, &props, &nprops, row,
-                                 JS_GPN_STRING_MASK | JS_GPN_ENUM_ONLY) == 0) {
-        /* Prefer the column's own name whenever the descriptor carries one.
-         */
-        if (colname != NULL && colname[0] != '\0') {
-          for (uint32_t i = 0; i < nprops; i++) {
-            const char *name = JS_AtomToCString(ctx, props[i].atom);
-            bool match = (name != NULL && strcmp(name, colname) == 0);
+      if (!pljs_single_column_name(ctx, state, attr)) {
+        JS_FreeValue(ctx, value);
+        return JS_EXCEPTION;
+      }
 
-            if (name != NULL) {
-              JS_FreeCString(ctx, name);
-            }
+      /*
+       * The column's name, whenever there is one, decides, read as a
+       * composite set reads a column: an own property, or a getter of the
+       * row's class, but nothing every object inherits; and a Proxy's through
+       * its get trap, which can make the column up; see pljs_row_column().  A
+       * single-column set read only an own, enumerable property, so a class's
+       * getter was passed over, and its one other property stored in its
+       * place without a word.
+       *
+       * A function there is a method -- a class's, found the same way -- and
+       * no column takes one.  It is an error, rather than a reason to look
+       * for the value elsewhere, which stored another property under the
+       * column's name, again without a word.
+       */
+      if (state->column_atom != JS_ATOM_NULL) {
+        bool found = false;
+        JSValue column =
+            pljs_row_get_column(ctx, row, state->column_atom, &found);
 
-            if (match) {
-              JS_FreeValue(ctx, value);
-              value = JS_GetProperty(ctx, row, props[i].atom);
-              resolved = true;
-              break;
-            }
-          }
+        if (JS_IsException(column)) {
+          JS_FreeValue(ctx, value);
+          return JS_EXCEPTION;
         }
 
         /*
-         * A single-column RETURNS TABLE collapses to a scalar return type in
-         * the catalog, so the descriptor frequently carries no column name at
-         * all.  A row object with exactly one property is unambiguous either
-         * way, so accept it.
+         * Raised as PostgreSQL's, as for a set of several columns, with its
+         * SQLSTATE: thrown to JavaScript, it came out as XX000.
          */
-        if (!resolved && nprops == 1) {
+        if (found && pljs_column_refuses(ctx, column, coltype)) {
+          JS_FreeValue(ctx, column);
+          JS_FreeValue(ctx, value);
+          pljs_function_column_error(state->column_name, caller);
+        }
+
+        if (found) {
+          JS_FreeValue(ctx, value);
+          value = column;
+          resolved = true;
+        }
+      }
+
+      /*
+       * Without the column, an object that converts itself is a value; see
+       * pljs_converts_itself().
+       */
+      if (!resolved) {
+        int converts = pljs_converts_itself(ctx, row);
+
+        if (converts < 0) {
+          JS_FreeValue(ctx, value);
+          return JS_EXCEPTION;
+        }
+
+        is_value = converts > 0;
+      }
+
+      /*
+       * Otherwise a row object with exactly one property is unambiguous, so
+       * accept it.
+       */
+      if (!resolved && !is_value) {
+        JSPropertyEnum *props = NULL;
+        uint32_t nprops = 0;
+
+        if (JS_GetOwnPropertyNames(ctx, &props, &nprops, row,
+                                   JS_GPN_STRING_MASK | JS_GPN_ENUM_ONLY) < 0) {
+          JS_FreeValue(ctx, value);
+          return JS_EXCEPTION;
+        }
+
+        if (nprops == 1) {
           JSValue sole = JS_GetProperty(ctx, row, props[0].atom);
 
           /*
-           * Unless that property is a method: an object whose only property
-           * is valueOf() or toString() is a value that converts itself, not a
-           * row, and no column takes a function.
+           * Unless that property is a function, which no column takes.  An
+           * object with one was converted whole, as a value that converts
+           * itself: a column that held a function stored "[object Object]",
+           * or NaN.
            */
           if (JS_IsFunction(ctx, sole)) {
             JS_FreeValue(ctx, sole);
-            is_value = true;
           } else {
             JS_FreeValue(ctx, value);
             value = sole;
@@ -1790,12 +2299,7 @@ JSValue pljs_single_column_value(JSContext *ctx, JSValueConst row,
           }
         }
 
-        /* Free the table and its owned atoms (see the 0038 fix). */
-        for (uint32_t i = 0; i < nprops; i++) {
-          JS_FreeAtom(ctx, props[i].atom);
-        }
-
-        js_free(ctx, props);
+        pljs_free_prop_enum(ctx, props, nprops);
       }
 
       /*
@@ -1806,21 +2310,22 @@ JSValue pljs_single_column_value(JSContext *ctx, JSValueConst row,
       if (!resolved && !is_value) {
         JS_FreeValue(ctx, value);
 
-        if (colname != NULL && colname[0] != '\0') {
-          return js_throw(
-              psprintf("%s: object does not identify a value for the result "
-                       "column \"%s\" (property names are case sensitive; a "
-                       "single-column set also accepts the bare value)",
-                       caller, colname),
-              ctx);
+        if (state->column_name != NULL) {
+          ereport(ERROR,
+                  (errcode(ERRCODE_DATATYPE_MISMATCH),
+                   errmsg("%s: object does not identify a value for the "
+                          "result column \"%s\" (property names are case "
+                          "sensitive; a single-column set also accepts the "
+                          "bare value)",
+                          caller, state->column_name)));
         }
 
-        return js_throw(
-            psprintf("%s: object does not identify a value for the single "
-                     "result column (give an object with one property, or "
-                     "the bare value)",
-                     caller),
-            ctx);
+        ereport(ERROR,
+                (errcode(ERRCODE_DATATYPE_MISMATCH),
+                 errmsg("%s: object does not identify a value for the single "
+                        "result column (give an object with one property, "
+                        "or the bare value)",
+                        caller)));
       }
     }
   }
@@ -1829,49 +2334,171 @@ JSValue pljs_single_column_value(JSContext *ctx, JSValueConst row,
 }
 
 /**
+ * @brief Works out how a row of a set of a domain over a composite type is
+ * read by the domain's constraints.
+ *
+ * Once for the set, and again whenever the typcache has loaded the row type
+ * again, which it does after any change to it.  The row type it was worked
+ * out for, and how a row of the set converts to it, are kept with the set.
+ * A row type that no longer matches the set's is an error, as it is for
+ * PL/pgSQL.
+ *
+ * @param state #pljs_return_state - the set
+ */
+static void pljs_domain_rowtype(pljs_return_state *state) {
+  Oid base = pljs_type_base(state->rettype);
+  TypeCacheEntry *typentry = lookup_type_cache(base, TYPECACHE_TUPDESC);
+  const char *message =
+      gettext_noop("returned record type does not match expected record type");
+  MemoryContext caller_context = CurrentMemoryContext;
+  MemoryContext rowtype_context;
+  TupleConversionMap *map;
+  TupleDesc rowtype;
+  uint64 identifier = typentry->tupDesc_identifier;
+
+  if (state->domain_map_known && state->domain_rowtype_id == identifier) {
+    return;
+  }
+
+  /*
+   * In a context of its own, kept with the set, where the map reads the row
+   * type from, and deleted, with whatever the conversion had built, if it
+   * does not match.  Checked as the row type returned for the set's, so that
+   * the message names the row type's new column types as returned ones.  That
+   * check and the map the other way are not the same: a column added with a
+   * default needs a conversion one way and not the other, and a map taken to
+   * be needed both ways was NULL, and the backend crashed.  The map can raise
+   * too, typmods matching one way only, so what the set had is replaced only
+   * once both are done.
+   */
+  rowtype_context =
+      AllocSetContextCreate(GetMemoryChunkContext(state),
+                            "PLJS Domain Row Type", ALLOCSET_SMALL_SIZES);
+
+  PG_TRY();
+  {
+    MemoryContextSwitchTo(rowtype_context);
+
+    rowtype = CreateTupleDescCopy(typentry->tupDesc);
+    convert_tuples_by_position(rowtype, state->tuple_desc, message);
+    map = convert_tuples_by_position(state->tuple_desc, rowtype, message);
+
+    MemoryContextSwitchTo(caller_context);
+  }
+  PG_CATCH();
+  {
+    MemoryContextSwitchTo(caller_context);
+    MemoryContextDelete(rowtype_context);
+    PG_RE_THROW();
+  }
+  PG_END_TRY();
+
+  if (state->domain_context != NULL) {
+    MemoryContextDelete(state->domain_context);
+  }
+
+  state->domain_context = rowtype_context;
+  state->domain_map = map;
+  state->domain_rowtype = rowtype;
+  state->domain_rowtype_id = identifier;
+  state->domain_map_known = true;
+}
+
+/**
  * @brief Puts a row of a set of a domain over a composite type into the set.
  *
- * The row is converted as the domain, so the domain's constraints are checked
- * against it, and put as a tuple of the composite type.  A null row is
- * checked too -- it fails a NOT NULL domain -- and put with every column
- * NULL, as return_next() puts one for any composite set.
+ * The row is built as any composite set's is, with the set's descriptor, which
+ * checks that it has every column as it reads each one, and then checked
+ * against the domain's constraints.  A null row is checked too -- it fails a
+ * NOT NULL domain -- and put with every column NULL, as return_next() puts one
+ * for any composite set.
+ *
+ * It was converted as the domain, with the row type as the catalog has it now,
+ * and put into the set, which the executor reads with the descriptor it
+ * expected when the call began.  A function that altered the row type's
+ * columns and then returned a row had it read as the old type, and the
+ * backend crashed.  The two have to match now, as PL/pgSQL requires, since the
+ * domain's CHECK constraints read the row with the catalog's.  A row with
+ * every column was also read twice, once to check it and once to convert it,
+ * which ran a Proxy's get trap twice for each column.
  *
  * @param state #pljs_return_state - the set, whose rettype is the domain
  * @param row #JSValueConst - the row
  * @param ctx #JSContext - Javascript context to execute in
+ * @param caller @c const char* - what the row was given to, for a message
  */
 void pljs_put_domain_row(pljs_return_state *state, JSValueConst row,
-                         JSContext *ctx) {
-  MemoryContext row_context = AllocSetContextCreate(
-      CurrentMemoryContext, "PLJS Domain Row", ALLOCSET_SMALL_SIZES);
+                         JSContext *ctx, const char *caller) {
+  /*
+   * The row is converted in the set's context for it, which is emptied
+   * however the conversion ends.  One was created and deleted for every row,
+   * and not deleted at all for a row that did not convert, which a
+   * return_next() in a loop that caught its errors left behind each time.  A
+   * getter run by the conversion can return_next() a row of its own, which
+   * gets a context of its own.
+   */
+  bool nested = state->row_context_busy;
+  MemoryContext row_context =
+      nested ? AllocSetContextCreate(CurrentMemoryContext, "PLJS Domain Row",
+                                     ALLOCSET_SMALL_SIZES)
+             : state->row_context;
   MemoryContext old_context = MemoryContextSwitchTo(row_context);
-  bool is_null = false;
-  Datum value =
-      pljs_jsvalue_to_datum(state->rettype, (JSValue)row, &is_null, ctx, NULL);
 
-  if (is_null) {
-    int natts = state->tuple_desc->natts;
-    Datum *values = (Datum *)palloc0(sizeof(Datum) * natts);
-    bool *nulls = (bool *)palloc(sizeof(bool) * natts);
+  state->row_context_busy = true;
 
-    memset(nulls, true, sizeof(bool) * natts);
-    tuplestore_putvalues(state->tuple_store_state, state->tuple_desc, values,
-                         nulls);
-  } else {
-    HeapTupleHeader header = DatumGetHeapTupleHeader(value);
-    HeapTupleData tuple;
+  PG_TRY();
+  {
+    TupleDesc tupdesc = state->tuple_desc;
+    int natts = tupdesc->natts;
+    bool *nulls = (bool *)palloc0(sizeof(bool) * natts);
 
-    tuple.t_len = HeapTupleHeaderGetDatumLength(header);
-    ItemPointerSetInvalid(&tuple.t_self);
-    tuple.t_tableOid = InvalidOid;
-    tuple.t_data = header;
+    if (JS_IsNull(row) || JS_IsUndefined(row)) {
+      Datum *values = (Datum *)palloc0(sizeof(Datum) * natts);
 
-    tuplestore_puttuple(state->tuple_store_state, &tuple);
+      pljs_type_domain_check(state->rettype, (Datum)0, true);
+
+      memset(nulls, true, sizeof(bool) * natts);
+      tuplestore_putvalues(state->tuple_store_state, tupdesc, values, nulls);
+    } else {
+      Datum *values = pljs_jsvalue_to_datums(NULL, (JSValue)row, &nulls,
+                                             tupdesc, ctx, caller);
+      HeapTuple tuple = heap_form_tuple(tupdesc, values, nulls);
+      HeapTuple checked = tuple;
+
+      /*
+       * After the row is converted, whose getters can alter its type.  A row
+       * type that matches the set's with its columns laid out differently --
+       * dropped ones elsewhere -- has the row rebuilt for the check.
+       */
+      pljs_domain_rowtype(state);
+
+      if (state->domain_map != NULL) {
+        checked = execute_attr_map_tuple(tuple, state->domain_map);
+      } else {
+        HeapTupleHeaderSetTypeId(checked->t_data,
+                                 state->domain_rowtype->tdtypeid);
+        HeapTupleHeaderSetTypMod(checked->t_data,
+                                 state->domain_rowtype->tdtypmod);
+      }
+
+      pljs_type_domain_check(state->rettype, HeapTupleGetDatum(checked), false);
+
+      tuplestore_puttuple(state->tuple_store_state, tuple);
+    }
   }
+  PG_FINALLY();
+  {
+    /* The tuplestore has copied the row. */
+    MemoryContextSwitchTo(old_context);
 
-  /* The tuplestore has copied the row. */
-  MemoryContextSwitchTo(old_context);
-  MemoryContextDelete(row_context);
+    if (nested) {
+      MemoryContextDelete(row_context);
+    } else {
+      MemoryContextReset(row_context);
+      state->row_context_busy = false;
+    }
+  }
+  PG_END_TRY();
 }
 
 /**
@@ -1896,7 +2523,7 @@ static JSValue pljs_return_next_internal(JSContext *ctx,
      */
     if (JS_IsNull(row) || JS_IsUndefined(row)) {
       if (retstate->is_domain) {
-        pljs_put_domain_row(retstate, row, ctx);
+        pljs_put_domain_row(retstate, row, ctx, "return_next");
         return JS_UNDEFINED;
       }
 
@@ -1917,45 +2544,27 @@ static JSValue pljs_return_next_internal(JSContext *ctx,
       return JS_UNDEFINED;
     }
 
+    /*
+     * With the SQLSTATE a returned row's gets; thrown to JavaScript, it came
+     * out as XX000.
+     */
     if (!JS_IsObject(row)) {
-      return js_throw("argument must be an object", ctx);
+      ereport(ERROR, (errcode(ERRCODE_DATATYPE_MISMATCH),
+                      errmsg("argument must be an object")));
     }
 
-    char *missing_colname = NULL;
-    char *provided_keys = NULL;
-
-    if (!pljs_jsvalue_object_contains_all_column_names(
-            row, ctx, retstate->tuple_desc, &missing_colname, &provided_keys)) {
-      /*
-       * Name the column that is missing and list what the object did offer.
-       * The bare "field name / property name mismatch" gave the author nothing
-       * to act on, and the usual cause is a case difference -- JavaScript
-       * property names are case sensitive while PostgreSQL folds unquoted
-       * identifiers to lower case, so a `MixedCol` key never matches a
-       * `mixedcol` column.
-       */
-      if (missing_colname != NULL) {
-        return js_throw(psprintf("return_next: result column \"%s\" has no "
-                                 "matching property (object has: %s; property "
-                                 "names are case sensitive)",
-                                 missing_colname,
-                                 (provided_keys != NULL && *provided_keys)
-                                     ? provided_keys
-                                     : "no properties"),
-                        ctx);
-      }
-
-      return js_throw("field name / property name mismatch", ctx);
-    }
-
+    /*
+     * Every column has to be the row's, which is checked as each is read; see
+     * pljs_row_column().
+     */
     if (retstate->is_domain) {
-      pljs_put_domain_row(retstate, row, ctx);
+      pljs_put_domain_row(retstate, row, ctx, "return_next");
       return JS_UNDEFINED;
     }
 
     bool *nulls = (bool *)palloc0(sizeof(bool) * retstate->tuple_desc->natts);
-    Datum *values = pljs_jsvalue_to_datums(NULL, (JSValue)row, &nulls,
-                                           retstate->tuple_desc, ctx);
+    Datum *values = pljs_jsvalue_to_datums(
+        NULL, (JSValue)row, &nulls, retstate->tuple_desc, ctx, "return_next");
 
     tuplestore_putvalues(retstate->tuple_store_state, retstate->tuple_desc,
                          values, nulls);
@@ -1964,8 +2573,7 @@ static JSValue pljs_return_next_internal(JSContext *ctx,
     pfree(values);
   } else {
     Oid coltype = TupleDescAttr(retstate->tuple_desc, 0)->atttypid;
-    JSValue value =
-        pljs_single_column_value(ctx, row, retstate->tuple_desc, "return_next");
+    JSValue value = pljs_single_column_value(ctx, row, retstate, "return_next");
 
     if (JS_IsException(value)) {
       return value;
@@ -2062,18 +2670,32 @@ static bool pljs_return_next_needs_subtransaction(pljs_return_state *retstate) {
  */
 static JSValue pljs_return_next(JSContext *ctx, JSValueConst this_val, int argc,
                                 JSValueConst *argv) {
+  /* Nothing runs once the call has to end with an error. */
+  if (pljs_call_is_ending()) {
+    return pljs_throw_ending(ctx);
+  }
+
   pljs_storage *storage = pljs_current_storage();
   pljs_return_state *retstate = storage != NULL ? storage->return_state : NULL;
-  MemoryContext m_mcontext = CurrentMemoryContext;
-  ResourceOwner m_resowner = CurrentResourceOwner;
   JSValue result = JS_UNDEFINED;
-  bool subtransaction;
+  pljs_subxact sx;
+  ErrorData *edata;
 
   /*
-   * How far the subtransaction got, so the PG_CATCH knows what it is cleaning
-   * up; see pljs_subtransaction().
+   * Whether an error ends the call rather than being thrown to JavaScript;
+   * see the PG_CATCH.  Assigned in the PG_TRY and read in the PG_CATCH, hence
+   * volatile.
    */
-  volatile int stage = 0;
+  volatile bool unprotected = true;
+
+  /*
+   * Watching for a CHECK constraint run all the same, in a row converted
+   * without a subtransaction; see the PG_CATCH.  Assigned in the PG_TRY and
+   * read in the PG_CATCH, hence volatile.
+   */
+  pljs_domain_watch watch;
+  volatile bool watching = false;
+  volatile bool checked = false;
 
   /* A DO block, a trigger, or a function that does not return a set. */
   if (retstate == NULL) {
@@ -2081,15 +2703,30 @@ static JSValue pljs_return_next(JSContext *ctx, JSValueConst this_val, int argc,
                     ctx);
   }
 
+  pljs_subxact_init(&sx);
+
   PG_TRY();
   {
-    /* Inside the PG_TRY: working it out reads the catalogs. */
-    subtransaction = pljs_return_next_needs_subtransaction(retstate);
-
-    if (subtransaction) {
-      BeginInternalSubTransaction(NULL);
-      stage = 1;
-      MemoryContextSwitchTo(m_mcontext);
+    /*
+     * Inside the PG_TRY: working it out reads the catalogs, and loading a
+     * domain's constraints can run the IMMUTABLE functions in them.  Nothing
+     * can roll back what an error there leaves, so it ends the call, as any
+     * error does until the row is converted in a subtransaction.
+     */
+    if (pljs_return_next_needs_subtransaction(retstate)) {
+      /*
+       * Where none can be begun -- in parallel mode, before PostgreSQL 17 --
+       * the row is converted without one, rather than failing every row of a
+       * PARALLEL SAFE function's set, and any error converting it ends the
+       * call, as it does in PL/pgSQL, which cannot catch an error there at
+       * all.
+       */
+      pljs_subxact_begin(&sx, true);
+      unprotected = !sx.begun;
+    } else {
+      unprotected = false;
+      pljs_type_domain_watch_start(&watch);
+      watching = true;
     }
 
     /*
@@ -2099,38 +2736,94 @@ static JSValue pljs_return_next(JSContext *ctx, JSValueConst this_val, int argc,
     result = pljs_return_next_internal(ctx, retstate,
                                        argc > 0 ? argv[0] : JS_UNDEFINED);
 
-    if (subtransaction) {
-      stage = 2;
-      ReleaseCurrentSubTransaction();
-      MemoryContextSwitchTo(m_mcontext);
-      CurrentResourceOwner = m_resowner;
+    if (watching) {
+      watching = false;
+      checked = pljs_type_domain_watch_end(&watch);
+    }
+
+    /*
+     * Any error converting the row, one JavaScript raised too -- a getter
+     * that threw -- as a set of several columns raises one: raised here as
+     * PostgreSQL's, to end the call with below.  So too once a CHECK
+     * constraint ran without a subtransaction, which a set of one column let
+     * JavaScript catch, and a set of several did not.
+     */
+    if ((unprotected || checked) && JS_IsException(result) &&
+        !pljs_call_is_ending()) {
+      pljs_ereport_js_exception(ctx);
     }
   }
   PG_CATCH();
   {
-    MemoryContextSwitchTo(m_mcontext);
-
-    /* No valid state to resume into; see pljs_subtransaction(). */
-    if (stage == 2) {
-      CurrentResourceOwner = m_resowner;
-      PG_RE_THROW();
+    /*
+     * An error with nothing to roll back what raised it -- a CHECK
+     * constraint's PL/pgSQL function, which left its SPI connection on top
+     * of the stack -- and JavaScript that caught it went on with that:
+     * "transaction left non-empty SPI stack", or buffer pins and relations
+     * not closed.  So the call ends instead; see pljs_throw_fatal_error().
+     * Telling which errors left nothing took more than it could: some of a
+     * domain's input function's errors are its constraints', and some of
+     * its constraints' are not.
+     *
+     * So too for a row that needed none when that was worked out, but ran a
+     * CHECK constraint all the same, with none: a getter gave its domain one
+     * while the row was converted.
+     */
+    if (watching) {
+      watching = false;
+      checked = pljs_type_domain_watch_end(&watch);
     }
 
-    ErrorData *edata = CopyErrorData();
-    FlushErrorState();
-
-    if (stage == 1) {
-      RollbackAndReleaseCurrentSubTransaction();
-      MemoryContextSwitchTo(m_mcontext);
-      CurrentResourceOwner = m_resowner;
+    if (unprotected || checked) {
+      pljs_subxact_rollback(&sx);
+      return pljs_throw_fatal_error(ctx);
     }
 
-    JSValue error = js_throw_error_data(edata, ctx);
-    FreeErrorData(edata);
-
-    return error;
+    return pljs_throw_caught_error(pljs_subxact_abort(&sx), ctx);
   }
   PG_END_TRY();
+
+  /* Not committed when the call has to end; see pljs_subxact_ending(). */
+  if (pljs_subxact_ending(&sx, ctx)) {
+    return JS_EXCEPTION;
+  }
+
+  /*
+   * Nor when converting the row threw -- a single-column row's getter -- but
+   * rolled back, as an error PostgreSQL raised is, and as a set of several
+   * columns raises the same getter's: whatever a row's getters did is kept
+   * or not by whether the row was added, in any set that checks its rows in
+   * a subtransaction.  It was kept for a set of one column and not for a set
+   * of several.  A rollback that fails ends the call.
+   */
+  if (JS_IsException(result)) {
+    PG_TRY();
+    {
+      pljs_subxact_rollback(&sx);
+    }
+    PG_CATCH();
+    {
+      pljs_subxact_rollback(&sx);
+      return pljs_throw_fatal_error(ctx);
+    }
+    PG_END_TRY();
+
+    return result;
+  }
+
+  /*
+   * A subtransaction that did not commit is rolled back, but the row it
+   * checked is in the set already: the tuplestore is not transactional.
+   * Thrown to JavaScript, the error said the row had not been added, and a
+   * retry added it twice, so the call ends with it instead.
+   */
+  edata = pljs_subxact_commit(&sx);
+
+  if (edata != NULL) {
+    /* Which ends the call with a copy of it. */
+    result = pljs_throw_fatal_error_data(edata, ctx);
+    FreeErrorData(edata);
+  }
 
   return result;
 }
@@ -2161,32 +2854,6 @@ static pljs_storage *pljs_window_call_storage(JSContext *ctx) {
   }
 
   return storage;
-}
-
-/**
- * @brief Throws the PostgreSQL error being handled as a JavaScript exception.
- *
- * For the PG_CATCH of a window object's method.  They re-threw what they
- * caught, and an error that escapes a function QuickJS called unwinds past
- * the interpreter's live frames; see pljs_return_next().  Only for a method
- * that leaves nothing behind when it raises: one that runs the executor ends
- * the call instead; see pljs_window_get_func_arg().
- *
- * @param ctx #JSContext - Javascript context
- * @param mcontext #MemoryContext - the context to copy the error into
- * @returns #JSValue - JS_EXCEPTION
- */
-static JSValue pljs_window_caught_error(JSContext *ctx,
-                                        MemoryContext mcontext) {
-  MemoryContextSwitchTo(mcontext);
-
-  ErrorData *edata = CopyErrorData();
-  FlushErrorState();
-
-  JSValue error = js_throw_error_data(edata, ctx);
-  FreeErrorData(edata);
-
-  return error;
 }
 
 /**
@@ -2235,7 +2902,7 @@ static JSValue pljs_window_get_partition_local(JSContext *ctx,
   PG_CATCH();
   {
     /* Flush the caught error; see pljs_commit() for why this is mandatory. */
-    return pljs_window_caught_error(ctx, m_mcontext);
+    return pljs_throw_caught_error(pljs_catch_error(m_mcontext), ctx);
   }
   PG_END_TRY();
 
@@ -2308,7 +2975,7 @@ static JSValue pljs_window_set_partition_local(JSContext *ctx,
     JS_FreeCString(ctx, str);
     JS_FreeValue(ctx, js);
 
-    return pljs_window_caught_error(ctx, m_mcontext);
+    return pljs_throw_caught_error(pljs_catch_error(m_mcontext), ctx);
   }
   PG_END_TRY();
 
@@ -2362,7 +3029,7 @@ static JSValue pljs_window_get_current_position(JSContext *ctx,
   }
   PG_CATCH();
   {
-    return pljs_window_caught_error(ctx, m_mcontext);
+    return pljs_throw_caught_error(pljs_catch_error(m_mcontext), ctx);
   }
   PG_END_TRY();
 
@@ -2397,10 +3064,8 @@ static JSValue pljs_window_get_partition_row_count(JSContext *ctx,
   }
   PG_CATCH();
   {
-    /* It reads the rest of the partition; see pljs_window_get_func_arg(). */
-    MemoryContextSwitchTo(m_mcontext);
-
-    return pljs_throw_fatal_error(ctx);
+    /* It reads the rest of the partition; see pljs_window_caught_error(). */
+    return pljs_window_caught_error(ctx, m_mcontext);
   }
   PG_END_TRY();
 
@@ -2435,7 +3100,7 @@ static JSValue pljs_window_set_mark_position(JSContext *ctx,
   }
   PG_CATCH();
   {
-    return pljs_window_caught_error(ctx, m_mcontext);
+    return pljs_throw_caught_error(pljs_catch_error(m_mcontext), ctx);
   }
   PG_END_TRY();
 
@@ -2478,11 +3143,9 @@ static JSValue pljs_window_rows_are_peers(JSContext *ctx, JSValueConst this_val,
   {
     /*
      * It reads the rows into the partition and runs the ORDER BY's equality
-     * functions; see pljs_window_get_func_arg().
+     * functions; see pljs_window_caught_error().
      */
-    MemoryContextSwitchTo(m_mcontext);
-
-    return pljs_throw_fatal_error(ctx);
+    return pljs_window_caught_error(ctx, m_mcontext);
   }
   PG_END_TRY();
 
@@ -2571,6 +3234,45 @@ static bool pljs_window_arg_number(JSContext *ctx, JSValueConst val,
   return true;
 }
 
+/**
+ * @brief Throws what a window object's method that runs the executor raised.
+ *
+ * An error from the executor -- evaluating an argument, reading rows into the
+ * partition -- ends the call; see pljs_window_get_func_arg().  One that
+ * PostgreSQL's window code raises itself leaves nothing behind -- a seek
+ * before the mark, "cannot fetch row before WindowObject's mark position", or
+ * rows_are_peers()'s "specified position is out of window" -- and JavaScript
+ * can catch it, as it can the same mistake made by set_mark_position().
+ * Every error ended the call, those included.  Told apart by the file that
+ * raised it, whose name PostgreSQL records without its path and does not
+ * translate: the window API and the WindowAgg node share one, and anything
+ * the executor runs underneath them is elsewhere.
+ *
+ * For a PG_CATCH.
+ *
+ * @param ctx #JSContext - Javascript context
+ * @param mcontext #MemoryContext - the method's
+ * @returns #JSValue - JS_EXCEPTION
+ */
+static JSValue pljs_window_caught_error(JSContext *ctx,
+                                        MemoryContext mcontext) {
+  ErrorData *edata;
+  bool own;
+
+  MemoryContextSwitchTo(mcontext);
+
+  edata = CopyErrorData();
+  own = edata->filename != NULL &&
+        strcmp(edata->filename, "nodeWindowAgg.c") == 0;
+  FreeErrorData(edata);
+
+  if (own) {
+    return pljs_throw_caught_error(pljs_catch_error(mcontext), ctx);
+  }
+
+  return pljs_throw_fatal_error(ctx);
+}
+
 /*
  * Which of WinGetFuncArgInPartition(), WinGetFuncArgInFrame() and
  * WinGetFuncArgCurrent() pljs_window_get_func_arg() calls.
@@ -2641,9 +3343,7 @@ static JSValue pljs_window_get_func_arg(JSContext *ctx, pljs_storage *storage,
   }
   PG_CATCH();
   {
-    MemoryContextSwitchTo(m_mcontext);
-
-    return pljs_throw_fatal_error(ctx);
+    return pljs_window_caught_error(ctx, m_mcontext);
   }
   PG_END_TRY();
 
@@ -2659,7 +3359,7 @@ static JSValue pljs_window_get_func_arg(JSContext *ctx, pljs_storage *storage,
   }
   PG_CATCH();
   {
-    return pljs_window_caught_error(ctx, m_mcontext);
+    return pljs_throw_caught_error(pljs_catch_error(m_mcontext), ctx);
   }
   PG_END_TRY();
 
@@ -2730,8 +3430,8 @@ static JSValue pljs_window_get_func_arg_in_frame(JSContext *ctx,
   }
 
   if (!pljs_window_arg_number_is_valid(storage->fcinfo, argno)) {
-    JS_ThrowRangeError(ctx,
-                       "argument number out of range for get_func_arg_in_frame");
+    JS_ThrowRangeError(
+        ctx, "argument number out of range for get_func_arg_in_frame");
     return JS_EXCEPTION;
   }
 
@@ -2819,6 +3519,11 @@ static JSValue pljs_get_window_object(JSContext *ctx, JSValueConst this_val,
 
 static JSValue pljs_subtransaction(JSContext *ctx, JSValueConst this_val,
                                    int argc, JSValueConst *argv) {
+  /* Nothing runs once the call has to end with an error. */
+  if (pljs_call_is_ending()) {
+    return pljs_throw_ending(ctx);
+  }
+
   if (argc < 1) {
     return JS_UNDEFINED;
   }
@@ -2831,19 +3536,17 @@ static JSValue pljs_subtransaction(JSContext *ctx, JSValueConst this_val,
     return JS_UNDEFINED;
   }
 
-  ResourceOwner m_resowner = CurrentResourceOwner;
-  MemoryContext m_mcontext = CurrentMemoryContext;
+  pljs_subxact sx;
+  ErrorData *edata;
+  JSValue result = JS_UNDEFINED;
 
   /*
-   * How far we got, so the PG_CATCH knows what it is cleaning up.  Assigned in
-   * the PG_TRY and read in the PG_CATCH, hence volatile.
-   *
-   *   0 - no subtransaction started
-   *   1 - subtransaction open, running the callback
-   *   2 - committing or rolling it back
+   * Whether the callback threw, and its subtransaction is being rolled back.
+   * Assigned in the PG_TRY and read in the PG_CATCH, hence volatile.
    */
-  volatile int stage = 0;
-  volatile JSValue result = JS_UNDEFINED;
+  volatile bool rolling_back = false;
+
+  pljs_subxact_init(&sx);
 
   /*
    * A PostgreSQL error must not escape this function.  pljs.subtransaction() is
@@ -2858,59 +3561,47 @@ static JSValue pljs_subtransaction(JSContext *ctx, JSValueConst this_val,
    */
   PG_TRY();
   {
-    BeginInternalSubTransaction(NULL);
-    stage = 1;
-    MemoryContextSwitchTo(m_mcontext);
+    pljs_subxact_begin(&sx, false);
 
     result = JS_Call(ctx, argv[0], JS_UNDEFINED, 0, NULL);
 
-    bool success = !JS_IsException(result);
-
-    stage = 2;
-
-    if (success) {
-      ReleaseCurrentSubTransaction();
-    } else {
-      RollbackAndReleaseCurrentSubTransaction();
+    if (JS_IsException(result)) {
+      rolling_back = true;
+      pljs_subxact_rollback(&sx);
     }
-
-    MemoryContextSwitchTo(m_mcontext);
-    CurrentResourceOwner = m_resowner;
   }
   PG_CATCH();
   {
-    MemoryContextSwitchTo(m_mcontext);
-
     /*
-     * A failure while committing or rolling the subtransaction back leaves no
-     * valid state to resume into, exactly as for pljs.commit(): re-throw rather
-     * than handing back a catchable exception and letting the function
-     * continue.
+     * A rollback that failed leaves no valid state to resume into, so the call
+     * ends with the error rather than handing back a catchable exception and
+     * letting the function continue.  Not by re-throwing it, which unwinds
+     * past QuickJS's live frames; see pljs_throw_fatal_error().
      */
-    if (stage == 2) {
-      CurrentResourceOwner = m_resowner;
-      PG_RE_THROW();
+    if (rolling_back) {
+      pljs_subxact_rollback(&sx);
+      return pljs_throw_fatal_error(ctx);
     }
 
-    if (stage == 1) {
-      RollbackAndReleaseCurrentSubTransaction();
-      MemoryContextSwitchTo(m_mcontext);
-    }
-
-    CurrentResourceOwner = m_resowner;
-
-    JS_FreeValue(ctx, result);
-
-    ErrorData *edata = CopyErrorData();
-    JSValue error = js_throw_error_data(edata, ctx);
-
-    FlushErrorState();
-    FreeErrorData(edata);
-    MemoryContextSwitchTo(m_mcontext);
-
-    return error;
+    return pljs_throw_caught_error(pljs_subxact_abort(&sx), ctx);
   }
   PG_END_TRY();
+
+  /*
+   * Committed only if the callback returned, and the call does not have to
+   * end; see pljs_subxact_ending().
+   */
+  if (pljs_subxact_ending(&sx, ctx)) {
+    JS_FreeValue(ctx, result);
+    return JS_EXCEPTION;
+  }
+
+  edata = pljs_subxact_commit(&sx);
+
+  if (edata != NULL) {
+    JS_FreeValue(ctx, result);
+    return pljs_throw_caught_error(edata, ctx);
+  }
 
   return result;
 }

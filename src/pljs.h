@@ -4,6 +4,7 @@
 
 #include "access/heapam.h"
 #include "access/htup.h"
+#include "access/tupconvert.h"
 #include "access/tupdesc.h"
 #include "executor/spi.h"
 #include "fmgr.h"
@@ -11,6 +12,7 @@
 #include "nodes/params.h"
 #include "parser/parse_node.h"
 #include "utils/palloc.h"
+#include "utils/resowner.h"
 #include "utils/tuplestore.h"
 #include "windowapi.h"
 
@@ -65,7 +67,6 @@ typedef struct pljs_function_cache_value {
   Oid argtypes[FUNC_MAX_ARGS];
   char argmodes[FUNC_MAX_ARGS];
   char *prosrc;
-  TypeFuncClass typeclass;
 
   /*
    * Identity of the pg_proc tuple this entry was compiled from, so a stale
@@ -91,6 +92,21 @@ typedef struct pljs_return_state {
   bool convert_in_subtransaction; // converting a row can run a domain's checks
   bool convert_known;        // convert_in_subtransaction has been worked out
   uint64 convert_generation; // pljs_type_domain_generation() it was worked at
+  MemoryContext row_context; // a domain's row is converted in; see
+                             // pljs_put_domain_row()
+  bool row_context_busy;     // a row is being converted in it
+  bool domain_map_known;     // domain_map has been worked out, for:
+  uint64 domain_rowtype_id;  // the typcache's identifier of the row type
+  MemoryContext domain_context;   // holding:
+  TupleDesc domain_rowtype;       // a copy of that row type
+  TupleConversionMap *domain_map; // a row of the set to it, or NULL if the
+                                  // two match
+  Oid fn_oid;                     // the function returning the set
+  bool column_known;         // column_name and column_atom have been worked out
+  char *column_name;         // a single-column set's column's name, or NULL
+  JSAtom column_atom;        // its key; see pljs_single_column_value()
+  bool column_type_known;    // column_takes_objects has been worked out
+  bool column_takes_objects; // its type takes an object as its value
 } pljs_return_state;
 
 // Expanded type definitions for pljs.
@@ -126,9 +142,9 @@ typedef struct pljs_func {
   bool is_srf;                  // are we a set returning function?
   int inargs;                   // the number of input arguments
   int nargs;                    // the total number of arguments
-  TypeFuncClass typeclass;      // used for SRF
   Oid rettype;                  // the return type
-  Oid argtypes[FUNC_MAX_ARGS];  // the types of the argument passed
+  Oid argtypes[FUNC_MAX_ARGS];  // the input arguments' types, by their place
+                                // in the call
   char argmodes[FUNC_MAX_ARGS]; // mode of each argument
 } pljs_func;
 
@@ -184,16 +200,42 @@ JSValue js_throw(const char *, JSContext *);
 JSValue js_throw_error_data(ErrorData *, JSContext *);
 // End the running call with the Postgres error being handled
 JSValue pljs_throw_fatal_error(JSContext *);
+JSValue pljs_throw_fatal_error_data(ErrorData *, JSContext *);
 // Raise the pending Javascript exception as a Postgres error
 pg_noreturn void pljs_ereport_js_exception(JSContext *);
+// Whether the running call has to end with an error, and throw that error
+bool pljs_call_is_ending(void);
+JSValue pljs_throw_ending(JSContext *);
+
+/*
+ * An internal subtransaction a builtin runs its work in; see
+ * pljs_subxact_begin().  Set up with pljs_subxact_init() before the PG_TRY
+ * that begins it.
+ */
+typedef struct pljs_subxact {
+  MemoryContext mcontext; // the builtin's, gone back to however it ends
+  ResourceOwner resowner; // likewise
+  /*
+   * Begun, and not yet committed or rolled back.  The only member a PG_TRY
+   * changes, and volatile itself, as PostgreSQL requires of what the PG_CATCH
+   * reads; the others are set before it.
+   */
+  volatile bool begun;
+} pljs_subxact;
+
+void pljs_subxact_init(pljs_subxact *sx);
+void pljs_subxact_begin(pljs_subxact *sx, bool optional);
+void pljs_subxact_rollback(pljs_subxact *sx);
+ErrorData *pljs_subxact_abort(pljs_subxact *sx);
+ErrorData *pljs_subxact_commit(pljs_subxact *sx);
 
 // Functions
 JSValue pljs_compile_function(pljs_context *context, bool is_trigger);
 JSValue pljs_find_js_function(Oid fn_oid, JSContext *ctx);
 JSValue pljs_single_column_value(JSContext *ctx, JSValueConst row,
-                                 TupleDesc tupdesc, const char *caller);
+                                 pljs_return_state *state, const char *caller);
 void pljs_put_domain_row(pljs_return_state *state, JSValueConst row,
-                         JSContext *ctx);
+                         JSContext *ctx, const char *caller);
 bool pljs_has_permission_to_execute(const char *signature);
 pljs_storage *pljs_current_storage(void);
 
@@ -242,7 +284,8 @@ Datum pljs_jsvalue_to_datum_typmod_free(Oid typid, int32 typmod, JSValue val,
 Datum pljs_jsvalue_to_record(pljs_type *type, JSValue val, bool *is_null,
                              TupleDesc tupdesc, JSContext *ctx);
 Datum *pljs_jsvalue_to_datums(pljs_type *type, JSValue val, bool **is_null,
-                              TupleDesc tupdesc, JSContext *ctx);
+                              TupleDesc tupdesc, JSContext *ctx,
+                              const char *caller);
 
 // Utility
 int32_t pljs_js_array_length(JSValue, JSContext *);
@@ -251,16 +294,39 @@ Oid pljs_type_base(Oid);
 bool pljs_type_may_check_domain(Oid);
 void pljs_type_io_init(void);
 uint64 pljs_type_domain_generation(void);
+/* A watch for domain checks; see pljs_type_domain_watch_start(). */
+typedef struct pljs_domain_watch {
+  volatile int level; // volatile: a PG_TRY sets it, and a PG_CATCH reads it
+  volatile uint64 hits;
+} pljs_domain_watch;
+
+void pljs_type_domain_watch_start(pljs_domain_watch *saved);
+bool pljs_type_domain_watch_end(pljs_domain_watch *saved);
+void pljs_type_classes_init(JSContext *ctx);
 
 // Type conversion state for the pljs function being called
 typedef struct pljs_type_io_cache pljs_type_io_cache;
 pljs_type_io_cache *pljs_type_io_enter(FmgrInfo *);
 void pljs_type_io_exit(pljs_type_io_cache *);
-bool pljs_jsvalue_object_contains_all_column_names(JSValue val, JSContext *ctx,
-                                                   TupleDesc tupdesc,
-                                                   char **missing_colname,
-                                                   char **provided_keys);
 bool pljs_jsvalue_is_plain_object(JSValueConst obj);
+bool pljs_jsvalue_is_proxy(JSValueConst obj);
+void pljs_type_domain_check(Oid typid, Datum value, bool isnull);
+void pljs_free_prop_enum(JSContext *ctx, JSPropertyEnum *tab, uint32_t len);
+char *pljs_server_to_utf8(const char *str, size_t len);
+JSAtom pljs_column_atom(JSContext *ctx, Form_pg_attribute attr);
+JSAtom pljs_name_atom(JSContext *ctx, const char *name);
+JSValue pljs_row_get_column(JSContext *ctx, JSValueConst row, JSAtom atom,
+                            bool *found);
+int pljs_converts_itself(JSContext *ctx, JSValueConst obj);
+bool pljs_type_is_json(Oid typid);
+bool pljs_column_refuses(JSContext *ctx, JSValueConst value, Oid typid);
+pg_noreturn void pljs_function_column_error(const char *name,
+                                            const char *caller);
+JSValue pljs_new_server_string(JSContext *ctx, const char *str, size_t len);
+JSValue pljs_new_message_string(JSContext *ctx, const char *str, size_t len);
+char *pljs_utf8_to_server(const char *str, size_t len);
+char *pljs_utf8_to_server_lossy(const char *str, size_t len);
+void pljs_encoding_init(void);
 JSValue pljs_values_to_array(JSValue *, int, int, JSContext *);
 void pljs_variable_param_setup(ParseState *, void *);
 ParamListInfo pljs_setup_variable_paramlist(pljs_param_state *, Datum *,
