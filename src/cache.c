@@ -1,7 +1,11 @@
 #include "postgres.h"
 
 #include "access/htup_details.h"
+#include "catalog/pg_language.h"
+#include "catalog/pg_proc.h"
+#include "miscadmin.h"
 #include "utils/memutils.h"
+#include "utils/syscache.h"
 
 #include "pljs.h"
 
@@ -50,18 +54,21 @@ void pljs_cache_init(void) {
 }
 
 /**
- * @brief Drops the cached compiled form of one function, in every user's cache.
+ * @brief Drops the cached compiled form of one function (and any downstream
+ * functions transpiled through it as a custom language handler), in every
+ * user's cache.
  *
- * Used when a function is created or replaced, so the next call recompiles it.
+ * Used when a function is created or replaced, so the next call recompiles it
+ * and any downstream functions whose source was transpiled by it.
  *
  * The alternative -- pljs_cache_reset() -- destroys every per-user JSContext
  * and rebuilds it on the next call.  JS_FreeContext() will not free a context
  * that still has live references into it, so the old one is not necessarily
- * reclaimed, and a backend doing repeated DDL grows without bound.  Removing a
- * single entry keeps every JSContext alive and owned, so nothing is orphaned
- * and nothing dangles -- including when the DDL is executed from inside a
- * running pljs function via pljs.execute(), where freeing the context we are
- * executing in would be fatal.
+ * reclaimed, and a backend doing repeated DDL grows without bound.  Removing
+ * individual entries keeps every JSContext alive and owned, so nothing is
+ * orphaned and nothing dangles -- including when the DDL is executed from
+ * inside a running pljs function via pljs.execute(), where freeing the context
+ * we are executing in would be fatal.
  *
  * @param fn_oid #Oid - the function whose compiled form is now stale
  */
@@ -77,32 +84,44 @@ void pljs_cache_function_remove(Oid fn_oid) {
 
   while ((ctx_hvalue = (pljs_context_cache_value *)hash_seq_search(&status)) !=
          NULL) {
-    bool found = false;
+    HASH_SEQ_STATUS fstatus;
     pljs_function_cache_value *value;
 
     if (ctx_hvalue->function_hash_table == NULL) {
       continue;
     }
 
-    value = (pljs_function_cache_value *)hash_search(
-        ctx_hvalue->function_hash_table, &fn_oid, HASH_FIND, &found);
+    hash_seq_init(&fstatus, ctx_hvalue->function_hash_table);
 
-    if (!found || value == NULL) {
-      continue;
+    while ((value = (pljs_function_cache_value *)hash_seq_search(&fstatus)) !=
+           NULL) {
+      bool should_remove = (value->fn_oid == fn_oid);
+
+      for (int i = 0; !should_remove && i < value->nhandlers; i++) {
+        if (value->handlers[i].fn_oid == fn_oid) {
+          should_remove = true;
+        }
+      }
+
+      if (!should_remove) {
+        continue;
+      }
+
+      /*
+       * Drop our reference to the compiled function before the entry goes away;
+       * this is its only owner, so otherwise it leaks on the QuickJS heap.
+       */
+      JS_FreeValue(value->ctx, value->fn);
+
+      if (value->prosrc != NULL) {
+        pfree(value->prosrc);
+        value->prosrc = NULL;
+      }
+
+      Oid entry_oid = value->fn_oid;
+      hash_search(ctx_hvalue->function_hash_table, &entry_oid, HASH_REMOVE,
+                  NULL);
     }
-
-    /*
-     * Drop our reference to the compiled function before the entry goes away;
-     * this is its only owner, so otherwise it leaks on the QuickJS heap.
-     */
-    JS_FreeValue(value->ctx, value->fn);
-
-    if (value->prosrc != NULL) {
-      pfree(value->prosrc);
-      value->prosrc = NULL;
-    }
-
-    hash_search(ctx_hvalue->function_hash_table, &fn_oid, HASH_REMOVE, NULL);
   }
 }
 
@@ -257,12 +276,16 @@ void pljs_cache_function_add(pljs_context *context) {
       ctx_hvalue->function_hash_table, &context->function->fn_oid, HASH_ENTER,
       &found);
 
-  // If we found one, then we already have an entry for this function
-  // and something has gone wrong, we should error out.
+  // If an entry already exists for this OID (for example, if a custom language
+  // handler re-entrantly compiled the same function while transpiling it),
+  // release the previous entry's QuickJS reference and prosrc copy before
+  // overwriting it.
   if (found) {
-    ereport(ERROR, errcode(ERRCODE_INTERNAL_ERROR),
-            errmsg("function cache entry already exists for oid %d",
-                   context->function->fn_oid));
+    JS_FreeValue(hvalue->ctx, hvalue->fn);
+    if (hvalue->prosrc != NULL) {
+      pfree(hvalue->prosrc);
+      hvalue->prosrc = NULL;
+    }
   }
 
   // Switch to the cache memory context for this javascript context.
@@ -274,6 +297,84 @@ void pljs_cache_function_add(pljs_context *context) {
 
   // Switch back to the calling memory context.
   MemoryContextSwitchTo(old_memory_context);
+}
+
+/**
+ * @brief Checks whether every language handler recorded in a cached function's
+ * dependency chain still matches the current catalog state.
+ *
+ * When a custom language handler (or any upstream handler in a chained
+ * language hierarchy) is replaced via CREATE OR REPLACE FUNCTION in the same
+ * or another backend, its pg_proc tuple's (xmin, tid) changes while the
+ * downstream function's own pg_proc tuple remains untouched.  Walking the
+ * recorded handler chain ensures the downstream function is invalidated and
+ * re-transpiled on the next lookup.
+ *
+ * @param value Cached function entry to validate
+ * @param proctuple Current pg_proc tuple of the downstream function
+ * @param stale_handler_oid Set to the OID of the first stale handler found,
+ *                          or InvalidOid if the language structure itself
+ *                          changed
+ * @returns true if all handlers in the chain are still valid, false otherwise
+ */
+static bool pljs_cache_handlers_valid(pljs_function_cache_value *value,
+                                      HeapTuple proctuple,
+                                      Oid *stale_handler_oid) {
+  *stale_handler_oid = InvalidOid;
+
+  if (value->nhandlers <= 0) {
+    return true;
+  }
+
+  if (!HeapTupleIsValid(proctuple)) {
+    return false;
+  }
+
+  Oid current_lang_oid = ((Form_pg_proc)GETSTRUCT(proctuple))->prolang;
+
+  for (int i = 0; i < value->nhandlers; i++) {
+    CHECK_FOR_INTERRUPTS();
+
+    if (!OidIsValid(current_lang_oid)) {
+      return false;
+    }
+
+    HeapTuple langtuple =
+        SearchSysCache1(LANGOID, ObjectIdGetDatum(current_lang_oid));
+    if (!HeapTupleIsValid(langtuple)) {
+      return false;
+    }
+
+    Form_pg_language langstruct = (Form_pg_language)GETSTRUCT(langtuple);
+    Oid handler_oid = langstruct->lanplcallfoid;
+    ReleaseSysCache(langtuple);
+
+    if (handler_oid != value->handlers[i].fn_oid) {
+      *stale_handler_oid = value->handlers[i].fn_oid;
+      return false;
+    }
+
+    HeapTuple htuple = SearchSysCache1(PROCOID, ObjectIdGetDatum(handler_oid));
+    if (!HeapTupleIsValid(htuple)) {
+      *stale_handler_oid = handler_oid;
+      return false;
+    }
+
+    TransactionId h_xmin = HeapTupleHeaderGetRawXmin(htuple->t_data);
+    ItemPointerData h_tid = htuple->t_self;
+    Oid next_lang_oid = ((Form_pg_proc)GETSTRUCT(htuple))->prolang;
+    ReleaseSysCache(htuple);
+
+    if (h_xmin != value->handlers[i].fn_xmin ||
+        !ItemPointerEquals(&h_tid, &value->handlers[i].fn_tid)) {
+      *stale_handler_oid = handler_oid;
+      return false;
+    }
+
+    current_lang_oid = next_lang_oid;
+  }
+
+  return true;
 }
 
 /**
@@ -298,6 +399,12 @@ pljs_function_cache_value *pljs_cache_function_find(Oid user_id, Oid fn_oid,
   }
 
   // Search for the function inside of the context.
+  // TODO: figure out how to not cache in case of anonymous inline block or
+  // language handler without oid using something other than this hack.
+  if (!OidIsValid(fn_oid)) {
+    return NULL;
+  }
+
   pljs_function_cache_value *value = (pljs_function_cache_value *)hash_search(
       ctx_hvalue->function_hash_table, &fn_oid, HASH_FIND, &found);
 
@@ -328,6 +435,22 @@ pljs_function_cache_value *pljs_cache_function_find(Oid user_id, Oid fn_oid,
     return NULL;
   }
 
+  /*
+   * Also verify that every custom language handler in the function's
+   * transpilation chain (if any) still matches its current pg_proc tuple.
+   * If any handler in the chain was replaced (in this backend with
+   * check_function_bodies = off, or in another backend), evict the stale
+   * handler and all functions depending on it so they re-transpile.
+   */
+  Oid stale_handler_oid = InvalidOid;
+  if (!pljs_cache_handlers_valid(value, proctuple, &stale_handler_oid)) {
+    if (OidIsValid(stale_handler_oid)) {
+      pljs_cache_function_remove(stale_handler_oid);
+    }
+    pljs_cache_function_remove(fn_oid);
+    return NULL;
+  }
+
   return value;
 }
 
@@ -351,6 +474,13 @@ void pljs_function_cache_to_context(pljs_context *context,
   context->function->trigger = function_entry->trigger;
   context->function->is_srf = function_entry->is_srf;
   context->function->typeclass = function_entry->typeclass;
+
+  context->function->fn_xmin = function_entry->fn_xmin;
+  context->function->fn_tid = function_entry->fn_tid;
+  context->function->nhandlers = function_entry->nhandlers;
+  for (int i = 0; i < function_entry->nhandlers; i++) {
+    context->function->handlers[i] = function_entry->handlers[i];
+  }
 
   context->js_function = function_entry->fn;
 
@@ -392,6 +522,10 @@ void pljs_context_to_function_cache(pljs_function_cache_value *function_entry,
 
   function_entry->fn_xmin = context->function->fn_xmin;
   function_entry->fn_tid = context->function->fn_tid;
+  function_entry->nhandlers = context->function->nhandlers;
+  for (int i = 0; i < context->function->nhandlers; i++) {
+    function_entry->handlers[i] = context->function->handlers[i];
+  }
 
   function_entry->fn = context->js_function;
   function_entry->nargs = context->function->inargs;
