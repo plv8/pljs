@@ -1,0 +1,158 @@
+-- In a database whose encoding is not UTF-8, everything that passes between
+-- PostgreSQL and QuickJS is converted, not only values.
+--
+-- Values were converted, and SQL text, a function's source, column names and
+-- messages were not: QuickJS reads and writes UTF-8, so in a LATIN1 database
+-- an accented letter in them became U+FFFD one way and the two bytes of its
+-- UTF-8 the other.  A value read from a query and written into SQL text no
+-- longer equalled itself.  Everything below is ASCII, so what is compared is
+-- only what pljs converted.
+SELECT current_database() AS et_regress_db \gset
+DROP DATABASE IF EXISTS pljs_et_latin1;
+CREATE DATABASE pljs_et_latin1 ENCODING 'LATIN1' LOCALE 'C'
+  LOCALE_PROVIDER libc TEMPLATE template0;
+\c pljs_et_latin1
+CREATE EXTENSION pljs;
+
+-- 1) SQL text, and a value written into it.
+DO $$
+  const v = pljs.execute('SELECT chr(233) AS e')[0].e;
+
+  pljs.elog(NOTICE, 'text: ' + JSON.stringify(pljs.execute(
+    "SELECT '" + v + "' = chr(233) AS same")[0]));
+  pljs.elog(NOTICE, 'parameter: ' + JSON.stringify(pljs.execute(
+    'SELECT $1 = chr(233) AS same', [v])[0]));
+  pljs.elog(NOTICE, 'prepared: ' + JSON.stringify(pljs.prepare(
+    "SELECT '\u00e9' = chr(233) AS same").execute()[0]));
+$$ LANGUAGE pljs;
+
+-- 2) A function's source: a string literal and an argument's name.
+DO $$
+BEGIN
+  EXECUTE format('CREATE FUNCTION et_body(%I int4) RETURNS text '
+                 'LANGUAGE pljs AS %L', 'n' || chr(241),
+                 'return ''' || chr(233) || ''' + n' || chr(241) || ';');
+END $$;
+SELECT et_body(1) = chr(233) || '1' AS body;
+
+-- 3) Column names: a key read from a row, and a key written for one.
+DO $$
+  const row = pljs.execute('SELECT 1 AS "\u00e9"')[0];
+
+  pljs.elog(NOTICE, 'key: ' + (Object.keys(row)[0] === '\u00e9'));
+$$ LANGUAGE pljs;
+
+DO $$
+BEGIN
+  EXECUTE format('CREATE TYPE et_row AS (%I int4)', chr(233));
+END $$;
+
+CREATE FUNCTION et_rows() RETURNS SETOF et_row LANGUAGE pljs AS $$
+  pljs.return_next({'\u00e9': 1});
+  return [{'\u00e9': 2}];
+$$;
+SELECT * FROM et_rows() AS t(i);
+
+-- 4) Messages, both ways.
+CREATE FUNCTION et_throw() RETURNS void LANGUAGE pljs AS $$
+  throw new Error('caf\u00e9');
+$$;
+
+CREATE FUNCTION et_elog() RETURNS void LANGUAGE pljs AS $$
+  pljs.elog(ERROR, 'caf\u00e9');
+$$;
+
+CREATE FUNCTION et_caught() RETURNS text LANGUAGE pljs AS $$
+  try {
+    pljs.execute('SELECT * FROM "t\u00e9"');
+  } catch (e) {
+    return e.message;
+  }
+$$;
+
+DO $$
+BEGIN
+  BEGIN
+    PERFORM et_throw();
+  EXCEPTION WHEN OTHERS THEN
+    RAISE NOTICE 'thrown: %', SQLERRM = 'caf' || chr(233);
+  END;
+
+  BEGIN
+    PERFORM et_elog();
+  EXCEPTION WHEN OTHERS THEN
+    RAISE NOTICE 'elog: %', SQLERRM = 'caf' || chr(233);
+  END;
+END $$;
+
+SELECT et_caught() = format('relation "t%s" does not exist', chr(233))
+  AS caught;
+
+-- A message with a character LATIN1 has no byte for is written with '?'.
+-- Converting it raised, and that error replaced the one being reported: a
+-- NOTICE failed its function, and division_by_zero was no longer one.
+CREATE FUNCTION et_notice() RETURNS int4 LANGUAGE pljs AS $$
+  pljs.elog(NOTICE, 'done \u2713');
+  return 1;
+$$;
+SELECT et_notice();
+
+-- Only the character that cannot be converted: the whole message was written
+-- as ASCII, and an accented letter LATIN1 has was lost with it.
+CREATE FUNCTION et_partial() RETURNS void LANGUAGE pljs AS $$
+  pljs.elog(ERROR, 'caf\u00e9 \u2713');
+$$;
+
+DO $$
+BEGIN
+  PERFORM et_partial();
+EXCEPTION WHEN OTHERS THEN
+  RAISE NOTICE 'partial: %', SQLERRM = 'caf' || chr(233) || ' ?';
+END $$;
+
+-- The message about a missing column, naming a key LATIN1 has no byte for.
+-- Converting the list of keys, among ereport()'s arguments, flushed the
+-- message being built: "errstart was not called".
+CREATE TYPE et_pair AS (a int4, b int4);
+CREATE FUNCTION et_missing() RETURNS SETOF et_pair LANGUAGE pljs AS $$
+  pljs.return_next({a: 1, ['c' + String.fromCharCode(0x2713)]: 1});
+$$;
+
+DO $$
+BEGIN
+  PERFORM * FROM et_missing();
+EXCEPTION WHEN OTHERS THEN
+  RAISE NOTICE 'missing: %', SQLERRM;
+END $$;
+
+CREATE FUNCTION et_rethrow() RETURNS int4 LANGUAGE pljs AS $$
+  try {
+    pljs.execute('SELECT 1/0');
+  } catch (e) {
+    e.message = 'costs \u20ac5: ' + e.message;
+    throw e;
+  }
+$$;
+
+DO $$
+BEGIN
+  PERFORM et_rethrow();
+EXCEPTION WHEN division_by_zero THEN
+  RAISE NOTICE 'division_by_zero: %', SQLERRM;
+END $$;
+
+-- 5) A trigger's arguments.
+CREATE TABLE et_table (i int4);
+CREATE FUNCTION et_trigger() RETURNS trigger LANGUAGE pljs AS $$
+  pljs.elog(NOTICE, 'argument: ' + (TG_ARGV[0] === '\u00e9'));
+  return NEW;
+$$;
+DO $$
+BEGIN
+  EXECUTE format('CREATE TRIGGER et_trigger BEFORE INSERT ON et_table '
+                 'FOR EACH ROW EXECUTE FUNCTION et_trigger(%L)', chr(233));
+END $$;
+INSERT INTO et_table VALUES (1);
+
+\c :et_regress_db
+DROP DATABASE pljs_et_latin1;

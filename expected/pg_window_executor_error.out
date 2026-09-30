@@ -1,0 +1,178 @@
+-- An error raised while a window object's method runs the executor ends the
+-- query, and JavaScript cannot catch it.
+--
+-- A window function's arguments are evaluated, and the rows of its partition
+-- read, by the executor of the query that called it, and either can call any
+-- function.  The methods that do so caught what that raised and handed it to
+-- JavaScript, which carried on: a PL/pgSQL function that raised had left its
+-- SPI connection on the stack -- "transaction left non-empty SPI stack" --
+-- and the window function returned a result computed without the row.
+-- Nothing can roll the executor back to a savepoint, so the error ends the
+-- query instead, as it would for any other function.
+CREATE FUNCTION wee_check(x int4) RETURNS int4 LANGUAGE plpgsql AS $$
+BEGIN
+  PERFORM 1;
+  IF x = 2 AND current_setting('wee.fail', true) = 'on' THEN
+    PERFORM set_config('wee.fail', 'off', false);
+    RAISE EXCEPTION 'bad row: %', x;
+  END IF;
+  RETURN x;
+END $$;
+CREATE FUNCTION wee_sum(v int4) RETURNS int4 WINDOW LANGUAGE pljs AS $$
+  const w = pljs.get_window_object();
+  const n = w.get_partition_row_count();
+  let total = 0;
+
+  for (let i = 0; i < n; i++) {
+    try {
+      total += w.get_func_arg_in_partition(0, i, w.SEEK_HEAD, false);
+    } catch (e) {
+      pljs.elog(NOTICE, 'caught: ' + e.message);
+    }
+  }
+
+  return total;
+$$;
+-- 1) Evaluating an argument.
+SELECT set_config('wee.fail', 'on', false);
+ set_config 
+------------
+ on
+(1 row)
+
+SELECT i, wee_sum(wee_check(i)) OVER () FROM generate_series(1, 3) AS i;
+ERROR:  bad row: 2
+CONTEXT:  PL/pgSQL function wee_check(integer) line 6 at RAISE
+-- 2) Reading the partition's rows, which evaluates the query below it.
+CREATE FUNCTION wee_count(v int4) RETURNS int4 WINDOW LANGUAGE pljs AS $$
+  const w = pljs.get_window_object();
+
+  try {
+    return w.get_partition_row_count();
+  } catch (e) {
+    pljs.elog(NOTICE, 'caught: ' + e.message);
+    return -1;
+  }
+$$;
+SELECT set_config('wee.fail', 'on', false);
+ set_config 
+------------
+ on
+(1 row)
+
+SELECT i, wee_count(i) OVER ()
+  FROM (SELECT wee_check(i) AS i FROM generate_series(1, 3) AS i OFFSET 0) AS s;
+ERROR:  bad row: 2
+CONTEXT:  PL/pgSQL function wee_check(integer) line 6 at RAISE
+-- 3) The window function's query can still fail and be caught as a whole,
+-- by a caller that ran it.
+CREATE FUNCTION wee_outer() RETURNS text LANGUAGE pljs AS $$
+  try {
+    pljs.execute('SELECT wee_sum(wee_check(i)) OVER () ' +
+                  'FROM generate_series(1, 3) AS i');
+    return 'no error';
+  } catch (e) {
+    return 'caught from the query: ' + e.message;
+  }
+$$;
+SELECT set_config('wee.fail', 'on', false);
+ set_config 
+------------
+ on
+(1 row)
+
+SELECT wee_outer();
+             wee_outer             
+-----------------------------------
+ caught from the query: bad row: 2
+(1 row)
+
+-- 4) An argument that is not a seek type is still a JavaScript error.
+CREATE FUNCTION wee_seek(v int4) RETURNS text WINDOW LANGUAGE pljs AS $$
+  const w = pljs.get_window_object();
+
+  try {
+    return String(w.get_func_arg_in_frame(0, 0, 42, false));
+  } catch (e) {
+    return 'caught: ' + e.message;
+  }
+$$;
+SELECT wee_seek(i) OVER () FROM generate_series(1, 1) AS i;
+                 wee_seek                  
+-------------------------------------------
+ caught: unrecognized window seek type: 42
+(1 row)
+
+-- 5) Without an error, nothing has changed.
+SELECT set_config('wee.fail', 'off', false);
+ set_config 
+------------
+ off
+(1 row)
+
+SELECT i, wee_sum(wee_check(i)) OVER (), wee_count(i) OVER ()
+  FROM generate_series(1, 3) AS i;
+ i | wee_sum | wee_count 
+---+---------+-----------
+ 1 |       6 |         3
+ 2 |       6 |         3
+ 3 |       6 |         3
+(3 rows)
+
+-- The session is intact: building an Error walks QuickJS's stack frames.
+DO $$
+  try {
+    throw new Error('after');
+  } catch (e) {
+    pljs.elog(NOTICE, 'caught: ' + e.message);
+  }
+$$ LANGUAGE pljs;
+NOTICE:  caught: after
+-- A seek before the mark raises before anything is evaluated, and leaves
+-- nothing behind: JavaScript can catch it, as it can from set_mark_position().
+CREATE FUNCTION wee_before_mark(v int4) RETURNS text WINDOW LANGUAGE pljs AS $$
+  const w = pljs.get_window_object();
+
+  w.get_func_arg_in_partition(0, 1, w.SEEK_HEAD, true);
+
+  try {
+    w.get_func_arg_in_partition(0, 0, w.SEEK_HEAD, false);
+    return 'not raised';
+  } catch (e) {
+    return 'caught: ' + e.message;
+  }
+$$;
+SELECT wee_before_mark(i) OVER () FROM generate_series(1, 2) AS i;
+                       wee_before_mark                        
+--------------------------------------------------------------
+ caught: cannot fetch row before WindowObject's mark position
+ caught: cannot fetch row before WindowObject's mark position
+(2 rows)
+
+-- So does a position outside of the window, which rows_are_peers() raises for
+-- itself.
+CREATE FUNCTION wee_peers_out(v int4) RETURNS text WINDOW LANGUAGE pljs AS $$
+  const w = pljs.get_window_object();
+
+  try {
+    w.rows_are_peers(0, 100);
+    return 'not raised';
+  } catch (e) {
+    return 'caught: ' + e.message;
+  }
+$$;
+SELECT wee_peers_out(i) OVER (ORDER BY i) FROM generate_series(1, 2) AS i;
+                  wee_peers_out                   
+--------------------------------------------------
+ caught: specified position is out of window: 100
+ caught: specified position is out of window: 100
+(2 rows)
+
+SELECT 1 AS still_connected;
+ still_connected 
+-----------------
+               1
+(1 row)
+
+DROP FUNCTION wee_check(int4), wee_sum(int4), wee_count(int4), wee_outer(),
+  wee_seek(int4), wee_before_mark(int4), wee_peers_out(int4);

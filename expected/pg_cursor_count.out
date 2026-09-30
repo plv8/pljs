@@ -1,0 +1,99 @@
+-- cursor.fetch() and cursor.move() read their count before they find the
+-- cursor, and raise what reading it threw.
+--
+-- Reading the count runs its valueOf(), which can close the cursor, and the
+-- portal found first was used after it had been dropped.  A valueOf() that
+-- threw was ignored, and the rows fetched with the count left at 0 while its
+-- exception was pending.  The count was read with ToInt32(), which wraps, and
+-- -2147483648, which has no positive int, fetched forward once negated.
+CREATE TABLE ccn_rows AS SELECT g AS i FROM generate_series(1, 5) AS g;
+DO $$
+  const plan = pljs.prepare('SELECT i FROM ccn_rows ORDER BY i');
+  let cursor = plan.cursor();
+
+  // 1) A count whose valueOf() throws.
+  try {
+    cursor.fetch({valueOf() { throw new Error('bad count'); }});
+  } catch (e) {
+    pljs.elog(NOTICE, 'fetch: ' + e.message);
+  }
+
+  try {
+    cursor.move({valueOf() { throw new Error('bad count'); }});
+  } catch (e) {
+    pljs.elog(NOTICE, 'move: ' + e.message);
+  }
+
+  // Nothing was fetched or moved.
+  pljs.elog(NOTICE, JSON.stringify(cursor.fetch(2)));
+
+  // 2) A count whose valueOf() closes the cursor.
+  try {
+    cursor.fetch({valueOf() { cursor.close(); return 1; }});
+  } catch (e) {
+    pljs.elog(NOTICE, 'fetch: ' + e.message);
+  }
+
+  cursor = plan.cursor();
+
+  try {
+    cursor.move({valueOf() { cursor.close(); return 1; }});
+  } catch (e) {
+    pljs.elog(NOTICE, 'move: ' + e.message);
+  }
+
+  // 3) The largest count backward.
+  cursor = plan.cursor();
+  cursor.move(3);
+  pljs.elog(NOTICE, JSON.stringify(cursor.fetch(-2147483648)));
+  cursor.close();
+
+  // 4) A count too large for an int is as many rows as an int can count,
+  // forward or backward.  It wrapped: 2**31 went backward, 2**32 + 2 fetched
+  // two rows, and Infinity none.
+  for (const count of [2 ** 31, 2 ** 32 + 2, Infinity, -Infinity]) {
+    cursor = plan.cursor();
+    cursor.move(3);
+    pljs.elog(NOTICE, count + ': ' + JSON.stringify(cursor.fetch(count)));
+    cursor.close();
+  }
+
+  // 5) A cursor whose name cannot be read is that error, for close() as for
+  // fetch() and move().  close() threw "Unable to find cursor" in its place.
+  cursor = plan.cursor();
+
+  const named = Object.create(cursor, {
+    name: { get() { throw new Error('no name'); } }
+  });
+
+  for (const method of ['fetch', 'move', 'close']) {
+    try {
+      named[method](1);
+    } catch (e) {
+      pljs.elog(NOTICE, method + ': ' + e.message);
+    }
+  }
+
+  cursor.close();
+  plan.free();
+$$ LANGUAGE pljs;
+NOTICE:  fetch: bad count
+NOTICE:  move: bad count
+NOTICE:  [{"i":1},{"i":2}]
+NOTICE:  fetch: Unable to find cursor
+NOTICE:  move: Unable to find plan
+NOTICE:  [{"i":2},{"i":1}]
+NOTICE:  2147483648: [{"i":4},{"i":5}]
+NOTICE:  4294967298: [{"i":4},{"i":5}]
+NOTICE:  Infinity: [{"i":4},{"i":5}]
+NOTICE:  -Infinity: [{"i":2},{"i":1}]
+NOTICE:  fetch: no name
+NOTICE:  move: no name
+NOTICE:  close: no name
+SELECT 1 AS still_connected;
+ still_connected 
+-----------------
+               1
+(1 row)
+
+DROP TABLE ccn_rows;

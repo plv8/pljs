@@ -160,42 +160,51 @@ void pljs_cache_reset(void) {
  * @param ctx #JSContext - context to be added to the cache
  */
 void pljs_cache_context_add(Oid user_id, JSContext *ctx) {
+  pljs_context_cache_value *hvalue;
+  MemoryContext function_memory_context;
+  HTAB *function_hash_table;
+  HASHCTL function_ctl = {0};
   bool found;
-
-  // Ask for an empty #pljs_context_cache_value to fill.
-  pljs_context_cache_value *hvalue = (pljs_context_cache_value *)hash_search(
-      pljs_context_HashTable, (void *)&user_id, HASH_ENTER, &found);
 
   // If it found that means we're trying to create a context that
   // already exists for a `user_id`.  This should never happen.
-  if (found) {
+  if (hash_search(pljs_context_HashTable, (void *)&user_id, HASH_FIND, NULL) !=
+      NULL) {
     ereport(
         ERROR, errcode(ERRCODE_INTERNAL_ERROR),
         errmsg("a context cache entry already exists for user_id %d", user_id));
   }
 
-  hvalue->ctx = ctx;
-  hvalue->user_id = user_id;
-  HASHCTL function_ctl = {0};
+  /*
+   * What the entry holds is made before the entry is: one left half filled by
+   * an error -- running out of memory -- pointed at a context that its caller
+   * then freed; see pljs_create_context().
+   */
 
   // Create a #MemoryContext to store the function data.
-  hvalue->function_memory_context =
+  function_memory_context =
       AllocSetContextCreate(cache_memory_context, "PLJS Function Cache Context",
                             ALLOCSET_SMALL_SIZES);
 
   // The key is the `fn_oid`, so an #Oid.
   function_ctl.keysize = sizeof(Oid);
   function_ctl.entrysize = sizeof(pljs_function_cache_value);
-  function_ctl.hcxt = hvalue->function_memory_context;
-
-  hvalue->ctx = ctx;
+  function_ctl.hcxt = function_memory_context;
 
   // Create a hash table for #pljs_function_cache_value entries,
   // stored by `fn_oid`.
-  hvalue->function_hash_table =
+  function_hash_table =
       hash_create("PLJS Function Cache",
                   128, // Arbitrary guess at functions per user.
                   &function_ctl, HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+
+  hvalue = (pljs_context_cache_value *)hash_search(
+      pljs_context_HashTable, (void *)&user_id, HASH_ENTER, &found);
+
+  hvalue->ctx = ctx;
+  hvalue->user_id = user_id;
+  hvalue->function_memory_context = function_memory_context;
+  hvalue->function_hash_table = function_hash_table;
 }
 
 /**
@@ -344,13 +353,12 @@ void pljs_function_cache_to_context(pljs_context *context,
 
   context->js_function = function_entry->fn;
 
-  context->function = (pljs_func *)palloc(sizeof(pljs_func));
+  context->function = (pljs_func *)palloc0(sizeof(pljs_func));
 
   context->function->fn_oid = function_entry->fn_oid;
   context->function->user_id = function_entry->user_id;
   context->function->trigger = function_entry->trigger;
   context->function->is_srf = function_entry->is_srf;
-  context->function->typeclass = function_entry->typeclass;
 
   context->js_function = function_entry->fn;
 
@@ -388,7 +396,6 @@ void pljs_context_to_function_cache(pljs_function_cache_value *function_entry,
   function_entry->user_id = context->function->user_id;
   function_entry->trigger = context->function->trigger;
   function_entry->is_srf = context->function->is_srf;
-  function_entry->typeclass = context->function->typeclass;
 
   function_entry->fn_xmin = context->function->fn_xmin;
   function_entry->fn_tid = context->function->fn_tid;

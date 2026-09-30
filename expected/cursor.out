@@ -104,10 +104,10 @@ INFO:  {"i":1,"s":"s1"}
 INFO:  {"i":2,"s":"s2"}
 INFO:  {"i":3,"s":"s3"}
 INFO:  {"i":4,"s":"s4"}
-INFO:  2
-INFO:  1
-INFO:  3
-INFO:  2
+INFO:  [{"i":1,"s":"s1"},{"i":2,"s":"s2"}]
+INFO:  [{"i":1,"s":"s1"}]
+INFO:  [{"i":2,"s":"s2"},{"i":3,"s":"s3"},{"i":4,"s":"s4"}]
+INFO:  [{"i":3,"s":"s3"},{"i":4,"s":"s4"}]
 INFO:  rows.length =  1
 INFO:  {"i":2,"s":"s2"}
 WARNING:  Error: Invalid plan

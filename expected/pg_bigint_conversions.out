@@ -1,0 +1,141 @@
+-- A BigInt is converted to json and jsonb as JSON.stringify() converts it,
+-- and to numeric exactly, without leaking.
+-- 1) JSON.stringify() has no JSON for a BigInt.  jsonb stored it as a string,
+-- "10", where json raised; every int8 a query returns is a BigInt.
+CREATE FUNCTION bic_json() RETURNS json LANGUAGE pljs AS $$
+  return {a: 10n};
+$$;
+SELECT bic_json();
+ERROR:  Do not know how to serialize a BigInt
+DETAIL:  TypeError: Do not know how to serialize a BigInt
+
+CREATE FUNCTION bic_jsonb() RETURNS jsonb LANGUAGE pljs AS $$
+  return {a: 10n};
+$$;
+SELECT bic_jsonb();
+ERROR:  cannot convert a BigInt to jsonb
+HINT:  Convert it with Number() or String(), or define BigInt.prototype.toJSON().
+CREATE FUNCTION bic_jsonb_element() RETURNS jsonb LANGUAGE pljs AS $$
+  return [1, 10n];
+$$;
+SELECT bic_jsonb_element();
+ERROR:  cannot convert a BigInt to jsonb
+HINT:  Convert it with Number() or String(), or define BigInt.prototype.toJSON().
+-- A BigInt object, as JSON.stringify() unwraps one.  It was written as its
+-- properties, {}.
+CREATE FUNCTION bic_jsonb_object() RETURNS jsonb LANGUAGE pljs AS $$
+  return {a: Object(10n)};
+$$;
+SELECT bic_jsonb_object();
+ERROR:  cannot convert a BigInt to jsonb
+HINT:  Convert it with Number() or String(), or define BigInt.prototype.toJSON().
+-- A data error, which a caller can tell from an internal one.
+DO $$
+BEGIN
+  PERFORM bic_jsonb();
+EXCEPTION WHEN invalid_parameter_value THEN
+  RAISE NOTICE 'invalid_parameter_value: %', SQLERRM;
+END $$;
+NOTICE:  invalid_parameter_value: cannot convert a BigInt to jsonb
+CREATE FUNCTION bic_jsonb_row() RETURNS jsonb LANGUAGE pljs AS $$
+  const row = pljs.execute('SELECT 10::int8 AS id')[0];
+  return {id: row.id};
+$$;
+SELECT bic_jsonb_row();
+ERROR:  cannot convert a BigInt to jsonb
+HINT:  Convert it with Number() or String(), or define BigInt.prototype.toJSON().
+-- Converted as a Number or a String, it is stored.
+CREATE FUNCTION bic_jsonb_converted() RETURNS jsonb LANGUAGE pljs AS $$
+  const row = pljs.execute('SELECT 10::int8 AS id')[0];
+  return {id: Number(row.id), s: String(row.id)};
+$$;
+SELECT bic_jsonb_converted();
+  bic_jsonb_converted  
+-----------------------
+ {"s": "10", "id": 10}
+(1 row)
+
+-- As JSON.stringify(), a BigInt with a toJSON() is written as what it gives.
+CREATE FUNCTION bic_jsonb_to_json() RETURNS text LANGUAGE pljs AS $$
+  BigInt.prototype.toJSON = function () { return Number(this); };
+
+  try {
+    return JSON.stringify(pljs.execute('SELECT $1::jsonb AS j',
+                                       [{a: 10n, b: [1n], c: Object(2n)}])[0].j);
+  } finally {
+    delete BigInt.prototype.toJSON;
+  }
+$$;
+SELECT bic_jsonb_to_json();
+   bic_jsonb_to_json    
+------------------------
+ {"a":10,"b":[1],"c":2}
+(1 row)
+
+SELECT bic_jsonb();
+ERROR:  cannot convert a BigInt to jsonb
+HINT:  Convert it with Number() or String(), or define BigInt.prototype.toJSON().
+-- 2) numeric from a BigInt, exactly, and with the typmod applied.
+CREATE FUNCTION bic_numeric() RETURNS SETOF numeric LANGUAGE pljs AS $$
+  pljs.return_next(5n);
+  pljs.return_next(-123456789012345678901234567890n);
+  pljs.return_next({n: 7n});
+$$;
+SELECT * FROM bic_numeric();
+           bic_numeric           
+---------------------------------
+                               5
+ -123456789012345678901234567890
+                               7
+(3 rows)
+
+CREATE TYPE bic_scaled AS (n numeric(5, 1));
+CREATE FUNCTION bic_numeric_typmod() RETURNS SETOF bic_scaled
+LANGUAGE pljs AS $$
+  pljs.return_next({n: 12n});
+$$;
+SELECT * FROM bic_numeric_typmod();
+  n   
+------
+ 12.0
+(1 row)
+
+-- The BigInt's text was rendered twice and released neither time: a string of
+-- about 300 bytes for every row here, 6MB in all.
+CREATE FUNCTION bic_mb() RETURNS float8 LANGUAGE sql AS $$
+  SELECT (pljs_info() ->> 'malloc_size')::float8 / (1024 * 1024);
+$$;
+CREATE FUNCTION bic_gc() RETURNS void LANGUAGE pljs AS $$ pljs.gc(); $$;
+CREATE FUNCTION bic_numeric_rows(n int4) RETURNS SETOF numeric
+LANGUAGE pljs AS $$
+  const big = 10n ** 300n;
+
+  for (let i = 0; i < n; i++) {
+    pljs.return_next(big + BigInt(i));
+  }
+$$;
+DO $$
+DECLARE
+  before float8;
+BEGIN
+  PERFORM count(*) FROM bic_numeric_rows(10);
+  PERFORM bic_gc();
+  before := bic_mb();
+  PERFORM count(*) FROM bic_numeric_rows(20000);
+  PERFORM bic_gc();
+  RAISE NOTICE 'released: %', bic_mb() - before < 2;
+END $$;
+NOTICE:  released: t
+DROP FUNCTION bic_numeric_rows(int4);
+DROP FUNCTION bic_gc();
+DROP FUNCTION bic_mb();
+DROP FUNCTION bic_numeric_typmod();
+DROP TYPE bic_scaled;
+DROP FUNCTION bic_numeric();
+DROP FUNCTION bic_jsonb_to_json();
+DROP FUNCTION bic_jsonb_converted();
+DROP FUNCTION bic_jsonb_row();
+DROP FUNCTION bic_jsonb_object();
+DROP FUNCTION bic_jsonb_element();
+DROP FUNCTION bic_jsonb();
+DROP FUNCTION bic_json();

@@ -83,7 +83,42 @@ REGRESS = init-extension function json jsonb json_conv types bytea context \
 	pg_conversion_footguns \
 	pg_return_null_fcinfo \
 	pg_array_undefined_elements \
-	pg_window_polymorphic_args
+	pg_window_polymorphic_args \
+	pg_fallback_type_io \
+	pg_type_io_domains \
+	pg_type_io_typmod \
+	pg_null_result \
+	pg_result_conversion_spi \
+	pg_prepare_declared_types \
+	pg_conversion_user_code \
+	pg_prepare_memory_context \
+	pg_error_extraction_spi \
+	pg_call_storage \
+	pg_setof_composite_domain \
+	pg_return_next_domain_check \
+	pg_plan_parameter_memory \
+	pg_json_writer \
+	pg_bytea_bytes \
+	pg_fallback_scratch_memory \
+	pg_fallback_round_trip \
+	pg_builtin_conversion_errors \
+	pg_argument_leak \
+	pg_window_executor_error \
+	pg_conversion_error_leaks \
+	pg_array_length_range \
+	pg_utf8_validation \
+	pg_pseudotype_values \
+	pg_setof_polymorphic_result \
+	pg_conversion_exceptions \
+	pg_bigint_conversions \
+	pg_conversion_cancel \
+	pg_conversion_retry \
+	pg_cursor_count \
+	pg_top_level_code \
+	pg_argument_positions \
+	pg_encoding_text \
+	pg_resource_cleanup \
+	pg_parallel_mode
 
 all: deps/quickjs/quickjs.h deps/quickjs/libquickjs.a pljs--$(PLJS_VERSION).sql
 

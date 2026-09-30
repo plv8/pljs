@@ -92,7 +92,8 @@ DO $$
   const res = pljs.execute(`select $1::bytea`, [test]);
   const result = res[0].bytea;
 
-  if (result === test) {
+  // bytea is a Uint8Array of its bytes.
+  if (result instanceof Uint8Array && String.fromCharCode(...result) === test) {
     pljs.elog(INFO, 'OK');
   } else {
     pljs.elog(WARNING, 'FAIL');
