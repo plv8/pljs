@@ -28,7 +28,11 @@ static create_upper_paths_hook_type prev_create_upper_paths = NULL;
 static set_rel_pathlist_hook_type prev_set_rel_pathlist = NULL;
 static set_join_pathlist_hook_type prev_set_join_pathlist = NULL;
 static join_search_hook_type prev_join_search = NULL;
+#if PG_VERSION_NUM >= 190000
+static build_simple_rel_hook_type prev_build_simple_rel = NULL;
+#else
 static get_relation_info_hook_type prev_get_relation_info = NULL;
+#endif
 static needs_fmgr_hook_type prev_needs_fmgr = NULL;
 static fmgr_hook_type prev_fmgr = NULL;
 static object_access_hook_type prev_object_access = NULL;
@@ -552,9 +556,16 @@ static void pljs_executor_end_hook(QueryDesc *queryDesc) {
     standard_ExecutorEnd(queryDesc);
 }
 
+#if PG_VERSION_NUM >= 190000
+static PlannedStmt *pljs_planner_hook(Query *parse, const char *query_string,
+                                      int cursorOptions,
+                                      ParamListInfo boundParams,
+                                      ExplainState *es) {
+#else
 static PlannedStmt *pljs_planner_hook(Query *parse, const char *query_string,
                                       int cursorOptions,
                                       ParamListInfo boundParams) {
+#endif
   if (pljs_hook_is_active(configuration.hook_planner)) {
     if (depth_planner >= configuration.hooks_max_depth) {
       elog(WARNING, "pljs: planner exceeded max recursion depth");
@@ -604,10 +615,18 @@ static PlannedStmt *pljs_planner_hook(Query *parse, const char *query_string,
     }
   }
 
+#if PG_VERSION_NUM >= 190000
+  if (prev_planner)
+    return prev_planner(parse, query_string, cursorOptions, boundParams, es);
+  else
+    return standard_planner(parse, query_string, cursorOptions, boundParams,
+                            es);
+#else
   if (prev_planner)
     return prev_planner(parse, query_string, cursorOptions, boundParams);
   else
     return standard_planner(parse, query_string, cursorOptions, boundParams);
+#endif
 }
 
 static void pljs_create_upper_paths_hook(PlannerInfo *root,
@@ -837,8 +856,15 @@ static RelOptInfo *pljs_join_search_hook(PlannerInfo *root, int levels_needed,
     return standard_join_search(root, levels_needed, initial_rels);
 }
 
-static void pljs_get_relation_info_hook(PlannerInfo *root, Oid relationObjectId,
-                                        bool inhparent, RelOptInfo *rel) {
+/**
+ * @brief Calls the pljs.get_relation_info_hook function for a relation.
+ *
+ * Once PostgreSQL has loaded a table's catalog information into @p rel: from
+ * get_relation_info_hook before PostgreSQL 19, and from build_simple_rel_hook,
+ * which replaced it and runs at the same point, since.
+ */
+static void pljs_relation_info(Oid relationObjectId, bool inhparent,
+                               RelOptInfo *rel) {
   if (pljs_hook_is_active(configuration.hook_get_relation_info)) {
     if (depth_get_relation_info >= configuration.hooks_max_depth) {
       elog(WARNING, "pljs: get_relation_info exceeded max recursion depth");
@@ -887,10 +913,27 @@ static void pljs_get_relation_info_hook(PlannerInfo *root, Oid relationObjectId,
     depth_get_relation_info = saved_depth;
     }
   }
+}
+
+#if PG_VERSION_NUM >= 190000
+static void pljs_build_simple_rel_hook(PlannerInfo *root, RelOptInfo *rel,
+                                       RangeTblEntry *rte) {
+  /* get_relation_info_hook ran only for tables, where it was called from. */
+  if (rte->rtekind == RTE_RELATION)
+    pljs_relation_info(rte->relid, rte->inh, rel);
+
+  if (prev_build_simple_rel)
+    prev_build_simple_rel(root, rel, rte);
+}
+#else
+static void pljs_get_relation_info_hook(PlannerInfo *root, Oid relationObjectId,
+                                        bool inhparent, RelOptInfo *rel) {
+  pljs_relation_info(relationObjectId, inhparent, rel);
 
   if (prev_get_relation_info)
     prev_get_relation_info(root, relationObjectId, inhparent, rel);
 }
+#endif
 
 static bool pljs_needs_fmgr_hook(Oid fn_oid) {
   if (pljs_hook_is_active(configuration.hook_needs_fmgr)) {
@@ -1200,8 +1243,13 @@ void pljs_hooks_install(void) {
   prev_join_search = join_search_hook;
   join_search_hook = pljs_join_search_hook;
 
+#if PG_VERSION_NUM >= 190000
+  prev_build_simple_rel = build_simple_rel_hook;
+  build_simple_rel_hook = pljs_build_simple_rel_hook;
+#else
   prev_get_relation_info = get_relation_info_hook;
   get_relation_info_hook = pljs_get_relation_info_hook;
+#endif
 
   prev_needs_fmgr = needs_fmgr_hook;
   needs_fmgr_hook = pljs_needs_fmgr_hook;
