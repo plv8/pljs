@@ -1,0 +1,188 @@
+-- A set of a domain over a composite type.
+--
+-- Its rows are rows of the composite type, each of which has to satisfy the
+-- domain.  The function's type class, TYPEFUNC_COMPOSITE_DOMAIN, was taken
+-- for a single-column set: the first property of each returned row object
+-- was converted, and that one Datum was passed as a row of every column of
+-- the composite type.  tuplestore_putvalues() read the rest off the stack,
+-- and the backend was killed.  The domain's constraints were never checked,
+-- by return_next() either.
+CREATE TYPE scd_pair AS (a int4, b text);
+CREATE DOMAIN scd_dpair AS scd_pair CHECK ((VALUE).a > 0);
+-- 1) Rows the function returns.
+CREATE FUNCTION scd_returned() RETURNS SETOF scd_dpair LANGUAGE pljs AS $$
+  return [{a: 1, b: 'one'}, {a: 2, b: 'two'}];
+$$;
+SELECT * FROM scd_returned();
+ a |  b  
+---+-----
+ 1 | one
+ 2 | two
+(2 rows)
+
+-- A row that fails the domain's CHECK.
+CREATE FUNCTION scd_returned_bad() RETURNS SETOF scd_dpair LANGUAGE pljs AS $$
+  return [{a: 1, b: 'one'}, {a: -2, b: 'minus two'}];
+$$;
+SELECT * FROM scd_returned_bad();
+ERROR:  value for domain scd_dpair violates check constraint "scd_dpair_check"
+-- 2) Rows passed to return_next().
+CREATE FUNCTION scd_next() RETURNS SETOF scd_dpair LANGUAGE pljs AS $$
+  pljs.return_next({a: 3, b: 'three'});
+  pljs.return_next(null);
+  pljs.return_next({a: 4, b: 'four'});
+$$;
+SELECT * FROM scd_next();
+ a |   b   
+---+-------
+ 3 | three
+   | 
+ 4 | four
+(3 rows)
+
+CREATE FUNCTION scd_next_bad() RETURNS SETOF scd_dpair LANGUAGE pljs AS $$
+  pljs.return_next({a: 3, b: 'three'});
+  try {
+    pljs.return_next({a: -4, b: 'minus four'});
+  } catch (e) {
+    pljs.elog(NOTICE, 'return_next: ' + e.message);
+  }
+  pljs.return_next({a: 5, b: 'five'});
+$$;
+SELECT * FROM scd_next_bad();
+NOTICE:  return_next: value for domain scd_dpair violates check constraint "scd_dpair_check"
+ a |   b   
+---+-------
+ 3 | three
+ 5 | five
+(2 rows)
+
+-- A missing column is named, as for any other composite set.
+CREATE FUNCTION scd_next_missing() RETURNS SETOF scd_dpair LANGUAGE pljs AS $$
+  pljs.return_next({a: 6});
+$$;
+SELECT * FROM scd_next_missing();
+ERROR:  return_next: result column "b" has no matching property (object has: a; property names are case sensitive)
+DETAIL:  Error: return_next: result column "b" has no matching property (object has: a; property names are case sensitive)
+    at scd_next_missing (<function>:3:19)
+
+-- 3) A NOT NULL domain rejects a null row.
+CREATE DOMAIN scd_nn_pair AS scd_pair NOT NULL;
+CREATE FUNCTION scd_next_null() RETURNS SETOF scd_nn_pair LANGUAGE pljs AS $$
+  pljs.return_next({a: 7, b: 'seven'});
+  pljs.return_next(null);
+$$;
+SELECT * FROM scd_next_null();
+ERROR:  domain scd_nn_pair does not allow null values
+DETAIL:  Error: domain scd_nn_pair does not allow null values
+    at scd_next_null (<function>:4:19)
+
+-- A null row the function returns, rather than passes to return_next(), is
+-- left out, as for any other composite set -- once the domain has allowed it.
+-- A NOT NULL domain's set dropped it without a word.
+CREATE FUNCTION scd_returned_null() RETURNS SETOF scd_nn_pair LANGUAGE pljs AS $$
+  return [{a: 9, b: 'nine'}, null];
+$$;
+SELECT * FROM scd_returned_null();
+ERROR:  domain scd_nn_pair does not allow null values
+CREATE FUNCTION scd_returned_null_ok() RETURNS SETOF scd_dpair LANGUAGE pljs AS $$
+  return [{a: 10, b: 'ten'}, null, undefined];
+$$;
+SELECT * FROM scd_returned_null_ok();
+ a  |  b  
+----+-----
+ 10 | ten
+(1 row)
+
+-- 4) A domain over a single-column composite type is still checked.
+CREATE TYPE scd_single AS (a int4);
+CREATE DOMAIN scd_dsingle AS scd_single CHECK ((VALUE).a > 0);
+CREATE FUNCTION scd_single_bad() RETURNS SETOF scd_dsingle LANGUAGE pljs AS $$
+  return [{a: 8}, {a: -5}];
+$$;
+SELECT * FROM scd_single_bad();
+ERROR:  value for domain scd_dsingle violates check constraint "scd_dsingle_check"
+-- 5) Two integer columns, where the second column was stack garbage.
+CREATE TYPE scd_ints AS (a int4, b int4);
+CREATE DOMAIN scd_dints AS scd_ints;
+CREATE FUNCTION scd_ints() RETURNS SETOF scd_dints LANGUAGE pljs AS $$
+  return [{a: 1, b: 10}, {a: 2, b: 20}];
+$$;
+SELECT * FROM scd_ints();
+ a | b  
+---+----
+ 1 | 10
+ 2 | 20
+(2 rows)
+
+-- 6) A row type altered while its set is being returned.  Its rows were built
+-- with the row type as the catalog had it then, and read as the row type the
+-- call began with: a column altered from text to bigint was read as text,
+-- and the backend could crash.  The two have to match, as they do for
+-- PL/pgSQL.
+CREATE TYPE scd_altered AS (a int4, b text);
+CREATE DOMAIN scd_daltered AS scd_altered CHECK ((VALUE).a > 0);
+CREATE FUNCTION scd_altered_rows() RETURNS SETOF scd_daltered
+LANGUAGE pljs AS $$
+  pljs.return_next({a: 1, b: 'one'});
+  pljs.execute('ALTER TYPE scd_altered ALTER ATTRIBUTE b TYPE int8');
+  pljs.return_next({a: 2, b: 20});
+$$;
+-- The detail's wording differs between versions of PostgreSQL.
+\set VERBOSITY terse
+SELECT * FROM scd_altered_rows();
+ERROR:  returned record type does not match expected record type
+\set VERBOSITY default
+SELECT 1 AS still_connected;
+ still_connected 
+-----------------
+               1
+(1 row)
+
+-- A table's row type with a column added with a default.  The typcache marks
+-- that column as having a missing value, which needs a conversion one way
+-- between the two row types and not the other, and the conversion needed was
+-- taken to be the other's: it was not there, and the backend crashed.
+CREATE TABLE scd_table (a int4, b text);
+ALTER TABLE scd_table ADD COLUMN c int4 DEFAULT 5;
+CREATE DOMAIN scd_dtable AS scd_table CHECK ((VALUE).a > 0);
+CREATE FUNCTION scd_table_rows() RETURNS SETOF scd_dtable LANGUAGE pljs AS $$
+  pljs.return_next({a: 1, b: 'one', c: 2});
+  return [{a: 3, b: 'three', c: 4}];
+$$;
+SELECT * FROM scd_table_rows();
+ a |   b   | c 
+---+-------+---
+ 1 | one   | 2
+ 3 | three | 4
+(2 rows)
+
+-- 7) Each column of a row is read once.  A row was read to check that it had
+-- every column, and again to convert it, which ran a Proxy's get trap twice
+-- for each.
+CREATE FUNCTION scd_reads() RETURNS SETOF scd_dpair LANGUAGE pljs AS $$
+  let reads = 0;
+
+  pljs.return_next(new Proxy({a: 1, b: 'one'}, {
+    get(target, key) {
+      reads++;
+      return Reflect.get(target, key);
+    }
+  }));
+  pljs.return_next({a: 2, b: reads + ' reads'});
+$$;
+SELECT * FROM scd_reads();
+ a |    b    
+---+---------
+ 1 | one
+ 2 | 2 reads
+(2 rows)
+
+DROP FUNCTION scd_returned(), scd_returned_bad(), scd_next(), scd_next_bad(),
+  scd_next_missing(), scd_next_null(), scd_returned_null(),
+  scd_returned_null_ok(), scd_single_bad(), scd_ints(), scd_altered_rows(),
+  scd_table_rows(), scd_reads();
+DROP DOMAIN scd_dpair, scd_nn_pair, scd_dsingle, scd_dints, scd_daltered,
+  scd_dtable;
+DROP TYPE scd_pair, scd_single, scd_ints, scd_altered;
+DROP TABLE scd_table;

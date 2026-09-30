@@ -1,0 +1,83 @@
+-- A function declared RETURNS jsonb[] or json[] must build a SQL array whose
+-- elements are json values.
+--
+-- The decision between "build a SQL array" and "build a JSON array" was taken by
+-- comparing the type OID against json and jsonb. By that point the OID has
+-- already been rewritten to the *element* type, and the element type of jsonb[]
+-- is jsonb -- so an array target looked like a scalar json target. The whole
+-- JavaScript array was stringified to "[object Object],[object Object]" and
+-- handed to the json input function, and what came back was a cache lookup
+-- failure for a type OID read out of uninitialised memory. The result is that
+-- jsonb[] and json[] have never worked, for any element shape.
+CREATE EXTENSION IF NOT EXISTS pljs;
+NOTICE:  extension "pljs" already exists, skipping
+-- Objects, which is the case that reads as obviously broken.
+CREATE FUNCTION jar_objects() RETURNS jsonb[] AS $$ return [{a: 1}, {b: 2}]; $$ LANGUAGE pljs;
+SELECT jar_objects() AS objects;
+           objects           
+-----------------------------
+ {"{\"a\": 1}","{\"b\": 2}"}
+(1 row)
+
+SELECT array_length(jar_objects(), 1) AS objects_len;
+ objects_len 
+-------------
+           2
+(1 row)
+
+SELECT (jar_objects())[1]->>'a' AS first_a;
+ first_a 
+---------
+ 1
+(1 row)
+
+-- Scalars, strings and nulls as elements.
+CREATE FUNCTION jar_scalars() RETURNS jsonb[] AS $$ return [1, 'two', true, null]; $$ LANGUAGE pljs;
+SELECT jar_scalars() AS scalars;
+         scalars         
+-------------------------
+ {1,"\"two\"",true,NULL}
+(1 row)
+
+-- Nested arrays are json arrays inside the SQL array, not a flattened result.
+CREATE FUNCTION jar_nested() RETURNS jsonb[] AS $$ return [[1, 2], [3]]; $$ LANGUAGE pljs;
+SELECT jar_nested() AS nested;
+     nested     
+----------------
+ {"[1, 2]",[3]}
+(1 row)
+
+-- The empty array.
+CREATE FUNCTION jar_empty() RETURNS jsonb[] AS $$ return []; $$ LANGUAGE pljs;
+SELECT jar_empty() AS empty, array_length(jar_empty(), 1) IS NULL AS empty_has_no_length;
+ empty | empty_has_no_length 
+-------+---------------------
+ {}    | t
+(1 row)
+
+-- json[] takes the same path.
+CREATE FUNCTION jar_json() RETURNS json[] AS $$ return [{x: 'y'}]; $$ LANGUAGE pljs;
+SELECT jar_json() AS json_array;
+    json_array     
+-------------------
+ {"{\"x\":\"y\"}"}
+(1 row)
+
+-- A bare jsonb target still turns a JavaScript array into a JSON array, which is
+-- what the original condition existed to do. This is the regression guard.
+CREATE FUNCTION jar_bare() RETURNS jsonb AS $$ return [1, 2, 3]; $$ LANGUAGE pljs;
+SELECT jar_bare() AS bare_jsonb, jsonb_typeof(jar_bare()) AS bare_type;
+ bare_jsonb | bare_type 
+------------+-----------
+ [1, 2, 3]  | array
+(1 row)
+
+-- And a plain SQL array of a non-json type is unaffected.
+CREATE FUNCTION jar_ints() RETURNS int[] AS $$ return [1, 2, 3]; $$ LANGUAGE pljs;
+SELECT jar_ints() AS ints;
+  ints   
+---------
+ {1,2,3}
+(1 row)
+
+DROP FUNCTION jar_objects, jar_scalars, jar_nested, jar_empty, jar_json, jar_bare, jar_ints;

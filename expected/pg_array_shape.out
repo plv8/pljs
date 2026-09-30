@@ -1,0 +1,69 @@
+-- pljs represents a SQL array as a flat JavaScript array. An array whose shape
+-- cannot be represented that way must raise, not silently change value.
+--
+-- Both directions were wrong, in opposite ways.
+--
+-- Reading: deconstruct_array() flattens, so a multidimensional array arrived in
+-- JavaScript as a one-dimensional one -- {{1,2},{3,4}} became [1,2,3,4] -- and
+-- writing it back produced a different value than was read.
+--
+-- Writing: a nested JavaScript array aimed at a scalar element type was passed to
+-- the array conversion anyway. The element loop then converted each *inner array*
+-- to the element type, so `return [[1,2],[3,4]]` for int[] produced two integers
+-- that were really the inner arrays' pointers. Numbers that look like data.
+CREATE EXTENSION IF NOT EXISTS pljs;
+NOTICE:  extension "pljs" already exists, skipping
+\set VERBOSITY terse
+-- Reading a multidimensional array.
+CREATE FUNCTION shp_read() RETURNS text AS $$
+  return JSON.stringify(pljs.execute("SELECT '{{1,2},{3,4}}'::int[] AS v")[0].v);
+$$ LANGUAGE pljs;
+SELECT shp_read();
+ERROR:  cannot convert a multidimensional array to a JavaScript array
+-- Writing a nested array to a scalar element type.
+CREATE FUNCTION shp_write() RETURNS int[] AS $$ return [[1, 2], [3, 4]]; $$ LANGUAGE pljs;
+SELECT shp_write();
+ERROR:  cannot convert a JavaScript array to integer
+-- A JavaScript array aimed at a plain scalar, which took the same path.
+CREATE FUNCTION shp_scalar() RETURNS int AS $$ return [1, 2]; $$ LANGUAGE pljs;
+SELECT shp_scalar();
+ERROR:  cannot convert a JavaScript array to integer
+CREATE FUNCTION shp_text() RETURNS text AS $$ return ['a', 'b']; $$ LANGUAGE pljs;
+SELECT shp_text();
+ERROR:  cannot convert a JavaScript array to text
+\set VERBOSITY default
+-- One-dimensional arrays are unaffected, in both directions.
+CREATE FUNCTION shp_ok_write() RETURNS int[] AS $$ return [1, 2, 3]; $$ LANGUAGE pljs;
+SELECT shp_ok_write() AS one_dimensional_out;
+ one_dimensional_out 
+---------------------
+ {1,2,3}
+(1 row)
+
+CREATE FUNCTION shp_ok_read() RETURNS text AS $$
+  return JSON.stringify(pljs.execute("SELECT '{1,2,3}'::int[] AS v")[0].v);
+$$ LANGUAGE pljs;
+SELECT shp_ok_read() AS one_dimensional_in;
+ one_dimensional_in 
+--------------------
+ [1,2,3]
+(1 row)
+
+-- And a nested array is still valid for json and jsonb, which is the one target
+-- that can represent it.
+CREATE FUNCTION shp_jsonb() RETURNS jsonb AS $$ return [[1, 2], [3, 4]]; $$ LANGUAGE pljs;
+SELECT shp_jsonb() AS nested_jsonb;
+   nested_jsonb   
+------------------
+ [[1, 2], [3, 4]]
+(1 row)
+
+CREATE FUNCTION shp_jsonb_arr() RETURNS jsonb[] AS $$ return [[1, 2], [3]]; $$ LANGUAGE pljs;
+SELECT shp_jsonb_arr() AS nested_jsonb_array;
+ nested_jsonb_array 
+--------------------
+ {"[1, 2]",[3]}
+(1 row)
+
+DROP FUNCTION shp_read, shp_write, shp_scalar, shp_text, shp_ok_write, shp_ok_read,
+              shp_jsonb, shp_jsonb_arr;

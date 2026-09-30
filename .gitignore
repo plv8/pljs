@@ -1,5 +1,7 @@
+*.a
 *.o
 *.so
+*.dll
 *.dylib
 results
 regression.diffs
@@ -7,6 +9,7 @@ regression.out
 
 .clangd
 .depend
+.deps
 docs/html
 docs/latex
 docs/xml

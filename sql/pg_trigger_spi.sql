@@ -1,0 +1,106 @@
+-- A trigger must be able to use SPI.
+--
+-- call_trigger() never called SPI_connect_ext(), which call_function() and
+-- call_srf_function() both do.  So every SPI entry point failed inside a trigger:
+-- not only DDL, but a bare pljs.execute("SELECT 1").  Upstream reports this as
+-- "execution error"; the error-surfacing work in this series turns it into the
+-- underlying "current transaction is aborted, commands ignored until end of
+-- transaction block", which is what made it findable at all.
+--
+-- Querying from a trigger is a primary use of a trigger, so this made a large part
+-- of the trigger surface unusable, and nothing in the suite covered it -- the
+-- existing trigger tests only inspect NEW/OLD and the TG_* variables.
+CREATE EXTENSION IF NOT EXISTS pljs;
+
+CREATE TABLE ts_log (msg text);
+CREATE TABLE ts_t (x int);
+
+-- A plain query, the case that failed most simply.
+CREATE FUNCTION ts_select() RETURNS trigger LANGUAGE pljs AS $$
+  const r = pljs.execute("SELECT 42 AS v");
+  if (r[0].v !== 42) { throw new Error("expected 42, got " + r[0].v); }
+  return NEW;
+$$;
+CREATE TRIGGER ts_tr1 BEFORE INSERT ON ts_t FOR EACH ROW EXECUTE FUNCTION ts_select();
+INSERT INTO ts_t VALUES (1);
+SELECT count(*)::int AS select_in_trigger FROM ts_t;
+DROP TRIGGER ts_tr1 ON ts_t;
+
+-- Writing to another table, which is the common audit-trigger shape.
+CREATE FUNCTION ts_insert() RETURNS trigger LANGUAGE pljs AS $$
+  pljs.execute("INSERT INTO ts_log VALUES ('row " + NEW.x + "')");
+  return NEW;
+$$;
+CREATE TRIGGER ts_tr2 BEFORE INSERT ON ts_t FOR EACH ROW EXECUTE FUNCTION ts_insert();
+INSERT INTO ts_t VALUES (2), (3);
+SELECT msg FROM ts_log ORDER BY msg;
+DROP TRIGGER ts_tr2 ON ts_t;
+
+-- A prepared plan, with the explicit type array the API requires.
+CREATE FUNCTION ts_prepare() RETURNS trigger LANGUAGE pljs AS $$
+  const p = pljs.prepare('SELECT $1::int * 2 AS v', ['int4']);
+  const r = p.execute([NEW.x]);
+  p.free();
+  pljs.execute("INSERT INTO ts_log VALUES ('doubled " + r[0].v + "')");
+  return NEW;
+$$;
+CREATE TRIGGER ts_tr3 BEFORE INSERT ON ts_t FOR EACH ROW EXECUTE FUNCTION ts_prepare();
+INSERT INTO ts_t VALUES (10);
+SELECT msg FROM ts_log WHERE msg LIKE 'doubled%';
+DROP TRIGGER ts_tr3 ON ts_t;
+
+-- A cursor, which goes through the plan/portal path rather than plain execute.
+CREATE FUNCTION ts_cursor() RETURNS trigger LANGUAGE pljs AS $$
+  const p = pljs.prepare('SELECT generate_series(1, 3) AS n');
+  const c = p.cursor();
+  let sum = 0, row;
+  while ((row = c.fetch())) { sum += row.n; }
+  c.close();
+  p.free();
+  if (sum !== 6) { throw new Error("expected 6, got " + sum); }
+  return NEW;
+$$;
+CREATE TRIGGER ts_tr4 BEFORE INSERT ON ts_t FOR EACH ROW EXECUTE FUNCTION ts_cursor();
+INSERT INTO ts_t VALUES (20);
+SELECT count(*)::int AS cursor_in_trigger FROM ts_t WHERE x = 20;
+DROP TRIGGER ts_tr4 ON ts_t;
+
+-- DDL from a trigger, including replacing the trigger function itself, which also
+-- exercises cache invalidation while the function is on the JS stack.
+CREATE FUNCTION ts_ddl() RETURNS trigger LANGUAGE pljs AS $$
+  pljs.execute("CREATE OR REPLACE FUNCTION ts_ddl() RETURNS trigger LANGUAGE pljs AS $b$ return NEW; $b$");
+  return NEW;
+$$;
+CREATE TRIGGER ts_tr5 BEFORE INSERT ON ts_t FOR EACH ROW EXECUTE FUNCTION ts_ddl();
+INSERT INTO ts_t VALUES (30), (31);
+SELECT count(*)::int AS ddl_in_trigger FROM ts_t WHERE x IN (30, 31);
+DROP TRIGGER ts_tr5 ON ts_t;
+
+-- An error raised by SPI inside a trigger must still abort the statement cleanly
+-- and leave the session usable.
+CREATE FUNCTION ts_error() RETURNS trigger LANGUAGE pljs AS $$
+  pljs.execute("SELECT 1 FROM no_such_table_here");
+  return NEW;
+$$;
+CREATE TRIGGER ts_tr6 BEFORE INSERT ON ts_t FOR EACH ROW EXECUTE FUNCTION ts_error();
+\set VERBOSITY terse
+INSERT INTO ts_t VALUES (40);
+\set VERBOSITY default
+SELECT count(*)::int AS error_row_not_inserted FROM ts_t WHERE x = 40;
+DROP TRIGGER ts_tr6 ON ts_t;
+
+-- The session still works afterwards.
+SELECT 'session usable' AS after_error;
+
+-- A statement-level trigger reaches the same path.
+CREATE FUNCTION ts_stmt() RETURNS trigger LANGUAGE pljs AS $$
+  pljs.execute("INSERT INTO ts_log VALUES ('statement level')");
+  return null;
+$$;
+CREATE TRIGGER ts_tr7 AFTER INSERT ON ts_t EXECUTE FUNCTION ts_stmt();
+INSERT INTO ts_t VALUES (50);
+SELECT msg FROM ts_log WHERE msg = 'statement level';
+DROP TRIGGER ts_tr7 ON ts_t;
+
+DROP FUNCTION ts_stmt(), ts_error(), ts_ddl(), ts_cursor(), ts_prepare(), ts_insert(), ts_select();
+DROP TABLE ts_t, ts_log;

@@ -65,7 +65,15 @@ var num_affected = pljs.execute('DELETE FROM tbl WHERE price > $1', [ 1000 ]);
 
 `pljs.return_next(arg)`
 
-Returns a value in the context of a [Set Returning Function](../INTEGRATION.md).
+Returns a value in the context of a [Set Returning Function](../INTEGRATION.md). Called anywhere else — a `DO` block, a trigger, or a function that does not return a set — it throws.
+
+A row is an object naming each column, as `{a: 1, b: 'x'}`, or for a set of one column its bare value. A column is read from the row by its name as reading the property reads it: its own property, or one it inherits — a getter of its class, say — but not one every object inherits, and a `Proxy`'s through its `get` trap. A function as a row's column is an error, since no column takes one, except a `json` or `jsonb` column, where it is SQL NULL, as it is anywhere in a document. For a set of one column the name is the one the function gives it — `a` for `RETURNS TABLE (a int)`, or an `OUT` parameter's — and a `json` or `jsonb` column, or a domain over one, takes the whole object as its value instead. An object without the column that has a `toString()`, `valueOf()` or `[Symbol.toPrimitive]()` other than every object's — its own, or its class's — is a value that converts itself. Otherwise an object with exactly one property gives that property's value. A row that gives no value for its column, or is not an object at all, raises `datatype_mismatch`.
+
+A value that has to satisfy a domain with a `CHECK` constraint — a set of such a domain, or of a composite type with a column of one — is checked in a subtransaction, as `pljs.execute()` runs its query, so a constraint that fails leaves nothing behind when the exception is caught. So is the rest of converting the row: an error converting it, one JavaScript raised as much as PostgreSQL's, rolls back what the row's getters did as well. A set with no such domain has no subtransaction, and keeps what they did.
+
+Before PostgreSQL 17, no subtransaction can be begun in parallel mode, where a `PARALLEL SAFE` function can run. There such a value is checked without one, and any error converting it ends the call rather than being thrown to JavaScript, since nothing can roll back what a constraint left — a row that does not name its column, or a getter that throws, as much as a constraint that fails: a `try`/`catch` around `pljs.return_next()` does not catch it, as a PL/pgSQL block cannot catch an error there either. So does an error while working out whether a set needs a subtransaction — reading the catalogs, or loading a domain's constraints — and one in a row that ran a `CHECK` constraint without one all the same, because a getter gave its domain one as the row was converted, on any version.
+
+Changing the types a set's rows are converted to from a getter while a row is converted — a domain's constraints, a composite type's columns, dropping a domain — is not supported. pljs keeps the session sound when it happens, but an error in that row can end the call rather than be thrown to JavaScript.
 
 ### `pljs.gc`
 
@@ -77,7 +85,7 @@ If at compile time, garbage collection exposure is enabled, then this function i
 
 `pljs.prepare(sql [, typenames])`
 
-Opens or creates a prepared statement. The `typename` parameter is an `array` for each `bind` parameter. Returned value is an object of the `PreparedPlan` type. This object must be freed by `plan.free()` before leaving the function.
+Opens or creates a prepared statement. The `typenames` parameter is an `array` with the type of each `bind` parameter, and values passed to the plan are converted to those types. Without `typenames`, the parameters' types are inferred from the query, as they are for `pljs.execute()`. Returned value is an object of the `PreparedPlan` type. This object must be freed by `plan.free()` before leaving the function.
 
 ```
 var plan = pljs.prepare('SELECT * FROM tbl WHERE col = $1', [ 'int' ]);
@@ -157,7 +165,7 @@ If one of the SQL execution in the subtransaction block fails, all of operations
 
 ## Window Function API
 
-You can define user-defined window functions with PLJS. It wraps the C-level window function API to support full functionality. To create one, first obtain a window object by calling `pljs.get_window_object()`, which provides the following interfaces:
+You can define user-defined window functions with PLJS. It wraps the C-level window function API to support full functionality. To create one, first obtain a window object by calling `pljs.get_window_object()`, which provides the following interfaces. They act on the window function call that is running, and throw outside of one.
 
 ### `WindowObject.get_current_position`
 

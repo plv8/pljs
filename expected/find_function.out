@@ -32,13 +32,13 @@ SELECT caller(10, 2);
 (1 row)
 
 SELECT caller(10, 3);
-ERROR:  execution error
+ERROR:  javascript function is not found for "sqlf"
 DETAIL:  Error: javascript function is not found for "sqlf"
     at caller (<function>:9:30)
 
 SELECT caller(10, 4);
-ERROR:  execution error
-DETAIL:  Error: javascript function is not found for "callee(int, int)"
+ERROR:  function "callee(int, int)" does not exist
+DETAIL:  Error: function "callee(int, int)" does not exist
     at caller (<function>:11:30)
 
 SELECT caller(10, 5);

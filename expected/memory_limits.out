@@ -11,7 +11,7 @@ do $$
   const limit = pljs.execute(`select setting from pg_settings where name = $1`, ['pljs.memory_limit'])[0].setting;
   const a = new ArrayBuffer(limit*1024*1024);
 $$ language pljs;
-ERROR:  execution error
+ERROR:  out of memory
 DETAIL:  InternalError: out of memory
     at <anonymous> (<function>:3:28)
     at <eval> (<function>:4:3)
@@ -24,5 +24,5 @@ do $$
     s.push(new ArrayBuffer(63)) // small non-aligned allocations
   }
 $$ language pljs;
-ERROR:  execution error
+ERROR:  out of memory
 DETAIL:  out of memory

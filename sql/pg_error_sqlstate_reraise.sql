@@ -1,0 +1,58 @@
+-- A PostgreSQL error that passes through JavaScript uncaught must be re-raised
+-- under its own SQLSTATE.
+--
+-- pljs.execute() hands the error to JavaScript with its message, detail, hint
+-- and sqlstate attached (see pg_error_sqlstate.sql, which checks the catching
+-- side).  When nothing catches it, the exception unwinds out of the function
+-- and pljs reports it -- and it used to report ERRCODE_INTERNAL_ERROR, because
+-- the SQLSTATE was read into JavaScript and then never read back out.  XX000
+-- tells the caller to treat the failure as a bug in the extension, which is
+-- exactly the distinction exposing the SQLSTATE was meant to restore.
+--
+-- Asserted with \set VERBOSITY sqlstate, which prints the code and nothing else.
+CREATE FUNCTION esr_divzero() RETURNS int AS $$
+  return pljs.execute('SELECT 1/0')[0];
+$$ LANGUAGE pljs;
+
+CREATE TABLE esr_t (id int PRIMARY KEY);
+INSERT INTO esr_t VALUES (1);
+
+CREATE FUNCTION esr_unique() RETURNS int AS $$
+  pljs.execute('INSERT INTO esr_t VALUES (1)');
+  return 1;
+$$ LANGUAGE pljs;
+
+CREATE FUNCTION esr_raised() RETURNS int AS $$
+  pljs.execute("DO $x$ BEGIN RAISE EXCEPTION 'nope' USING ERRCODE = '22023'; END $x$");
+  return 1;
+$$ LANGUAGE pljs;
+
+-- Caught, then re-thrown by hand: the rethrown object still carries sqlstate,
+-- so the code survives that round trip too.
+CREATE FUNCTION esr_rethrow() RETURNS int AS $$
+  try { pljs.execute('SELECT 1/0'); } catch (e) { throw e; }
+  return 1;
+$$ LANGUAGE pljs;
+
+-- A JavaScript error of any other origin has no SQLSTATE and stays XX000.
+CREATE FUNCTION esr_plain() RETURNS int AS $$
+  throw new Error('not a postgres error');
+$$ LANGUAGE pljs;
+
+\set VERBOSITY sqlstate
+SELECT esr_divzero();
+SELECT esr_unique();
+SELECT esr_raised();
+SELECT esr_rethrow();
+SELECT esr_plain();
+\set VERBOSITY default
+
+-- The message and the original detail come through as well.
+\set VERBOSITY terse
+SELECT esr_divzero();
+\set VERBOSITY default
+
+SELECT esr_unique();
+
+DROP FUNCTION esr_divzero, esr_unique, esr_raised, esr_rethrow, esr_plain;
+DROP TABLE esr_t;

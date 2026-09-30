@@ -1,0 +1,145 @@
+-- A value that does not convert is released, every part of it.
+--
+-- The builtins hand a conversion's error to JavaScript, which can catch it and
+-- try again, and only the JavaScript value built so far was released: the
+-- detoasted copy of an array, a jsonb document or a row, and the elements read
+-- out of an array, stayed in the SPI procedure context until the function
+-- returned.  Each retry here left 200kB or more behind, and 200 of them 40MB
+-- and more.
+
+-- Runs a query that fails n times, catching its errors, and reports whether
+-- the backend's memory grew by less than 10MB.
+CREATE FUNCTION cr_retry(sql text, n int4) RETURNS text LANGUAGE pljs AS $$
+  const mb = () => Number(pljs.execute(
+    'SELECT sum(total_bytes) AS b FROM pg_backend_memory_contexts')[0].b) /
+    (1024 * 1024);
+  let failed = 0;
+
+  const run = (k) => {
+    for (let i = 0; i < k; i++) {
+      try {
+        pljs.execute(sql);
+      } catch (e) {
+        failed++;
+      }
+    }
+  };
+
+  run(5);
+
+  const before = mb();
+
+  run(n);
+
+  return `${failed} failed, released: ${mb() - before < 10}`;
+$$;
+
+-- 1) An array, whose first element is too large for a double.
+CREATE TABLE cr_arrays AS
+  SELECT array_prepend(1e400::numeric, array_agg(g::numeric)) AS a
+  FROM generate_series(1, 20000) AS g;
+
+SELECT cr_retry('SELECT a FROM cr_arrays', 200);
+
+-- 2) A jsonb document, whose first key's value is.
+CREATE TABLE cr_documents AS
+  SELECT jsonb_build_object('n', 1e400::numeric, 'pad', repeat('x', 200000))
+    AS j;
+
+SELECT cr_retry('SELECT j FROM cr_documents', 200);
+
+-- 3) A row, whose second column's value is.
+CREATE TYPE cr_row AS (pad text, n numeric);
+CREATE TABLE cr_rows AS
+  SELECT ROW(repeat('x', 200000), 1e400::numeric)::cr_row AS r;
+
+SELECT cr_retry('SELECT r FROM cr_rows', 200);
+
+-- 4) A row of a set of a domain over a composite type, which the domain's
+-- CHECK constraint rejects.  Each was converted in a context of its own,
+-- which was not deleted when the row did not convert.
+CREATE TYPE cr_pair AS (a int4, b text);
+CREATE DOMAIN cr_positive AS cr_pair CHECK ((VALUE).a > 0);
+
+CREATE FUNCTION cr_domain_rows(n int4) RETURNS SETOF cr_positive
+LANGUAGE pljs AS $$
+  const mb = () => Number(pljs.execute(
+    'SELECT sum(total_bytes) AS b FROM pg_backend_memory_contexts')[0].b) /
+    (1024 * 1024);
+  const row = {a: -1, b: 'x'.repeat(200000)};
+  let failed = 0;
+
+  const run = (k) => {
+    for (let i = 0; i < k; i++) {
+      try {
+        pljs.return_next(row);
+      } catch (e) {
+        failed++;
+      }
+    }
+  };
+
+  run(5);
+
+  const before = mb();
+
+  run(n);
+
+  pljs.return_next({a: 1, b: `${failed} failed, released: ${mb() - before < 10}`});
+$$;
+
+SELECT b FROM cr_domain_rows(200);
+
+-- 5) A trigger's NEW, when its OLD does not convert: NEW was left in the
+-- runtime.  Measured there, in QuickJS's memory.
+CREATE TABLE cr_trigger_rows (big text, a int4[]);
+INSERT INTO cr_trigger_rows VALUES (repeat('x', 200000), '{{1, 2}, {3, 4}}');
+
+CREATE FUNCTION cr_trigger() RETURNS trigger LANGUAGE pljs AS $$
+  return NEW;
+$$;
+
+CREATE TRIGGER cr_trigger BEFORE UPDATE ON cr_trigger_rows
+  FOR EACH ROW EXECUTE FUNCTION cr_trigger();
+
+CREATE FUNCTION cr_retry_runtime(sql text, n int4) RETURNS text
+LANGUAGE pljs AS $$
+  const mb = () => {
+    pljs.gc();
+    return Number(JSON.parse(pljs.execute(
+      "SELECT pljs_info() ->> 'malloc_size' AS m")[0].m)) / (1024 * 1024);
+  };
+  let failed = 0;
+
+  const run = (k) => {
+    for (let i = 0; i < k; i++) {
+      try {
+        pljs.execute(sql);
+      } catch (e) {
+        failed++;
+      }
+    }
+  };
+
+  run(5);
+
+  const before = mb();
+
+  run(n);
+
+  return `${failed} failed, released: ${mb() - before < 10}`;
+$$;
+
+SELECT cr_retry_runtime('UPDATE cr_trigger_rows SET a = ''{1}''', 200);
+
+DROP FUNCTION cr_retry_runtime(text, int4);
+DROP TABLE cr_trigger_rows;
+DROP FUNCTION cr_trigger();
+DROP FUNCTION cr_domain_rows(int4);
+DROP DOMAIN cr_positive;
+DROP TYPE cr_pair;
+DROP TABLE cr_rows;
+DROP TYPE cr_row;
+DROP TABLE cr_documents;
+DROP TABLE cr_arrays;
+DROP FUNCTION cr_retry(text, int4);

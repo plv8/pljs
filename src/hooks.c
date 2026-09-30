@@ -349,16 +349,7 @@ static JSContext *pljs_get_or_create_context(void) {
   if (entry)
     return entry->ctx;
 
-  JSContext *ctx = JS_NewContext(rt);
-  pljs_setup_namespace(ctx);
-
-  if (configuration.start_proc != NULL &&
-      strlen(configuration.start_proc) != 0) {
-    pljs_setup_start_proc(ctx);
-  }
-
-  pljs_cache_context_add(GetUserId(), ctx);
-  return ctx;
+  return pljs_create_context();
 }
 
 /**
@@ -418,16 +409,14 @@ static void pljs_executor_start_hook(QueryDesc *queryDesc, int eflags) {
         JSValue args[1];
         args[0] = pljs_querydesc_start_to_jsvalue(ctx, queryDesc, eflags);
 
-        SPI_connect();
-        JSValue ret = JS_Call(ctx, func, JS_UNDEFINED, 1, args);
-        if (JS_IsException(ret))
-          elog(WARNING, "pljs: executor_start_hook error: %s",
-               pljs_dump_error(ctx));
+        char *error = NULL;
 
-        JS_FreeValue(ctx, ret);
+        if (!pljs_hook_call(ctx, func, 1, args, true, NULL, &error))
+          elog(WARNING, "pljs: executor_start_hook error: %s",
+               error);
+
         JS_FreeValue(ctx, args[0]);
         JS_FreeValue(ctx, func);
-        SPI_finish();
       }
     }
     PG_CATCH();
@@ -480,16 +469,14 @@ static void pljs_executor_run_hook(QueryDesc *queryDesc,
                                                 count, execute_once);
 #endif
 
-        SPI_connect();
-        JSValue ret = JS_Call(ctx, func, JS_UNDEFINED, 1, args);
-        if (JS_IsException(ret))
-          elog(WARNING, "pljs: executor_run_hook error: %s",
-               pljs_dump_error(ctx));
+        char *error = NULL;
 
-        JS_FreeValue(ctx, ret);
+        if (!pljs_hook_call(ctx, func, 1, args, true, NULL, &error))
+          elog(WARNING, "pljs: executor_run_hook error: %s",
+               error);
+
         JS_FreeValue(ctx, args[0]);
         JS_FreeValue(ctx, func);
-        SPI_finish();
       }
     }
     PG_CATCH();
@@ -536,16 +523,14 @@ static void pljs_executor_end_hook(QueryDesc *queryDesc) {
         JSValue args[1];
         args[0] = pljs_querydesc_to_jsvalue(ctx, queryDesc);
 
-        SPI_connect();
-        JSValue ret = JS_Call(ctx, func, JS_UNDEFINED, 1, args);
-        if (JS_IsException(ret))
-          elog(WARNING, "pljs: executor_end_hook error: %s",
-               pljs_dump_error(ctx));
+        char *error = NULL;
 
-        JS_FreeValue(ctx, ret);
+        if (!pljs_hook_call(ctx, func, 1, args, true, NULL, &error))
+          elog(WARNING, "pljs: executor_end_hook error: %s",
+               error);
+
         JS_FreeValue(ctx, args[0]);
         JS_FreeValue(ctx, func);
-        SPI_finish();
       }
     }
     PG_CATCH();
@@ -597,15 +582,13 @@ static PlannedStmt *pljs_planner_hook(Query *parse, const char *query_string,
                           JS_NewInt32(ctx, cursorOptions));
 
         args[0] = obj;
-        SPI_connect();
-        JSValue ret = JS_Call(ctx, func, JS_UNDEFINED, 1, args);
-        if (JS_IsException(ret))
-          elog(WARNING, "pljs: planner_hook error: %s", pljs_dump_error(ctx));
+        char *error = NULL;
 
-        JS_FreeValue(ctx, ret);
+        if (!pljs_hook_call(ctx, func, 1, args, true, NULL, &error))
+          elog(WARNING, "pljs: planner_hook error: %s", error);
+
         JS_FreeValue(ctx, args[0]);
         JS_FreeValue(ctx, func);
-        SPI_finish();
       }
     }
     PG_CATCH();
@@ -656,16 +639,14 @@ static void pljs_create_upper_paths_hook(PlannerInfo *root,
                           JS_NewFloat64(ctx, output_rel->rows));
 
         args[0] = obj;
-        SPI_connect();
-        JSValue ret = JS_Call(ctx, func, JS_UNDEFINED, 1, args);
-        if (JS_IsException(ret))
-          elog(WARNING, "pljs: create_upper_paths_hook error: %s",
-               pljs_dump_error(ctx));
+        char *error = NULL;
 
-        JS_FreeValue(ctx, ret);
+        if (!pljs_hook_call(ctx, func, 1, args, true, NULL, &error))
+          elog(WARNING, "pljs: create_upper_paths_hook error: %s",
+               error);
+
         JS_FreeValue(ctx, args[0]);
         JS_FreeValue(ctx, func);
-        SPI_finish();
       }
     }
     PG_CATCH();
@@ -716,16 +697,14 @@ static void pljs_set_rel_pathlist_hook(PlannerInfo *root, RelOptInfo *rel,
                             JS_NewInt64(ctx, (int64_t)rte->relid));
 
         args[0] = obj;
-        SPI_connect();
-        JSValue ret = JS_Call(ctx, func, JS_UNDEFINED, 1, args);
-        if (JS_IsException(ret))
-          elog(WARNING, "pljs: set_rel_pathlist_hook error: %s",
-               pljs_dump_error(ctx));
+        char *error = NULL;
 
-        JS_FreeValue(ctx, ret);
+        if (!pljs_hook_call(ctx, func, 1, args, true, NULL, &error))
+          elog(WARNING, "pljs: set_rel_pathlist_hook error: %s",
+               error);
+
         JS_FreeValue(ctx, args[0]);
         JS_FreeValue(ctx, func);
-        SPI_finish();
       }
     }
     PG_CATCH();
@@ -776,16 +755,14 @@ static void pljs_set_join_pathlist_hook(PlannerInfo *root, RelOptInfo *joinrel,
                           JS_NewFloat64(ctx, innerrel->rows));
 
         args[0] = obj;
-        SPI_connect();
-        JSValue ret = JS_Call(ctx, func, JS_UNDEFINED, 1, args);
-        if (JS_IsException(ret))
-          elog(WARNING, "pljs: set_join_pathlist_hook error: %s",
-               pljs_dump_error(ctx));
+        char *error = NULL;
 
-        JS_FreeValue(ctx, ret);
+        if (!pljs_hook_call(ctx, func, 1, args, true, NULL, &error))
+          elog(WARNING, "pljs: set_join_pathlist_hook error: %s",
+               error);
+
         JS_FreeValue(ctx, args[0]);
         JS_FreeValue(ctx, func);
-        SPI_finish();
       }
     }
     PG_CATCH();
@@ -830,16 +807,14 @@ static RelOptInfo *pljs_join_search_hook(PlannerInfo *root, int levels_needed,
                           JS_NewInt32(ctx, list_length(initial_rels)));
 
         args[0] = obj;
-        SPI_connect();
-        JSValue ret = JS_Call(ctx, func, JS_UNDEFINED, 1, args);
-        if (JS_IsException(ret))
-          elog(WARNING, "pljs: join_search_hook error: %s",
-               pljs_dump_error(ctx));
+        char *error = NULL;
 
-        JS_FreeValue(ctx, ret);
+        if (!pljs_hook_call(ctx, func, 1, args, true, NULL, &error))
+          elog(WARNING, "pljs: join_search_hook error: %s",
+               error);
+
         JS_FreeValue(ctx, args[0]);
         JS_FreeValue(ctx, func);
-        SPI_finish();
       }
     }
     PG_CATCH();
@@ -890,16 +865,14 @@ static void pljs_get_relation_info_hook(PlannerInfo *root, Oid relationObjectId,
                           JS_NewFloat64(ctx, (double)rel->pages));
 
         args[0] = obj;
-        SPI_connect();
-        JSValue ret = JS_Call(ctx, func, JS_UNDEFINED, 1, args);
-        if (JS_IsException(ret))
-          elog(WARNING, "pljs: get_relation_info_hook error: %s",
-               pljs_dump_error(ctx));
+        char *error = NULL;
 
-        JS_FreeValue(ctx, ret);
+        if (!pljs_hook_call(ctx, func, 1, args, true, NULL, &error))
+          elog(WARNING, "pljs: get_relation_info_hook error: %s",
+               error);
+
         JS_FreeValue(ctx, args[0]);
         JS_FreeValue(ctx, func);
-        SPI_finish();
       }
     }
     PG_CATCH();
@@ -925,6 +898,8 @@ static bool pljs_needs_fmgr_hook(Oid fn_oid) {
       elog(WARNING, "pljs: needs_fmgr exceeded max recursion depth");
     } else {
     int saved_depth = depth_needs_fmgr;
+    volatile bool has_result = false;
+    volatile bool result = false;
     depth_needs_fmgr++;
     MemoryContext old_context = CurrentMemoryContext;
     PG_TRY();
@@ -937,18 +912,14 @@ static bool pljs_needs_fmgr_hook(Oid fn_oid) {
         JSValue args[1];
         args[0] = JS_NewInt64(ctx, (int64_t)fn_oid);
 
-        SPI_connect();
-        JSValue ret = JS_Call(ctx, func, JS_UNDEFINED, 1, args);
-        if (JS_IsException(ret)) {
-          elog(WARNING, "pljs: needs_fmgr_hook error: %s",
-               pljs_dump_error(ctx));
+        JSValue ret = JS_UNDEFINED;
+        char *error = NULL;
+
+        if (!pljs_hook_call(ctx, func, 1, args, true, &ret, &error)) {
+          elog(WARNING, "pljs: needs_fmgr_hook error: %s", error);
         } else if (JS_IsBool(ret)) {
-          bool result = JS_ToBool(ctx, ret);
-          JS_FreeValue(ctx, ret);
-          JS_FreeValue(ctx, args[0]);
-          JS_FreeValue(ctx, func);
-        SPI_finish();
-          return result;
+          result = JS_ToBool(ctx, ret);
+          has_result = true;
         }
 
         JS_FreeValue(ctx, ret);
@@ -966,6 +937,10 @@ static bool pljs_needs_fmgr_hook(Oid fn_oid) {
     }
     PG_END_TRY();
     depth_needs_fmgr = saved_depth;
+
+    /* After PG_END_TRY: returning from inside the PG_TRY left it installed. */
+    if (has_result)
+      return result;
     }
   }
 
@@ -1000,15 +975,13 @@ static void pljs_fmgr_hook(FmgrHookEventType event, FmgrInfo *flinfo,
                           JS_NewInt64(ctx, (int64_t)flinfo->fn_oid));
 
         args[0] = obj;
-        SPI_connect();
-        JSValue ret = JS_Call(ctx, func, JS_UNDEFINED, 1, args);
-        if (JS_IsException(ret))
-          elog(WARNING, "pljs: fmgr_hook error: %s", pljs_dump_error(ctx));
+        char *error = NULL;
 
-        JS_FreeValue(ctx, ret);
+        if (!pljs_hook_call(ctx, func, 1, args, true, NULL, &error))
+          elog(WARNING, "pljs: fmgr_hook error: %s", error);
+
         JS_FreeValue(ctx, args[0]);
         JS_FreeValue(ctx, func);
-        SPI_finish();
       }
     }
     PG_CATCH();
@@ -1048,16 +1021,14 @@ static void pljs_object_access_hook(ObjectAccessType access, Oid classId,
         args[0] =
             pljs_object_access_to_jsvalue(ctx, access, classId, objectId, subId);
 
-        SPI_connect();
-        JSValue ret = JS_Call(ctx, func, JS_UNDEFINED, 1, args);
-        if (JS_IsException(ret))
-          elog(WARNING, "pljs: object_access_hook error: %s",
-               pljs_dump_error(ctx));
+        char *error = NULL;
 
-        JS_FreeValue(ctx, ret);
+        if (!pljs_hook_call(ctx, func, 1, args, true, NULL, &error))
+          elog(WARNING, "pljs: object_access_hook error: %s",
+               error);
+
         JS_FreeValue(ctx, args[0]);
         JS_FreeValue(ctx, func);
-        SPI_finish();
       }
     }
     PG_CATCH();
@@ -1098,16 +1069,14 @@ static void pljs_object_access_str_hook(ObjectAccessType access, Oid classId,
         args[0] = pljs_object_access_str_to_jsvalue(ctx, access, classId,
                                                     objectStr, subId);
 
-        SPI_connect();
-        JSValue ret = JS_Call(ctx, func, JS_UNDEFINED, 1, args);
-        if (JS_IsException(ret))
-          elog(WARNING, "pljs: object_access_hook_str error: %s",
-               pljs_dump_error(ctx));
+        char *error = NULL;
 
-        JS_FreeValue(ctx, ret);
+        if (!pljs_hook_call(ctx, func, 1, args, true, NULL, &error))
+          elog(WARNING, "pljs: object_access_hook_str error: %s",
+               error);
+
         JS_FreeValue(ctx, args[0]);
         JS_FreeValue(ctx, func);
-        SPI_finish();
       }
     }
     PG_CATCH();
@@ -1152,9 +1121,8 @@ static void pljs_emit_log_hook(ErrorData *edata) {
           JSValue args[1];
           args[0] = pljs_errordata_to_jsvalue(ctx, edata);
 
-          JSValue ret = JS_Call(ctx, func, JS_UNDEFINED, 1, args);
           /* Silently discard exceptions -- we cannot log from here. */
-          JS_FreeValue(ctx, ret);
+          pljs_hook_call(ctx, func, 1, args, false, NULL, NULL);
           JS_FreeValue(ctx, args[0]);
           JS_FreeValue(ctx, func);
         }

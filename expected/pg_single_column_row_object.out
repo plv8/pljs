@@ -1,0 +1,251 @@
+-- A single-column set must accept the same `{column: value}` row object that a
+-- multi-column set requires.
+--
+-- A set with one column is not composite, so return_next() converted its argument
+-- directly as the column value. Handed a row object, the whole object went through
+-- the scalar conversion: "[object Object]" for a text column, 0 for an integer
+-- one. No error, and the row count was right, so a test that counted rows saw
+-- nothing wrong.
+--
+-- The shape that breaks is the natural one -- build a row object in a loop and
+-- call return_next(row) -- and it is the only shape that works for two or more
+-- columns. It stopped working as soon as the set happened to have one column.
+--
+-- The bare value keeps working, and an object is only read as a row object when it
+-- is a plain object and the column type is not itself object-shaped: json, jsonb
+-- and composite columns take an object as their legitimate value.
+CREATE EXTENSION IF NOT EXISTS pljs;
+NOTICE:  extension "pljs" already exists, skipping
+-- The case that silently stored 0.
+CREATE FUNCTION sc_int() RETURNS TABLE(a int) AS $$
+  for (let i = 1; i <= 3; i++) pljs.return_next({ a: i * 10 });
+$$ LANGUAGE pljs;
+SELECT a FROM sc_int();
+ a  
+----
+ 10
+ 20
+ 30
+(3 rows)
+
+-- And the one that stored "[object Object]".
+CREATE FUNCTION sc_text() RETURNS TABLE(t text) AS $$
+  pljs.return_next({ t: 'hello' });
+$$ LANGUAGE pljs;
+SELECT t FROM sc_text();
+   t   
+-------
+ hello
+(1 row)
+
+-- A single-column RETURNS TABLE collapses to a scalar return type, so the
+-- descriptor carries no column name to match against, but the function names
+-- its column, and a row object is read by that name, as a composite set's is.
+-- It was resolved by arity alone, so an object with the column and anything
+-- else was refused.
+CREATE FUNCTION sc_extra() RETURNS TABLE(a int) AS $$
+  pljs.return_next({ a: 7, ignored: 'x' });
+$$ LANGUAGE pljs;
+SELECT a FROM sc_extra();
+ a 
+---
+ 7
+(1 row)
+
+-- An object with several properties, none of them the column, cannot be
+-- resolved, and saying so is the point -- that is the case that used to store
+-- 0.
+\set VERBOSITY terse
+CREATE FUNCTION sc_extra_unnamed() RETURNS TABLE(a int) AS $$
+  pljs.return_next({ b: 7, ignored: 'x' });
+$$ LANGUAGE pljs;
+SELECT a FROM sc_extra_unnamed();
+ERROR:  return_next: object does not identify a value for the result column "a" (property names are case sensitive; a single-column set also accepts the bare value)
+\set VERBOSITY default
+-- With the SQLSTATE a set of several columns gives the same mistake.  It was
+-- thrown to JavaScript, and came out as XX000.
+DO $$
+BEGIN
+  PERFORM * FROM sc_extra_unnamed();
+EXCEPTION WHEN datatype_mismatch THEN
+  RAISE NOTICE 'datatype_mismatch';
+END $$;
+NOTICE:  datatype_mismatch
+-- A method named as the column is not its value, and no other property is
+-- either: the column's name decides.  A class instance's method was taken for
+-- the column, and its source stored as text, and NaN as a float8; and then
+-- its one other property was, without a word.
+\set VERBOSITY terse
+CREATE FUNCTION sc_method_text() RETURNS TABLE(value text) AS $$
+  class Holder {
+    constructor() { this.x = 'hello'; }
+    value() { return 1; }
+  }
+  pljs.return_next(new Holder());
+$$ LANGUAGE pljs;
+SELECT value FROM sc_method_text();
+ERROR:  return_next: the object's "value" is a function, which no result column takes
+CREATE FUNCTION sc_method_float() RETURNS TABLE(value float8) AS $$
+  class Holder {
+    constructor() { this.v = 2.5; }
+    value() { return 1; }
+  }
+  return [new Holder()];
+$$ LANGUAGE pljs;
+SELECT value FROM sc_method_float();
+ERROR:  returned row: the object's "value" is a function, which no result column takes
+\set VERBOSITY default
+-- An instance of a class that converts itself is a value.  Only an object
+-- whose one property was its own toString() or valueOf() was one, and the
+-- instance's one field was stored in its place.
+CREATE FUNCTION sc_converts_by_class() RETURNS SETOF numeric AS $$
+  class Money {
+    constructor(cents) { this.cents = cents; }
+    valueOf() { return this.cents / 100; }
+  }
+  pljs.return_next(new Money(1234));
+$$ LANGUAGE pljs;
+SELECT * FROM sc_converts_by_class();
+ sc_converts_by_class 
+----------------------
+                12.34
+(1 row)
+
+-- What tells an object converts itself is not the global Symbol, which any
+-- function can replace, and not what every object inherits, whatever that
+-- has been made.  One function that replaced Symbol had every one-property
+-- row object of every function fail, and a toPrimitive defined for every
+-- object made every one convert itself.
+CREATE FUNCTION sc_replaced_symbol() RETURNS SETOF int4 AS $$
+  const saved = globalThis.Symbol;
+  const primitive = Symbol.toPrimitive;
+
+  globalThis.Symbol = undefined;
+
+  try {
+    pljs.return_next({b: 6});
+  } finally {
+    globalThis.Symbol = saved;
+  }
+
+  Object.prototype[primitive] = function() { return 99; };
+
+  try {
+    pljs.return_next({b: 8});
+  } finally {
+    delete Object.prototype[primitive];
+  }
+$$ LANGUAGE pljs;
+SELECT * FROM sc_replaced_symbol();
+ sc_replaced_symbol 
+--------------------
+                  6
+                  8
+(2 rows)
+
+-- A getter of the row's class is the column, as it is for a composite set.
+-- Only an own, enumerable property was read, and the instance's one property
+-- was stored in its place without a word.
+CREATE FUNCTION sc_getter() RETURNS TABLE(total int) AS $$
+  class Order {
+    constructor(qty) { this.qty = qty; }
+    get total() { return this.qty * 10; }
+  }
+  pljs.return_next(new Order(3));
+$$ LANGUAGE pljs;
+SELECT total FROM sc_getter();
+ total 
+-------
+    30
+(1 row)
+
+-- A function in the column is not a value, and the object is not one that
+-- converts itself: it was converted whole, and "[object Object]" stored.
+\set VERBOSITY terse
+CREATE FUNCTION sc_function_column() RETURNS TABLE(a text) AS $$
+  pljs.return_next({a: () => 5});
+$$ LANGUAGE pljs;
+SELECT a FROM sc_function_column();
+ERROR:  return_next: the object's "a" is a function, which no result column takes
+\set VERBOSITY default
+CREATE FUNCTION sc_converts_itself() RETURNS TABLE(a text) AS $$
+  pljs.return_next({toString() { return 'itself'; }});
+$$ LANGUAGE pljs;
+SELECT a FROM sc_converts_itself();
+   a    
+--------
+ itself
+(1 row)
+
+-- A single-attribute *composite* set is different: it goes through the
+-- multi-column path, which does have names, so it resolves by name and ignores
+-- the extra property.
+CREATE TYPE sc_one AS (a int);
+CREATE FUNCTION sc_composite() RETURNS SETOF sc_one AS $$
+  pljs.return_next({ a: 7, ignored: 'x' });
+$$ LANGUAGE pljs;
+SELECT a FROM sc_composite();
+ a 
+---
+ 7
+(1 row)
+
+-- The bare value is still accepted.
+CREATE FUNCTION sc_bare() RETURNS TABLE(a int) AS $$
+  pljs.return_next(5);
+$$ LANGUAGE pljs;
+SELECT a FROM sc_bare();
+ a 
+---
+ 5
+(1 row)
+
+-- SETOF a scalar type has no column name in the descriptor; a one-property object
+-- is unambiguous, so it is accepted on arity.
+CREATE FUNCTION sc_setof() RETURNS SETOF int AS $$
+  pljs.return_next({ anything: 9 });
+$$ LANGUAGE pljs;
+SELECT * FROM sc_setof();
+ sc_setof 
+----------
+        9
+(1 row)
+
+-- An object that identifies no value is a mistake, and says so.
+-- Object-shaped column types still take an object as the value, not as a row.
+CREATE FUNCTION sc_jsonb() RETURNS TABLE(j jsonb) AS $$
+  pljs.return_next({ k: 'v' });
+$$ LANGUAGE pljs;
+SELECT j FROM sc_jsonb();
+     j      
+------------
+ {"k": "v"}
+(1 row)
+
+-- A Date is a value for a timestamp column, not a row object.
+CREATE FUNCTION sc_date() RETURNS TABLE(ts timestamptz) AS $$
+  pljs.return_next(new Date(Date.UTC(2020, 0, 1)));
+$$ LANGUAGE pljs;
+SELECT ts = TIMESTAMPTZ '2020-01-01 00:00:00+00' AS date_is_a_value FROM sc_date();
+ date_is_a_value 
+-----------------
+ t
+(1 row)
+
+-- Two columns behave as before.
+CREATE FUNCTION sc_two() RETURNS TABLE(a int, b text) AS $$
+  pljs.return_next({ a: 1, b: 'one' });
+$$ LANGUAGE pljs;
+SELECT a, b FROM sc_two();
+ a |  b  
+---+-----
+ 1 | one
+(1 row)
+
+DROP FUNCTION sc_int, sc_text, sc_extra, sc_extra_unnamed, sc_method_text,
+              sc_method_float, sc_converts_by_class, sc_replaced_symbol,
+              sc_getter,
+              sc_function_column,
+              sc_converts_itself, sc_composite, sc_bare, sc_setof, sc_jsonb,
+              sc_date, sc_two;
+DROP TYPE sc_one;

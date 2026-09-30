@@ -1,0 +1,523 @@
+-- return_next() rolls back what a failed domain CHECK left behind.
+--
+-- return_next() hands an error from converting its row to JavaScript, and
+-- converting a row of a domain checks the domain's constraints, which can run
+-- any SQL.  A PL/pgSQL CHECK function that raised, or a pljs one whose result
+-- could not be converted, left its SPI connection on the stack, and the
+-- set-returning function carried on with it as its own.
+
+-- 1) A pljs CHECK function whose result cannot be converted.
+CREATE FUNCTION rnd_g(x int4) RETURNS int4 LANGUAGE pljs AS $$
+  return 'not a number';
+$$;
+CREATE DOMAIN rnd_d AS int4 CHECK (rnd_g(VALUE) > 0);
+CREATE FUNCTION rnd_f() RETURNS SETOF rnd_d LANGUAGE pljs AS $$
+  try {
+    pljs.return_next(5);
+  } catch (e) {
+    pljs.elog(NOTICE, 'return_next: ' + e.message);
+  }
+  pljs.elog(NOTICE, 'execute: ' + pljs.execute('SELECT 42 AS x')[0].x);
+$$;
+SELECT * FROM rnd_f();
+
+-- From PL/pgSQL, whose query result went to the stale connection.
+DO $$
+DECLARE
+  n int4;
+BEGIN
+  SELECT count(*) INTO n FROM rnd_f();
+  RAISE NOTICE 'count %', n;
+END $$;
+
+-- From pljs.execute().
+DO LANGUAGE pljs $$
+  pljs.elog(NOTICE, 'rows ' +
+            pljs.execute('SELECT count(*)::int4 AS n FROM rnd_f()')[0].n);
+$$;
+
+-- 2) A PL/pgSQL CHECK function that raises.
+CREATE FUNCTION rnd_positive(x int4) RETURNS bool LANGUAGE plpgsql AS $$
+BEGIN
+  IF x <= 0 THEN
+    RAISE EXCEPTION 'not positive: %', x;
+  END IF;
+  RETURN true;
+END $$;
+CREATE DOMAIN rnd_pos AS int4 CHECK (rnd_positive(VALUE));
+CREATE FUNCTION rnd_pos_set() RETURNS SETOF rnd_pos LANGUAGE pljs AS $$
+  for (const v of [1, -2, 3]) {
+    try {
+      pljs.return_next(v);
+    } catch (e) {
+      pljs.elog(NOTICE, 'return_next: ' + e.message);
+    }
+  }
+$$;
+SELECT * FROM rnd_pos_set();
+
+-- In a column of a composite set, and in an array.
+CREATE TYPE rnd_row AS (id int4, v rnd_pos);
+CREATE FUNCTION rnd_rows() RETURNS SETOF rnd_row LANGUAGE pljs AS $$
+  for (const v of [1, -2, 3]) {
+    try {
+      pljs.return_next({id: v, v: v});
+    } catch (e) {
+      pljs.elog(NOTICE, 'return_next: ' + e.message);
+    }
+  }
+$$;
+SELECT * FROM rnd_rows();
+
+CREATE FUNCTION rnd_arrays() RETURNS SETOF rnd_pos[] LANGUAGE pljs AS $$
+  for (const v of [[1, 2], [3, -4], [5]]) {
+    try {
+      pljs.return_next(v);
+    } catch (e) {
+      pljs.elog(NOTICE, 'return_next: ' + e.message);
+    }
+  }
+$$;
+SELECT * FROM rnd_arrays();
+
+-- And in a range, and a multirange, of the domain: a range's input function
+-- runs its subtype's, which checks the domain.  Ranges were not looked into,
+-- so their rows were converted without a subtransaction, and a failed CHECK
+-- left "transaction left non-empty SPI stack".
+CREATE TYPE rnd_range AS RANGE (subtype = rnd_pos);
+CREATE FUNCTION rnd_ranges() RETURNS SETOF rnd_range LANGUAGE pljs AS $$
+  for (const v of ['[1,5)', '[-2,3)', '[3,4)']) {
+    try {
+      pljs.return_next(v);
+    } catch (e) {
+      pljs.elog(NOTICE, 'return_next: ' + e.message);
+    }
+  }
+  pljs.elog(NOTICE, 'execute: ' + pljs.execute('SELECT 42 AS x')[0].x);
+$$;
+SELECT * FROM rnd_ranges();
+
+CREATE FUNCTION rnd_multiranges() RETURNS SETOF rnd_multirange LANGUAGE pljs AS $$
+  for (const v of ['{[1,5)}', '{[3,4), [-2,3)}', '{[6,7)}']) {
+    try {
+      pljs.return_next(v);
+    } catch (e) {
+      pljs.elog(NOTICE, 'return_next: ' + e.message);
+    }
+  }
+$$;
+SELECT * FROM rnd_multiranges();
+
+-- 3) Only a CHECK constraint can run SQL, so only a domain with one needs a
+-- subtransaction per row; one with NOT NULL alone still rejects a NULL.
+CREATE DOMAIN rnd_nn AS int4 NOT NULL;
+CREATE FUNCTION rnd_nn_set() RETURNS SETOF rnd_nn LANGUAGE pljs AS $$
+  for (const v of [1, null, 3]) {
+    try {
+      pljs.return_next(v);
+    } catch (e) {
+      pljs.elog(NOTICE, 'return_next: ' + e.message);
+    }
+  }
+  pljs.elog(NOTICE, 'execute: ' + pljs.execute('SELECT 42 AS x')[0].x);
+$$;
+SELECT * FROM rnd_nn_set();
+
+-- A CHECK constraint added while the set is being returned is seen, and the
+-- rows after it are converted in a subtransaction.
+CREATE DOMAIN rnd_late AS int4;
+CREATE FUNCTION rnd_late_set() RETURNS SETOF rnd_late LANGUAGE pljs AS $$
+  pljs.return_next(1);
+  pljs.execute('ALTER DOMAIN rnd_late ADD CONSTRAINT rnd_late_positive ' +
+               'CHECK (rnd_positive(VALUE))');
+  for (const v of [-2, 3]) {
+    try {
+      pljs.return_next(v);
+    } catch (e) {
+      pljs.elog(NOTICE, 'return_next: ' + e.message);
+    }
+  }
+  pljs.elog(NOTICE, 'execute: ' + pljs.execute('SELECT 42 AS x')[0].x);
+$$;
+SELECT * FROM rnd_late_set();
+
+-- So is a column of such a domain added to a row type in the set.  That
+-- changes the row type's relation, and neither a constraint nor the type's
+-- own catalog row, so the rows after it were converted without one.
+CREATE TYPE rnd_inner AS (x int4);
+CREATE FUNCTION rnd_late_column() RETURNS TABLE (a int4, i rnd_inner)
+LANGUAGE pljs AS $$
+  pljs.return_next({a: 1, i: {x: 1}});
+  pljs.execute('ALTER TYPE rnd_inner ADD ATTRIBUTE d rnd_pos');
+  for (const v of [-2, 3]) {
+    try {
+      pljs.return_next({a: v, i: {x: v, d: v}});
+    } catch (e) {
+      pljs.elog(NOTICE, 'return_next: ' + e.message);
+    }
+  }
+  pljs.elog(NOTICE, 'execute: ' + pljs.execute('SELECT 42 AS x')[0].x);
+$$;
+SELECT * FROM rnd_late_column();
+
+-- An error working out whether a row needs a subtransaction ends the call.
+-- Loading a domain's constraints plans them, which runs their IMMUTABLE
+-- functions, and one that raised was thrown to JavaScript with nothing rolled
+-- back: buffer pins, relations and a snapshot were left, and its SPI
+-- connection on top of the stack.
+CREATE FUNCTION rnd_limit() RETURNS int4 LANGUAGE plpgsql IMMUTABLE AS $$
+BEGIN
+  IF current_setting('rnd.fail', true) = 'on' THEN
+    RAISE EXCEPTION 'no limit';
+  END IF;
+
+  RETURN 10;
+END $$;
+CREATE DOMAIN rnd_limited AS int4 CHECK (VALUE <= rnd_limit());
+CREATE FUNCTION rnd_limited_set() RETURNS SETOF rnd_limited LANGUAGE pljs AS $$
+  try {
+    pljs.return_next(1);
+  } catch (e) {
+    pljs.elog(NOTICE, 'return_next: ' + e.message);
+  }
+
+  pljs.execute("SET rnd.fail = 'off'");
+  pljs.return_next(2);
+$$;
+
+SET rnd.fail = 'on';
+\set VERBOSITY terse
+SELECT * FROM rnd_limited_set();
+\set VERBOSITY default
+RESET rnd.fail;
+SELECT * FROM rnd_limited_set();
+
+-- A row whose conversion threw to JavaScript, rather than raised, has its
+-- subtransaction rolled back.  It was committed: here a return_next() nested
+-- in the row's toString getter ended the call with what its error held --
+-- the constraint's SPI connection, buffer pins, a snapshot -- inside the
+-- outer row's subtransaction, and committing it kept them.
+CREATE FUNCTION rnd_nested_end() RETURNS SETOF rnd_limited LANGUAGE pljs AS $$
+  const row = {
+    get toString() {
+      pljs.execute("SET rnd.fail = 'on'");
+      // Any constraint's change makes the domain's be loaded again.
+      pljs.execute('CREATE TEMP TABLE rnd_bump (i int4 CHECK (i > 0))');
+      pljs.return_next(5);
+      return undefined;
+    }
+  };
+
+  try {
+    pljs.return_next(row);
+  } catch (e) {
+    pljs.elog(NOTICE, 'return_next: ' + e.message);
+  }
+$$;
+
+\set VERBOSITY terse
+SELECT * FROM rnd_nested_end();
+\set VERBOSITY default
+RESET rnd.fail;
+
+-- A row whose conversion threw, with the call going on, has what its getters
+-- did rolled back with it in any set that checks its rows in a
+-- subtransaction, whichever raised the error; in a set with none, there is
+-- nothing to roll back.  A set of one column kept it and a set of several
+-- did not.
+CREATE TABLE rnd_log (s text);
+CREATE FUNCTION rnd_logged() RETURNS SETOF rnd_pos LANGUAGE pljs AS $$
+  try {
+    pljs.return_next({
+      get toString() {
+        pljs.execute("INSERT INTO rnd_log VALUES ('one column')");
+        throw new Error('no value');
+      }
+    });
+  } catch (e) {
+    pljs.elog(NOTICE, 'return_next: ' + e.message);
+  }
+
+  pljs.return_next(1);
+$$;
+CREATE FUNCTION rnd_logged_columns() RETURNS TABLE (a rnd_pos, b text)
+LANGUAGE pljs AS $$
+  try {
+    pljs.return_next({
+      get a() {
+        pljs.execute("INSERT INTO rnd_log VALUES ('columns')");
+        throw new Error('no value');
+      },
+      b: 'x'
+    });
+  } catch (e) {
+    pljs.elog(NOTICE, 'return_next: ' + e.message);
+  }
+$$;
+CREATE FUNCTION rnd_logged_plain() RETURNS TABLE (a int4, b text)
+LANGUAGE pljs AS $$
+  try {
+    pljs.return_next({
+      get a() {
+        pljs.execute("INSERT INTO rnd_log VALUES ('no domain')");
+        throw new Error('no value');
+      },
+      b: 'x'
+    });
+  } catch (e) {
+    pljs.elog(NOTICE, 'return_next: ' + e.message);
+  }
+$$;
+SELECT * FROM rnd_logged();
+SELECT * FROM rnd_logged_columns();
+SELECT * FROM rnd_logged_plain();
+SELECT s AS kept FROM rnd_log;
+
+-- A row that needed no subtransaction when that was worked out, and whose
+-- getter gave its domain a CHECK constraint as it was converted, ends the
+-- call when that fails: the constraint ran with none, and its PL/pgSQL
+-- function's SPI connection was left for the JavaScript that caught it.
+CREATE DOMAIN rnd_open AS int4;
+CREATE FUNCTION rnd_open_rows() RETURNS TABLE (a rnd_open, b text)
+LANGUAGE pljs AS $$
+  try {
+    pljs.return_next({
+      get a() {
+        pljs.execute('ALTER DOMAIN rnd_open ADD CONSTRAINT rnd_open_positive ' +
+                     'CHECK (rnd_positive(VALUE))');
+        return -2;
+      },
+      b: 'x'
+    });
+  } catch (e) {
+    pljs.elog(NOTICE, 'return_next: ' + e.message);
+  }
+$$;
+\set VERBOSITY terse
+SELECT * FROM rnd_open_rows();
+\set VERBOSITY default
+
+-- Even when a return_next() nested in the getter worked out that its own row
+-- needed one, which was taken for the outer row's.
+CREATE FUNCTION rnd_open_nested() RETURNS TABLE (a rnd_open, b text)
+LANGUAGE pljs AS $$
+  try {
+    pljs.return_next({
+      get a() {
+        pljs.execute('ALTER DOMAIN rnd_open ADD CONSTRAINT rnd_open_positive ' +
+                     'CHECK (rnd_positive(VALUE))');
+        pljs.return_next({a: 5, b: 'nested'});
+        return -2;
+      },
+      b: 'x'
+    });
+  } catch (e) {
+    pljs.elog(NOTICE, 'return_next: ' + e.message);
+  }
+$$;
+\set VERBOSITY terse
+SELECT * FROM rnd_open_nested();
+\set VERBOSITY default
+
+-- But an error in a set with no CHECK constraint to run is caught, whatever
+-- a getter did to the catalogs: a new constraint anywhere -- a temporary
+-- table's primary key -- or an ANALYZE was taken for a domain's, and ended
+-- the call.
+CREATE FUNCTION rnd_unrelated() RETURNS TABLE (a int4, b text)
+LANGUAGE pljs AS $$
+  try {
+    pljs.return_next({
+      get a() {
+        pljs.execute('CREATE TEMP TABLE rnd_keyed (id int4 PRIMARY KEY) ' +
+                     'ON COMMIT DROP');
+        return 'not a number';
+      },
+      b: 'x'
+    });
+  } catch (e) {
+    pljs.elog(NOTICE, 'return_next: caught');
+  }
+
+  pljs.return_next({a: 1, b: 'y'});
+$$;
+SELECT * FROM rnd_unrelated();
+
+-- Nor what a domain check ran in a getter's own pljs.execute(), which has a
+-- subtransaction of its own: every check anywhere was counted.
+CREATE FUNCTION rnd_pos_value() RETURNS rnd_pos LANGUAGE pljs AS $$
+  return 3;
+$$;
+CREATE FUNCTION rnd_deeper() RETURNS TABLE (a int4, b text)
+LANGUAGE pljs AS $$
+  try {
+    pljs.return_next({
+      get a() {
+        pljs.execute('SELECT rnd_pos_value()');
+        return 'not a number';
+      },
+      b: 'x'
+    });
+  } catch (e) {
+    pljs.elog(NOTICE, 'return_next: caught');
+  }
+
+  pljs.return_next({a: 1, b: 'y'});
+$$;
+SELECT * FROM rnd_deeper();
+
+-- A composite type inside a range, which a getter gives a column of a domain
+-- with a CHECK constraint.  The range's input function checked it without
+-- pljs knowing, and JavaScript caught its error with the SPI connection of
+-- its PL/pgSQL function left; so for a domain over the range.
+CREATE TYPE rnd_part AS (a int4);
+CREATE TYPE rnd_part_range AS RANGE (subtype = rnd_part);
+CREATE DOMAIN rnd_part_domain AS rnd_part_range;
+CREATE FUNCTION rnd_part_rows() RETURNS TABLE (r rnd_part_range, b text)
+LANGUAGE pljs AS $$
+  pljs.return_next({r: '["(1)","(2)")', b: 'first'});
+
+  try {
+    pljs.return_next({
+      get r() {
+        pljs.execute('ALTER TYPE rnd_part ADD ATTRIBUTE e rnd_pos');
+        return '["(1,-2)","(2,3)")';
+      },
+      b: 'x'
+    });
+  } catch (e) {
+    pljs.elog(NOTICE, 'return_next: ' + e.message);
+  }
+$$;
+CREATE FUNCTION rnd_part_domain_rows()
+RETURNS TABLE (r rnd_part_domain, b text) LANGUAGE pljs AS $$
+  pljs.return_next({r: '["(1)","(2)")', b: 'first'});
+
+  try {
+    pljs.return_next({
+      get r() {
+        pljs.execute('ALTER TYPE rnd_part ADD ATTRIBUTE e rnd_pos');
+        return '["(1,-2)","(2,3)")';
+      },
+      b: 'x'
+    });
+  } catch (e) {
+    pljs.elog(NOTICE, 'return_next: ' + e.message);
+  }
+$$;
+\set VERBOSITY terse
+SELECT * FROM rnd_part_rows();
+SELECT * FROM rnd_part_domain_rows();
+\set VERBOSITY default
+
+-- A set of one column ends the call as a set of several does once a CHECK
+-- constraint has run without a subtransaction -- here a nested row's -- and
+-- its getter throws.  It let JavaScript catch it.
+CREATE DOMAIN rnd_single AS int4;
+CREATE FUNCTION rnd_single_rows() RETURNS TABLE (x rnd_single)
+LANGUAGE pljs AS $$
+  try {
+    pljs.return_next({
+      get x() {
+        pljs.return_next({
+          get x() {
+            pljs.execute('ALTER DOMAIN rnd_single ADD CONSTRAINT ' +
+                         'rnd_single_positive CHECK (rnd_positive(VALUE))');
+            return 5;
+          }
+        });
+        throw new Error('outer getter threw');
+      }
+    });
+  } catch (e) {
+    pljs.elog(NOTICE, 'return_next: ' + e.message);
+  }
+$$;
+\set VERBOSITY terse
+SELECT * FROM rnd_single_rows();
+\set VERBOSITY default
+
+-- A constraint the getter added that raises as it is loaded -- planning it
+-- runs its IMMUTABLE functions -- ends the call as one that raises as it
+-- runs does.  Only a check that had loaded its constraints was counted.
+CREATE FUNCTION rnd_open_loaded() RETURNS TABLE (a rnd_open, b text)
+LANGUAGE pljs AS $$
+  try {
+    pljs.return_next({
+      get a() {
+        pljs.execute('ALTER DOMAIN rnd_open ADD CONSTRAINT rnd_open_limit ' +
+                     'CHECK (VALUE < rnd_limit())');
+        pljs.execute("SELECT set_config('rnd.fail', 'on', false)");
+        return 5;
+      },
+      b: 'x'
+    });
+  } catch (e) {
+    pljs.elog(NOTICE, 'return_next: ' + e.message);
+  }
+$$;
+\set VERBOSITY terse
+SELECT * FROM rnd_open_loaded();
+\set VERBOSITY default
+RESET rnd.fail;
+
+-- A domain's checking state that could not be built -- its constraint raises
+-- as it is loaded -- is not left behind.  One was for each retry, for as long
+-- as the function's type cache lived.
+CREATE DOMAIN rnd_bad AS int4 CHECK (VALUE > 1 / 0);
+CREATE TYPE rnd_bad_range AS RANGE (subtype = rnd_bad);
+CREATE FUNCTION rnd_bad_retry(n int4) RETURNS text LANGUAGE pljs AS $$
+  for (let i = 0; i < n; i++) {
+    try {
+      pljs.prepare('SELECT $1 AS r', ['rnd_bad_range']).execute(['[1,2)']);
+    } catch (e) {
+    }
+  }
+
+  return pljs.execute("SELECT count(*)::int4 AS n " +
+                      "FROM pg_backend_memory_contexts " +
+                      "WHERE name = 'PLJS Domain Check'")[0].n < 5
+             ? 'released' : 'kept';
+$$;
+SELECT rnd_bad_retry(200);
+
+-- Nor is one for a range whose type was dropped while it was used, which
+-- JavaScript can catch: its input function could not be looked up once the
+-- state was made, one for each retry.
+CREATE TYPE rnd_gone AS (a int4);
+CREATE TYPE rnd_gone_range AS RANGE (subtype = rnd_gone);
+CREATE FUNCTION rnd_gone_retry(n int4) RETURNS text LANGUAGE pljs AS $$
+  const plan = pljs.prepare('SELECT $1::text AS r', ['rnd_gone_range']);
+
+  plan.execute(['["(1)","(2)")']);
+  pljs.execute('DROP TYPE rnd_gone CASCADE');
+
+  for (let i = 0; i < n; i++) {
+    try {
+      plan.execute(['["(1)","(2)")']);
+    } catch (e) {
+    }
+  }
+
+  return pljs.execute("SELECT count(*)::int4 AS n " +
+                      "FROM pg_backend_memory_contexts " +
+                      "WHERE name = 'PLJS Domain Check'")[0].n < 5
+             ? 'released' : 'kept';
+$$;
+SELECT rnd_gone_retry(200);
+
+SELECT 1 AS still_connected;
+
+DROP FUNCTION rnd_f(), rnd_pos_set(), rnd_rows(), rnd_arrays(), rnd_ranges(),
+  rnd_multiranges(), rnd_nn_set(), rnd_late_set(), rnd_late_column(),
+  rnd_limited_set(), rnd_nested_end(), rnd_logged(), rnd_logged_columns(),
+  rnd_logged_plain(), rnd_open_rows(), rnd_open_nested(), rnd_unrelated(),
+  rnd_deeper(), rnd_pos_value(), rnd_open_loaded(), rnd_bad_retry(int4),
+  rnd_part_rows(), rnd_part_domain_rows(), rnd_single_rows(),
+  rnd_gone_retry(int4);
+DROP TABLE rnd_log;
+DROP DOMAIN rnd_part_domain;
+DROP TYPE rnd_row, rnd_range, rnd_inner, rnd_bad_range, rnd_part_range,
+  rnd_part;
+DROP DOMAIN rnd_d, rnd_pos, rnd_nn, rnd_late, rnd_limited, rnd_open, rnd_bad,
+  rnd_single;
+DROP FUNCTION rnd_g(int4), rnd_positive(int4), rnd_limit();

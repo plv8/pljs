@@ -354,7 +354,7 @@ CREATE FUNCTION bad_alloc(sz text) RETURNS void AS $$
   winobj.set_partition_local(context);
 $$ LANGUAGE pljs WINDOW;
 SELECT bad_alloc('5') OVER ();
-ERROR:  execution error
+ERROR:  window local memory overflow
 DETAIL:  Error: window local memory overflow
     at bad_alloc (<function>:6:29)
 
@@ -370,11 +370,56 @@ SELECT bad_alloc('1000') OVER (); -- not so bad
  
 (1 row)
 
+-- A value set before anything is got allocates just enough for itself, and
+-- what it holds is compared with the next value's size alone: the next value
+-- of the same size was reported as an overflow, as it was compared with its
+-- size plus the header's.
+CREATE FUNCTION set_first() RETURNS int AS $$
+  var winobj = pljs.get_window_object();
+  var pos = winobj.get_current_position();
+
+  try {
+    winobj.set_partition_local({n: pos});
+  } catch (e) {
+    pljs.elog(NOTICE, e.message);
+    return -1;
+  }
+  return winobj.get_partition_local().n;
+$$ LANGUAGE pljs WINDOW;
+SELECT set_first() OVER (), x FROM generate_series(1, 3) x;
+ set_first | x 
+-----------+---
+         0 | 1
+         1 | 2
+         2 | 3
+(3 rows)
+
+-- Still an overflow once the value outgrows it.
+CREATE FUNCTION set_grow() RETURNS int AS $$
+  var winobj = pljs.get_window_object();
+  var pos = winobj.get_current_position();
+
+  try {
+    winobj.set_partition_local({s: 'x'.repeat(pos + 1)});
+  } catch (e) {
+    pljs.elog(NOTICE, e.message);
+    return -1;
+  }
+  return winobj.get_partition_local().s.length;
+$$ LANGUAGE pljs WINDOW;
+SELECT set_grow() OVER (), x FROM generate_series(1, 2) x;
+NOTICE:  window local memory overflow
+ set_grow | x 
+----------+---
+        1 | 1
+       -1 | 2
+(2 rows)
+
 CREATE FUNCTION non_window() RETURNS void AS $$
   var winobj = pljs.get_window_object();
 $$ LANGUAGE pljs;
 SELECT non_window();
-ERROR:  execution error
+ERROR:  get_window_object called in wrong context
 DETAIL:  Error: get_window_object called in wrong context
     at non_window (<function>:3:38)
 

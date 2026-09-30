@@ -1,0 +1,69 @@
+-- A JavaScript number or BigInt that an integer type cannot represent must raise,
+-- not arrive as a different number.
+--
+-- QuickJS's JS_ToInt32/JS_ToInt64 wrap modulo the word size and report nothing, so
+-- 2147483648 became -2147483648 for an int4 and 40000 became -25536 for an int2.
+-- NaN and Infinity both became 0. JS_ToBigInt64 keeps only the low 64 bits, so
+-- 2n ** 70n arrived as 0.
+--
+-- PostgreSQL raises "out of range" for the equivalent cast, and for a data
+-- pipeline a silently different number is the worst of the available outcomes.
+--
+-- Fractions still truncate toward zero, which is the established JavaScript
+-- conversion; only the range is newly enforced.
+CREATE EXTENSION IF NOT EXISTS pljs;
+
+CREATE FUNCTION ir_int2(v jsonb) RETURNS int2 AS $$
+  return pljs.execute('SELECT $1::int2 AS v', [JSON.parse(v)])[0].v;
+$$ LANGUAGE pljs;
+
+CREATE FUNCTION ir_int4(v jsonb) RETURNS int4 AS $$
+  return pljs.execute('SELECT $1::int4 AS v', [JSON.parse(v)])[0].v;
+$$ LANGUAGE pljs;
+
+\set VERBOSITY terse
+
+-- Out of range, where the old behaviour wrapped.
+SELECT ir_int4('2147483648');
+SELECT ir_int4('-2147483649');
+SELECT ir_int2('40000');
+
+-- NaN and Infinity, where the old behaviour produced 0.
+CREATE FUNCTION ir_nan() RETURNS int4 AS $$ return pljs.execute('SELECT $1::int4 AS v', [NaN])[0].v; $$ LANGUAGE pljs;
+CREATE FUNCTION ir_inf() RETURNS int4 AS $$ return pljs.execute('SELECT $1::int4 AS v', [Infinity])[0].v; $$ LANGUAGE pljs;
+
+SELECT ir_nan();
+SELECT ir_inf();
+
+-- A BigInt wider than 64 bits, where the old behaviour kept the low bits.
+CREATE FUNCTION ir_bigint_wide() RETURNS int8 AS $$
+  return pljs.execute('SELECT $1::int8 AS v', [2n ** 70n])[0].v;
+$$ LANGUAGE pljs;
+
+SELECT ir_bigint_wide();
+
+-- A BigInt that fits int8 but not int4.
+CREATE FUNCTION ir_bigint_narrow() RETURNS int4 AS $$
+  return pljs.execute('SELECT $1::int4 AS v', [5000000000n])[0].v;
+$$ LANGUAGE pljs;
+
+SELECT ir_bigint_narrow();
+
+\set VERBOSITY default
+
+-- The limits themselves are still accepted.
+SELECT ir_int4('2147483647') AS int4_max, ir_int4('-2147483648') AS int4_min;
+SELECT ir_int2('32767') AS int2_max, ir_int2('-32768') AS int2_min;
+
+CREATE FUNCTION ir_int8_limits() RETURNS text AS $$
+  const hi = pljs.execute('SELECT $1::int8 AS v', [9223372036854775807n])[0].v;
+  const lo = pljs.execute('SELECT $1::int8 AS v', [-9223372036854775808n])[0].v;
+  return hi + ' ' + lo;
+$$ LANGUAGE pljs;
+
+SELECT ir_int8_limits() AS int8_limits;
+
+-- Fractions truncate toward zero, unchanged.
+SELECT ir_int4('3.7') AS trunc_pos, ir_int4('-3.7') AS trunc_neg;
+
+DROP FUNCTION ir_int2, ir_int4, ir_nan, ir_inf, ir_bigint_wide, ir_bigint_narrow, ir_int8_limits;

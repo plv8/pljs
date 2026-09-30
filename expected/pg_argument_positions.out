@@ -1,0 +1,76 @@
+-- A polymorphic argument's type is resolved by its place among the input
+-- arguments.
+--
+-- It was resolved by its place among all of the arguments, OUT ones
+-- included, and fcinfo has only the input ones: with an OUT argument first,
+-- each polymorphic argument took the type of the one after it.  An anyarray's
+-- type given to an anyelement read the int it was passed as an array's
+-- address, and crashed the backend.
+CREATE FUNCTION apo_types(OUT r text, a anyelement, b anyarray)
+LANGUAGE pljs AS $$
+  return typeof a + ' ' + JSON.stringify(a) + ' ' + JSON.stringify(b);
+$$;
+SELECT apo_types(5, ARRAY[1, 2]);
+   apo_types    
+----------------
+ number 5 [1,2]
+(1 row)
+
+SELECT apo_types('x'::text, ARRAY['y', 'z']);
+      apo_types       
+----------------------
+ string "x" ["y","z"]
+(1 row)
+
+CREATE FUNCTION apo_middle(a int4, OUT r text, b anyelement)
+LANGUAGE pljs AS $$
+  return typeof b + ' ' + JSON.stringify(b);
+$$;
+SELECT apo_middle(1, true);
+  apo_middle  
+--------------
+ boolean true
+(1 row)
+
+SELECT apo_middle(1, '{"k": 1}'::jsonb);
+   apo_middle   
+----------------
+ object {"k":1}
+(1 row)
+
+-- A window function reads its arguments the same way.  It read every one,
+-- OUT ones included, by its place among all of them, past the end of the
+-- window's, and crashed the backend.
+CREATE FUNCTION apo_window(OUT r text, a text, b int4) RETURNS text WINDOW
+LANGUAGE pljs AS $$
+  return a + ':' + b + ':' +
+         pljs.get_window_object().get_func_arg_current(0);
+$$;
+SELECT apo_window(x::text, x) OVER () FROM generate_series(1, 2) AS x;
+ apo_window 
+------------
+ 1:1:1
+ 2:2:2
+(2 rows)
+
+CREATE FUNCTION apo_window_last(a text, OUT r text) RETURNS text WINDOW
+LANGUAGE pljs AS $$
+  return a;
+$$;
+SELECT apo_window_last(x::text) OVER () FROM generate_series(1, 2) AS x;
+ apo_window_last 
+-----------------
+ 1
+ 2
+(2 rows)
+
+SELECT 1 AS still_connected;
+ still_connected 
+-----------------
+               1
+(1 row)
+
+DROP FUNCTION apo_window_last(text);
+DROP FUNCTION apo_window(text, int4);
+DROP FUNCTION apo_middle(int4, anyelement);
+DROP FUNCTION apo_types(anyelement, anyarray);

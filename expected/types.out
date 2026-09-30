@@ -69,12 +69,14 @@ SELECT text_to_int4('123');
           123
 (1 row)
 
+-- A string is parsed by int4's input function, so text that is not an integer
+-- raises instead of silently becoming 0, which is what routing it through a
+-- double produced.
 SELECT text_to_int4('abc');
- text_to_int4 
---------------
-            0
-(1 row)
-
+ERROR:  invalid input syntax for type integer: "abc"
+-- Out of range likewise raises rather than wrapping.
+SELECT text_to_int4('2147483648');
+ERROR:  value "2147483648" is out of range for type integer
 -- ARRAYS
 CREATE FUNCTION return_array() RETURNS TEXT[] AS $$ return ["foo", "bar"]; $$LANGUAGE pljs;
 SELECT return_array();
@@ -107,7 +109,7 @@ CREATE OR REPLACE FUNCTION bigint_failing(val BIGINT)
     return val - 1;
    $$ LANGUAGE pljs STABLE STRICT;
 SELECT bigint_failing(9223372036854775807);
-ERROR:  execution error
+ERROR:  cannot convert bigint to number
 DETAIL:  TypeError: cannot convert bigint to number
     at bigint_failing (<function>:3:16)
 
@@ -231,3 +233,41 @@ SELECT array_with_nulls();
 (1 row)
 
 DROP FUNCTION array_with_nulls();
+-- Custom and domain types reach the catch-all varlena conversion in
+-- pljs_datum_to_jsvalue_fallback().  A literal is built with a 4-byte header,
+-- but the same value read back out of a column carries a 1-byte short header,
+-- and a large one is stored compressed.  Reading either of those with VARDATA()
+-- instead of VARDATA_ANY(), and without detoasting, returned a value shifted
+-- three bytes into its own payload -- or the raw compressed bytes.
+CREATE TABLE ltree_tbl (l ltree);
+INSERT INTO ltree_tbl VALUES ('1.2.3');
+SELECT ltree_echo(l) FROM ltree_tbl;
+ ltree_echo 
+------------
+ 1.2.3
+(1 row)
+
+CREATE DOMAIN packed_text AS text;
+CREATE FUNCTION packed_echo(v packed_text) RETURNS text AS $$
+  return v;
+$$ LANGUAGE pljs;
+CREATE TABLE packed_tbl (v packed_text);
+INSERT INTO packed_tbl VALUES ('ABCDEFGHIJ'), (repeat('Z', 5000));
+SELECT packed_echo('ABCDEFGHIJ'::packed_text) AS from_literal;
+ from_literal 
+--------------
+ ABCDEFGHIJ
+(1 row)
+
+SELECT packed_echo(v) AS from_column FROM packed_tbl WHERE length(v) = 10;
+ from_column 
+-------------
+ ABCDEFGHIJ
+(1 row)
+
+SELECT length(packed_echo(v)) AS toasted_len FROM packed_tbl WHERE length(v) > 100;
+ toasted_len 
+-------------
+        5000
+(1 row)
+

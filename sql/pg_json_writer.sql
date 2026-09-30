@@ -1,0 +1,187 @@
+-- JavaScript values are written to json and jsonb as JSON.stringify() writes
+-- them, and nothing PostgreSQL cannot read back is stored.
+
+-- 1) A property whose value has no JSON -- a function, undefined, a Symbol --
+-- is left out of an object, and is null in an array.  A function was
+-- converted as an object, and every function's prototype has a constructor
+-- that is the function again, so jsonb recursed until the stack overflowed
+-- and the backend crashed.  A property whose value was undefined wrote its
+-- key and no value.
+CREATE FUNCTION jw_members() RETURNS jsonb LANGUAGE pljs AS $$
+  return {
+    fn: function () { return 1; },
+    arrow: () => 2,
+    u: undefined,
+    s: Symbol('s'),
+    kept: 1,
+    list: [function () {}, undefined, Symbol('t'), 2]
+  };
+$$;
+SELECT jw_members();
+
+CREATE FUNCTION jw_members_json() RETURNS json LANGUAGE pljs AS $$
+  return {
+    fn: function () { return 1; },
+    u: undefined,
+    kept: 1,
+    list: [function () {}, undefined, 2]
+  };
+$$;
+SELECT jw_members_json();
+
+-- Only own enumerable properties are written.
+CREATE FUNCTION jw_enumerable() RETURNS jsonb LANGUAGE pljs AS $$
+  const o = Object.create({inherited: 1});
+  Object.defineProperty(o, 'hidden', {value: 2, enumerable: false});
+  o.shown = 3;
+  return o;
+$$;
+SELECT jw_enumerable();
+
+-- 2) A value that has no JSON at all is SQL NULL.  json stored the text
+-- "undefined", which is not JSON.
+CREATE FUNCTION jw_fn_jsonb() RETURNS jsonb LANGUAGE pljs AS $$
+  return function () {};
+$$;
+CREATE FUNCTION jw_fn_json() RETURNS json LANGUAGE pljs AS $$
+  return function () {};
+$$;
+CREATE FUNCTION jw_sym_json() RETURNS json LANGUAGE pljs AS $$
+  return Symbol('x');
+$$;
+SELECT jw_fn_jsonb() IS NULL AS jsonb_null, jw_fn_json() IS NULL AS json_null,
+       jw_sym_json() IS NULL AS symbol_null;
+
+-- 3) A cycle, and an object nested too deeply, raise an error rather than
+-- overflow the stack.
+CREATE FUNCTION jw_cycle() RETURNS jsonb LANGUAGE pljs AS $$
+  const a = {name: 'a'};
+  a.self = a;
+  return a;
+$$;
+SELECT jw_cycle();
+
+CREATE FUNCTION jw_cycle_array() RETURNS jsonb LANGUAGE pljs AS $$
+  const a = [1];
+  a.push({back: a});
+  return a;
+$$;
+SELECT jw_cycle_array();
+
+-- The same object twice is not a cycle.
+CREATE FUNCTION jw_shared() RETURNS jsonb LANGUAGE pljs AS $$
+  const shared = {v: 1};
+  return {x: shared, y: [shared, shared]};
+$$;
+SELECT jw_shared();
+
+CREATE FUNCTION jw_deep() RETURNS jsonb LANGUAGE pljs AS $$
+  let o = {};
+  for (let i = 0; i < 100000; i++) {
+    o = {o: o};
+  }
+  return o;
+$$;
+DO $$
+BEGIN
+  PERFORM jw_deep();
+EXCEPTION WHEN statement_too_complex THEN
+  RAISE NOTICE 'deep: %', SQLERRM;
+END $$;
+
+-- 4) NaN and the infinities are null, as in JSON.  They were stored as
+-- numeric NaN and Infinity, which jsonb cannot otherwise hold.
+CREATE FUNCTION jw_numbers() RETURNS jsonb LANGUAGE pljs AS $$
+  return {ratio: 1 / 0, negative: -1 / 0, n: NaN, list: [NaN, 1.5]};
+$$;
+SELECT jw_numbers(), jw_numbers()::text::jsonb = jw_numbers() AS round_trips;
+
+-- A bare NaN.
+CREATE FUNCTION jw_nan() RETURNS jsonb LANGUAGE pljs AS $$ return NaN; $$;
+SELECT jw_nan();
+
+-- 5) A string, or a key, holding "\u0000" is refused, as jsonb_in() refuses
+-- it; it was stored, and broke a cast to text, COPY and a restore.
+CREATE FUNCTION jw_nul_value() RETURNS jsonb LANGUAGE pljs AS $$
+  return {s: 'a\u0000b'};
+$$;
+SELECT jw_nul_value();
+
+CREATE FUNCTION jw_nul_key() RETURNS jsonb LANGUAGE pljs AS $$
+  return {['a\u0000b']: 1};
+$$;
+SELECT jw_nul_key();
+
+-- 6) A Date is written through its toJSON(), and a Date whose toJSON is not
+-- a function as the object it is, as JSON.stringify() writes them.
+CREATE FUNCTION jw_dates() RETURNS jsonb LANGUAGE pljs AS $$
+  const plain = new Date(Date.UTC(2020, 0, 2, 3, 4, 5));
+  const invalid = new Date(NaN);
+  const no_to_json = new Date(0);
+  no_to_json.toJSON = undefined;
+  const custom = new Date(0);
+  custom.toJSON = () => ({custom: true});
+  return {plain, invalid, no_to_json, custom};
+$$;
+SELECT jw_dates();
+
+-- 7) Any object's toJSON() is called, with its key, and a Number, String or
+-- Boolean object is written as its value, as JSON.stringify() writes them,
+-- so json and jsonb agree.  Only a Date's toJSON() was called, and jsonb wrote
+-- any other object as its own properties: `new String('s')` as {"0": "s"}.
+CREATE FUNCTION jw_to_json_jsonb() RETURNS jsonb LANGUAGE pljs AS $$
+  class Money {
+    constructor(cents) { this.cents = cents; }
+    toJSON(key) { return key + ': ' + (this.cents / 100).toFixed(2); }
+  }
+  return {
+    price: new Money(500),
+    list: [new Money(1), new Number(2), new String('s'), new Boolean(false)],
+    boxed: {n: new Number(1.5), s: new String('x'), b: new Boolean(true)},
+    replaced: {toJSON() { return {with: [1, 2]}; }},
+    gone: {toJSON() { return undefined; }}
+  };
+$$;
+CREATE FUNCTION jw_to_json_json() RETURNS json LANGUAGE pljs AS $$
+  class Money {
+    constructor(cents) { this.cents = cents; }
+    toJSON(key) { return key + ': ' + (this.cents / 100).toFixed(2); }
+  }
+  return {
+    price: new Money(500),
+    list: [new Money(1), new Number(2), new String('s'), new Boolean(false)],
+    boxed: {n: new Number(1.5), s: new String('x'), b: new Boolean(true)},
+    replaced: {toJSON() { return {with: [1, 2]}; }},
+    gone: {toJSON() { return undefined; }}
+  };
+$$;
+SELECT jw_to_json_jsonb();
+SELECT jw_to_json_jsonb() = jw_to_json_json()::jsonb AS same_as_json;
+
+-- The value itself: its key is "".
+CREATE FUNCTION jw_to_json_top() RETURNS jsonb LANGUAGE pljs AS $$
+  return {toJSON(key) { return 'key [' + key + ']'; }};
+$$;
+SELECT jw_to_json_top();
+
+-- A BigInt's too, which is how JSON.stringify() is taught to write one.
+CREATE FUNCTION jw_to_json_bigint() RETURNS jsonb LANGUAGE pljs AS $$
+  BigInt.prototype.toJSON = function () { return this.toString(); };
+  return {big: 12345678901234567890n};
+$$;
+SELECT jw_to_json_bigint();
+DO $$ delete BigInt.prototype.toJSON; $$ LANGUAGE pljs;
+
+-- A toJSON() that throws is an error, as it is for JSON.stringify().
+CREATE FUNCTION jw_to_json_throws() RETURNS jsonb LANGUAGE pljs AS $$
+  return {a: {toJSON() { throw new Error('no JSON for you'); }}};
+$$;
+SELECT jw_to_json_throws();
+
+SELECT 1 AS still_connected;
+
+DROP FUNCTION jw_members(), jw_members_json(), jw_enumerable(), jw_fn_jsonb(),
+  jw_fn_json(), jw_sym_json(), jw_cycle(), jw_cycle_array(), jw_shared(),
+  jw_deep(), jw_numbers(), jw_nan(), jw_nul_value(), jw_nul_key(),
+  jw_dates(), jw_to_json_jsonb(), jw_to_json_json(), jw_to_json_top(),
+  jw_to_json_bigint(), jw_to_json_throws();

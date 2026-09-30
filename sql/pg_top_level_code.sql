@@ -1,0 +1,217 @@
+-- Code at the top level of a function's source runs with storage of its own.
+--
+-- A body can close the function it is wrapped in, and the code after it runs
+-- as the source is compiled, on the function's first call.  It ran with the
+-- storage of the call that compiled it, so a return_next() there added rows to
+-- that call's set, or with none at all.  A cancel while it ran, or while
+-- pljs.start_proc did, was raised as XX000 "interrupted" rather than as the
+-- cancel.
+
+-- 1) return_next() at the top level of a function first called from inside a
+-- set-returning function's call.
+CREATE FUNCTION tlc_inner() RETURNS int4 LANGUAGE pljs AS $$
+  return 1;
+} pljs.return_next(99); function tlc_unused() {
+$$;
+
+CREATE FUNCTION tlc_outer() RETURNS SETOF int4 LANGUAGE pljs AS $$
+  pljs.return_next(1);
+
+  try {
+    pljs.execute('SELECT tlc_inner()');
+  } catch (e) {
+    pljs.elog(NOTICE, e.message);
+  }
+
+  pljs.return_next(2);
+$$;
+
+SELECT * FROM tlc_outer();
+
+-- 2) A timeout in top-level code.
+CREATE FUNCTION tlc_spin() RETURNS int4 LANGUAGE pljs AS $$
+  return 1;
+} while (true) {} function tlc_unused() {
+$$;
+
+SET statement_timeout = '300ms';
+
+DO $$
+BEGIN
+  PERFORM tlc_spin();
+EXCEPTION WHEN query_canceled THEN
+  RAISE NOTICE 'top level: %', SQLERRM;
+END $$;
+
+RESET statement_timeout;
+
+-- 3) A timeout in pljs.start_proc, which runs in a new context: a new role's.
+CREATE FUNCTION tlc_spin_start() RETURNS void LANGUAGE pljs AS $$
+  while (true) {}
+$$;
+
+CREATE ROLE tlc_role;
+SET ROLE tlc_role;
+SET pljs.start_proc = 'tlc_spin_start';
+SET statement_timeout = '300ms';
+
+DO $outer$
+BEGIN
+  EXECUTE 'DO $$ return; $$ LANGUAGE pljs';
+EXCEPTION WHEN query_canceled THEN
+  RAISE NOTICE 'start_proc: %', SQLERRM;
+END $outer$;
+
+RESET statement_timeout;
+SET pljs.start_proc = '';
+RESET ROLE;
+DROP ROLE tlc_role;
+
+-- 4) A start_proc whose top-level code times out, in a new role's context.
+-- Every error compiling it was taken for a failure to find it: the timeout
+-- was logged as a warning, and the statement ran on past it.  It gives up
+-- after five seconds.
+CREATE FUNCTION tlc_start_top() RETURNS void LANGUAGE pljs AS $$
+  return;
+} { const end = Date.now() + 5000; while (Date.now() < end) {} } function tlc_unused() {
+$$;
+
+CREATE ROLE tlc_role;
+SET ROLE tlc_role;
+SET pljs.start_proc = 'tlc_start_top';
+SET statement_timeout = '300ms';
+DO $$ pljs.elog(NOTICE, 'the timeout was swallowed'); $$ LANGUAGE pljs;
+RESET statement_timeout;
+SET pljs.start_proc = '';
+RESET ROLE;
+DROP ROLE tlc_role;
+
+-- The context a start_proc failed in is freed, not lost: a function that
+-- failed because of its user's start_proc left a whole context behind on
+-- every call.  What the start_proc defined refers to its context, so the
+-- context is collected with it.
+CREATE FUNCTION tlc_start_throws() RETURNS void LANGUAGE pljs AS $$
+  return;
+} throw new Error('no start'); function tlc_unused() {
+$$;
+
+CREATE FUNCTION tlc_noop() RETURNS void LANGUAGE pljs AS $$ return; $$;
+
+-- Calls it n times as a new role, catching what it raises.
+CREATE PROCEDURE tlc_noop_calls(n int4) LANGUAGE plpgsql AS $$
+BEGIN
+  FOR i IN 1..n LOOP
+    BEGIN
+      PERFORM tlc_noop();
+    EXCEPTION WHEN OTHERS THEN NULL;
+    END;
+  END LOOP;
+END $$;
+
+CREATE ROLE tlc_role;
+SET pljs.start_proc = 'tlc_start_throws';
+SET ROLE tlc_role;
+CALL tlc_noop_calls(5);
+RESET ROLE;
+DO $$ pljs.gc(); $$ LANGUAGE pljs;
+SELECT (pljs_info() ->> 'malloc_size')::float8 AS tlc_before \gset
+SET ROLE tlc_role;
+CALL tlc_noop_calls(200);
+RESET ROLE;
+DO $$ pljs.gc(); $$ LANGUAGE pljs;
+SELECT (pljs_info() ->> 'malloc_size')::float8 - :tlc_before < 2 * 1024 * 1024
+  AS released;
+
+SET pljs.start_proc = '';
+DROP ROLE tlc_role;
+DROP PROCEDURE tlc_noop_calls(int4);
+DROP FUNCTION tlc_noop();
+DROP FUNCTION tlc_start_throws();
+
+-- Top-level code that replaces its function: the source evaluates to
+-- undefined, which returned a void Datum as the text it declared, and the
+-- caller read it as a pointer and crashed the backend.
+CREATE FUNCTION tlc_replaced() RETURNS text LANGUAGE pljs AS $$
+  return 'x';
+} tlc_replaced = undefined; function tlc_unused() {
+$$;
+
+SELECT length(tlc_replaced());
+
+-- Top-level code has a connection to SPI of its own: it ran on whatever was
+-- on top of the stack, and failed from a query, and inside a PL/pgSQL loop
+-- ran on the loop's.
+CREATE FUNCTION tlc_sql() RETURNS int4 LANGUAGE pljs AS $$
+  return tlc_answer;
+} var tlc_answer = pljs.execute('SELECT 42 AS a')[0].a; function tlc_unused() {
+$$;
+
+SELECT tlc_sql();
+
+CREATE FUNCTION tlc_sql_loop() RETURNS int4 LANGUAGE pljs AS $$
+  return tlc_loop_answer;
+} var tlc_loop_answer = pljs.execute('SELECT 7 AS a')[0].a; function tlc_unused() {
+$$;
+
+DO $$
+DECLARE
+  r record;
+BEGIN
+  FOR r IN SELECT g FROM generate_series(1, 2) AS g LOOP
+    RAISE NOTICE 'loop: %', tlc_sql_loop();
+  END LOOP;
+END $$;
+
+-- Recursion through pljs.find_function() stops.  Compiling a function it
+-- found measured QuickJS's stack from there, at every level, and nothing
+-- checked the C stack below, until the backend crashed.
+CREATE FUNCTION tlc_helper() RETURNS int4 LANGUAGE pljs AS $$ return 1; $$;
+
+CREATE FUNCTION tlc_recurse() RETURNS text LANGUAGE pljs AS $$
+  function rec(n) {
+    pljs.find_function('tlc_helper');
+    return rec(n + 1) + 1;
+  }
+
+  try {
+    rec(0);
+    return 'not stopped';
+  } catch (e) {
+    return 'stopped';
+  }
+$$;
+
+SELECT tlc_recurse();
+
+DROP FUNCTION tlc_recurse();
+DROP FUNCTION tlc_helper();
+DROP FUNCTION tlc_sql_loop();
+DROP FUNCTION tlc_sql();
+DROP FUNCTION tlc_replaced();
+
+-- 5) A new backend's start_proc.  What stops JavaScript for a cancel was
+-- installed before each call, and a new backend's start_proc runs before its
+-- first: a statement_timeout never stopped it.  It gives up after five
+-- seconds, and says so.
+CREATE FUNCTION tlc_spin_bounded() RETURNS void LANGUAGE pljs AS $$
+  const end = Date.now() + 5000;
+  while (Date.now() < end) {}
+  pljs.elog(NOTICE, 'the start_proc ran to its end');
+$$;
+
+SELECT current_database() AS tlc_db \gset
+\c :tlc_db
+SET pljs.start_proc = 'tlc_spin_bounded';
+SET statement_timeout = '300ms';
+DO $$ return; $$ LANGUAGE pljs;
+RESET statement_timeout;
+SET pljs.start_proc = '';
+
+SELECT 1 AS still_connected;
+
+DROP FUNCTION tlc_spin_bounded();
+DROP FUNCTION tlc_start_top();
+DROP FUNCTION tlc_spin_start();
+DROP FUNCTION tlc_spin();
+DROP FUNCTION tlc_outer();
+DROP FUNCTION tlc_inner();

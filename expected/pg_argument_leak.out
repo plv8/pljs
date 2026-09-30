@@ -1,0 +1,128 @@
+-- A function's arguments are released after it is called.
+--
+-- JS_Call() takes references of its own to the arguments it is given, and
+-- the references the call handler held were never released, so every call
+-- left its arguments in the runtime for the life of the backend: 20MB over
+-- 20,000 calls with a 1kB text argument, which pljs.gc() did not reclaim,
+-- until pljs.memory_limit was exhausted for good.  A trigger's ten arguments,
+-- NEW and OLD among them, leaked the same way.
+CREATE FUNCTION al_malloc_mb() RETURNS float8 LANGUAGE sql AS $$
+  SELECT (pljs_info() ->> 'malloc_size')::float8 / (1024 * 1024);
+$$;
+CREATE FUNCTION al_gc() RETURNS void LANGUAGE pljs AS $$ pljs.gc(); $$;
+CREATE FUNCTION al_len(s text) RETURNS int4 LANGUAGE pljs AS $$
+  return s.length;
+$$;
+CREATE FUNCTION al_rows(s text) RETURNS SETOF int4 LANGUAGE pljs AS $$
+  pljs.return_next(s.length);
+$$;
+-- Warm up the context, so what follows measures only the calls.
+SELECT al_len('x'), al_rows('x'), al_gc();
+ al_len | al_rows | al_gc 
+--------+---------+-------
+      1 |       1 | 
+(1 row)
+
+CREATE TEMP TABLE al_before AS SELECT al_malloc_mb() AS mb;
+SELECT count(al_len(repeat('x', 1000))) FROM generate_series(1, 20000);
+ count 
+-------
+ 20000
+(1 row)
+
+SELECT count(*) FROM generate_series(1, 20000) AS i,
+  LATERAL al_rows(repeat('x', 1000));
+ count 
+-------
+ 20000
+(1 row)
+
+SELECT al_gc();
+ al_gc 
+-------
+ 
+(1 row)
+
+SELECT al_malloc_mb() - mb < 5 AS function_arguments_released FROM al_before;
+ function_arguments_released 
+-----------------------------
+ t
+(1 row)
+
+-- A trigger's arguments.
+CREATE TABLE al_tbl (id int4, payload text);
+CREATE FUNCTION al_trig() RETURNS trigger LANGUAGE pljs AS $$
+  return NEW;
+$$;
+CREATE TRIGGER al_trig BEFORE INSERT ON al_tbl
+  FOR EACH ROW EXECUTE FUNCTION al_trig();
+INSERT INTO al_tbl VALUES (0, 'x');
+SELECT al_gc();
+ al_gc 
+-------
+ 
+(1 row)
+
+TRUNCATE al_before;
+INSERT INTO al_before SELECT al_malloc_mb();
+INSERT INTO al_tbl SELECT i, repeat('x', 1000) FROM generate_series(1, 20000) AS i;
+SELECT al_gc();
+ al_gc 
+-------
+ 
+(1 row)
+
+SELECT al_malloc_mb() - mb < 5 AS trigger_arguments_released FROM al_before;
+ trigger_arguments_released 
+----------------------------
+ t
+(1 row)
+
+-- The arguments converted before one that cannot be.  The call handler only
+-- released the arguments once all of them had been converted, so when the
+-- second raised the first stayed in the runtime: a 1kB string per call.
+CREATE FUNCTION al_two(s text, a int4[]) RETURNS int4 LANGUAGE pljs AS $$
+  return s.length;
+$$;
+CREATE FUNCTION al_two_loop(n int4) RETURNS int4 LANGUAGE pljs AS $$
+  let failed = 0;
+
+  for (let i = 0; i < n; i++) {
+    try {
+      pljs.execute("SELECT al_two(repeat('x', 1000), '{{1,2},{3,4}}')");
+    } catch (e) {
+      failed++;
+    }
+  }
+
+  return failed;
+$$;
+SELECT al_two_loop(1), al_gc();
+ al_two_loop | al_gc 
+-------------+-------
+           1 | 
+(1 row)
+
+TRUNCATE al_before;
+INSERT INTO al_before SELECT al_malloc_mb();
+SELECT al_two_loop(20000);
+ al_two_loop 
+-------------
+       20000
+(1 row)
+
+SELECT al_gc();
+ al_gc 
+-------
+ 
+(1 row)
+
+SELECT al_malloc_mb() - mb < 5 AS converted_arguments_released FROM al_before;
+ converted_arguments_released 
+------------------------------
+ t
+(1 row)
+
+DROP TABLE al_tbl;
+DROP FUNCTION al_malloc_mb(), al_gc(), al_len(text), al_rows(text), al_trig(),
+  al_two(text, int4[]), al_two_loop(int4);

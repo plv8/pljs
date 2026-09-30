@@ -1,0 +1,44 @@
+-- A JavaScript string bound to a `name` column must be laid out as a name.
+--
+-- NAMEOID was handled together with text, varchar and bpchar, all of which build
+-- a varlena. `name` is not a varlena: it is a fixed-length NameData of
+-- NAMEDATALEN bytes with no length word. Building it as text puts a varlena
+-- header into the first bytes of the value, and anything comparing it against a
+-- real name reads that header as characters.
+--
+-- Nothing raises. The value simply never matches, so every system-catalog lookup
+-- driven by a JavaScript string returns no rows -- which is how most catalog
+-- introspection is written.
+CREATE EXTENSION IF NOT EXISTS pljs;
+
+-- The case that matters: look a catalog object up by name.
+CREATE FUNCTION nb_schema_rows(n text) RETURNS int AS $$
+  return pljs.execute('SELECT nspname FROM pg_namespace WHERE nspname = $1', [n]).length;
+$$ LANGUAGE pljs;
+
+SELECT nb_schema_rows('pg_catalog') AS schema_found;
+
+CREATE FUNCTION nb_type_count(n text) RETURNS int AS $$
+  return pljs.execute('SELECT count(*)::int AS c FROM pg_type WHERE typname = $1', [n])[0].c;
+$$ LANGUAGE pljs;
+
+SELECT nb_type_count('int4') AS int4_found;
+
+-- And a plain round trip.
+CREATE FUNCTION nb_roundtrip(n text) RETURNS text AS $$
+  return pljs.execute('SELECT $1::name::text AS t', [n])[0].t;
+$$ LANGUAGE pljs;
+
+SELECT nb_roundtrip('hello_name') AS roundtrip;
+SELECT nb_roundtrip('') AS empty_name;
+
+-- namein() truncates at NAMEDATALEN - 1 rather than raising, so a long value is
+-- accepted and shortened. 70 characters in, 63 out.
+SELECT length(nb_roundtrip(repeat('x', 70))) AS truncated_length;
+
+-- Returning a name works through the same conversion.
+CREATE FUNCTION nb_return() RETURNS name AS $$ return 'returned_name'; $$ LANGUAGE pljs;
+
+SELECT nb_return() = 'returned_name'::name AS returned_matches;
+
+DROP FUNCTION nb_schema_rows, nb_type_count, nb_roundtrip, nb_return;

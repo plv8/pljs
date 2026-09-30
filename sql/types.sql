@@ -21,7 +21,12 @@ CREATE FUNCTION int4_to_text(x int4) RETURNS text AS $$ return x; $$ LANGUAGE pl
 SELECT int4_to_text(123);
 CREATE FUNCTION text_to_int4(x text) RETURNS int4 AS $$ return x; $$ LANGUAGE pljs;
 SELECT text_to_int4('123');
+-- A string is parsed by int4's input function, so text that is not an integer
+-- raises instead of silently becoming 0, which is what routing it through a
+-- double produced.
 SELECT text_to_int4('abc');
+-- Out of range likewise raises rather than wrapping.
+SELECT text_to_int4('2147483648');
 
 -- ARRAYS
 CREATE FUNCTION return_array() RETURNS TEXT[] AS $$ return ["foo", "bar"]; $$LANGUAGE pljs;
@@ -113,3 +118,26 @@ DROP FUNCTION date_echo(date);
 CREATE FUNCTION array_with_nulls() RETURNS int[] AS $$ return [1, null, 3]; $$ LANGUAGE pljs;
 SELECT array_with_nulls();
 DROP FUNCTION array_with_nulls();
+
+-- Custom and domain types reach the catch-all varlena conversion in
+-- pljs_datum_to_jsvalue_fallback().  A literal is built with a 4-byte header,
+-- but the same value read back out of a column carries a 1-byte short header,
+-- and a large one is stored compressed.  Reading either of those with VARDATA()
+-- instead of VARDATA_ANY(), and without detoasting, returned a value shifted
+-- three bytes into its own payload -- or the raw compressed bytes.
+CREATE TABLE ltree_tbl (l ltree);
+INSERT INTO ltree_tbl VALUES ('1.2.3');
+SELECT ltree_echo(l) FROM ltree_tbl;
+
+CREATE DOMAIN packed_text AS text;
+
+CREATE FUNCTION packed_echo(v packed_text) RETURNS text AS $$
+  return v;
+$$ LANGUAGE pljs;
+
+CREATE TABLE packed_tbl (v packed_text);
+INSERT INTO packed_tbl VALUES ('ABCDEFGHIJ'), (repeat('Z', 5000));
+
+SELECT packed_echo('ABCDEFGHIJ'::packed_text) AS from_literal;
+SELECT packed_echo(v) AS from_column FROM packed_tbl WHERE length(v) = 10;
+SELECT length(packed_echo(v)) AS toasted_len FROM packed_tbl WHERE length(v) > 100;
