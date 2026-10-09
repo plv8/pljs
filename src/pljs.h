@@ -41,6 +41,7 @@ typedef struct pljs_configuration {
   int execution_timeout;
   bool hooks_enabled;
   int hooks_max_depth;
+  int max_module_depth;
 
   // Hook function name GUCs.
   char *hook_executor_start;

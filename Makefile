@@ -9,8 +9,8 @@ INCLUDEDIR_SERVER := ${shell $(PG_CONFIG) --includedir-server}
 
 
 CP = cp
-SRCS = src/pljs.c src/cache.c src/functions.c src/types.c src/params.c src/modules.c src/hooks.c
-OBJS = src/pljs.o src/cache.o src/functions.o src/types.o src/params.o src/modules.o src/hooks.o
+SRCS = src/pljs.c src/cache.c src/functions.c src/types.c src/params.c src/modules.c src/hooks.c src/semver.c
+OBJS = src/pljs.o src/cache.o src/functions.o src/types.o src/params.o src/modules.o src/hooks.o src/semver.o
 MODULE_big = pljs
 EXTENSION = pljs
 DATA = pljs.control pljs--$(PLJS_VERSION).sql
@@ -38,7 +38,7 @@ endif
 
 REGRESS = init-extension function json jsonb json_conv types bytea context \
 	cursor array_spread plv8_regressions memory_limits inline composites \
-	trigger procedure find_function start_proc window modules regressions \
+	trigger procedure find_function start_proc window modules packages regressions \
 	pg_spi_freetuptable \
 	pg_prepared_plan_lifetime \
 	currentresource \
@@ -137,7 +137,7 @@ deps/quickjs/libquickjs.a: deps/quickjs/quickjs.h
 	cd deps/quickjs && make
 
 format:
-	clang-format -i $(SRCS) src/pljs.h
+	clang-format -i $(SRCS) src/pljs.h src/semver.h
 
 pljs--$(PLJS_VERSION).sql: pljs.sql
 	$(CP) pljs.sql pljs--$(PLJS_VERSION).sql

@@ -294,6 +294,15 @@ void pljs_guc_init(void) {
       &configuration.hooks_max_depth, 5, 1, 64, PGC_SUSET, 0,
       pljs_hook_int_check, NULL, NULL);
 
+  DefineCustomIntVariable(
+      "pljs.max_module_depth",
+      gettext_noop("Maximum recursion depth for nested module imports."),
+      gettext_noop("Limits how deeply pljs.import()/pljs.require() calls "
+                   "can nest before an error is raised. Guards against "
+                   "runaway recursion via circular dependencies."),
+      &configuration.max_module_depth, 512, 1, 65536, PGC_USERSET, 0, NULL,
+      NULL, NULL);
+
   // Hook GUCs - each names a PLJS function to call for the given hook.
   // All require superuser and pljs.hooks_enabled = true at runtime.
   DefineCustomStringVariable(

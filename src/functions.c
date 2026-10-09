@@ -498,7 +498,7 @@ static JSValue pljs_elog(JSContext *ctx, JSValueConst this_val, int argc,
 
     for (int i = 1; i < argc; i++) {
       if (i > 1) {
-        appendStringInfo(&msg, " ");
+        appendStringInfoChar(&msg, ' ');
       }
 
       JSValue str = JS_ToString(ctx, argv[i]);
@@ -512,7 +512,7 @@ static JSValue pljs_elog(JSContext *ctx, JSValueConst this_val, int argc,
         return JS_EXCEPTION;
       }
 
-      appendStringInfo(&msg, "%s", cstr);
+      appendStringInfoString(&msg, cstr);
 
       JS_FreeCString(ctx, cstr);
     }
@@ -3783,15 +3783,21 @@ Datum pljs_info(PG_FUNCTION_ARGS) {
   size_t malloc_limit = local_rt->malloc_state.malloc_limit;
   size_t stack_size = local_rt->stack_size;
   size_t stack_limit = local_rt->stack_limit;
+  StringInfoData buf;
 
-  char *ret = palloc0(512);
-  sprintf(
-      ret,
-      "{ \"malloc_count\": %ld, \"malloc_size\": %ld, \"malloc_limit\": %ld, "
-      "\"stack_size\": %ld, \"stack_limit\": %ld }",
-      malloc_count, malloc_size, malloc_limit, stack_size, stack_limit);
+  initStringInfo(&buf);
+  appendStringInfo(
+      &buf,
+      "{\"version\":\"%s\",\"memory_limit_mb\":%zu,"
+      "\"hooks_enabled\":%s,\"hooks_max_depth\":%d,"
+      "\"malloc_count\":%zu,\"malloc_size\":%zu,\"malloc_limit\":%zu,"
+      "\"stack_size\":%zu,\"stack_limit\":%zu}",
+      PLJS_VERSION, configuration.memory_limit,
+      configuration.hooks_enabled ? "true" : "false",
+      configuration.hooks_max_depth, malloc_count, malloc_size, malloc_limit,
+      stack_size, stack_limit);
 
-  return (Datum)CStringGetTextDatum(ret);
+  return CStringGetTextDatum(buf.data);
 }
 
 Datum pljs_reset(PG_FUNCTION_ARGS) {

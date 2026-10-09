@@ -27,11 +27,32 @@ CREATE OR REPLACE FUNCTION pljs_reset() RETURNS void
 
 CREATE SCHEMA IF NOT EXISTS pljs;
 
-CREATE TABLE IF NOT EXISTS pljs.modules (
-  path TEXT PRIMARY KEY,
-  source TEXT,
+CREATE TABLE IF NOT EXISTS pljs.packages (
+  name TEXT NOT NULL,
+  version TEXT NOT NULL,
+  entry_point TEXT NOT NULL,
+  dependencies JSONB DEFAULT '{}',
   created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
-  updated_at TIMESTAMP WITH TIME ZONE
+  updated_at TIMESTAMP WITH TIME ZONE,
+  PRIMARY KEY (name, version)
 );
 
-CREATE UNIQUE INDEX IF NOT EXISTS pljs_modules_path ON pljs.modules (path);
+CREATE TABLE IF NOT EXISTS pljs.modules (
+  path TEXT NOT NULL,
+  source TEXT,
+  package_name TEXT,
+  package_version TEXT,
+  created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMP WITH TIME ZONE,
+  FOREIGN KEY (package_name, package_version) REFERENCES pljs.packages (name, version)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS pljs_modules_standalone_path ON pljs.modules (path)
+  WHERE package_name IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS pljs_modules_package_path ON pljs.modules (package_name, package_version, path)
+  WHERE package_name IS NOT NULL;
+
+-- Non-partial indexes for catalog scans (systable_beginscan_ordered).
+CREATE INDEX IF NOT EXISTS pljs_modules_path ON pljs.modules (path);
+CREATE INDEX IF NOT EXISTS pljs_modules_pkg ON pljs.modules (package_name, package_version, path);
+CREATE INDEX IF NOT EXISTS pljs_packages_name ON pljs.packages (name);
