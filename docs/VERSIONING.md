@@ -18,6 +18,16 @@ and
 DO $$ pljs.elog(NOTICE, pljs.version); $$ LANGUAGE pljs;
 ```
 
+## Upgrading
+
+After installing the new files (`make install`), update the extension in each database that uses it:
+
+```sql
+ALTER EXTENSION pljs UPDATE;
+```
+
+There is an upgrade from every 1.0.x release, so a database can go straight to the current version. A session that is already open keeps running the library it loaded, so reconnect to use the new one.
+
 ## Major Version
 
 Major versions increments with major changes in the codebase that could affect users and their code in a significant manner. Any changes that could impact a users experience such as a major performance change or breaking change of existing behavior warrants a major version change.
