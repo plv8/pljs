@@ -221,6 +221,152 @@ DO $$
   pljs.elog(INFO, 'version = ' + ver);
 $$ LANGUAGE pljs;
 
+-- ============================================================
+-- Failures inside a module reach the caller with their real message
+-- ============================================================
+INSERT INTO pljs.modules (path, source) VALUES
+  ('esm/syntax_error', 'export function broken( { return 1; }'),
+  ('cjs/syntax_error', 'exports.broken = function( { return 1; };'),
+  ('cjs/throws', 'throw new Error("boom from module");'),
+  ('esm/throws', 'throw new Error("boom from esm module"); export const x = 1;');
+
+DO $$
+  try {
+    pljs.import('esm/syntax_error');
+    pljs.elog(ERROR, 'should not reach here');
+  } catch (e) {
+    pljs.elog(INFO, e.name);
+  }
+$$ LANGUAGE pljs;
+
+DO $$
+  try {
+    pljs.require('cjs/syntax_error');
+    pljs.elog(ERROR, 'should not reach here');
+  } catch (e) {
+    pljs.elog(INFO, e.name);
+  }
+$$ LANGUAGE pljs;
+
+DO $$
+  try {
+    pljs.require('cjs/throws');
+    pljs.elog(ERROR, 'should not reach here');
+  } catch (e) {
+    pljs.elog(INFO, e.message);
+  }
+$$ LANGUAGE pljs;
+
+DO $$
+  try {
+    pljs.import('esm/throws');
+    pljs.elog(ERROR, 'should not reach here');
+  } catch (e) {
+    pljs.elog(INFO, e.message);
+  }
+$$ LANGUAGE pljs;
+
+-- A failed import must not leave module state behind: a good import still works.
+DO $$
+  pljs.elog(INFO, pljs.import('constants').PI);
+$$ LANGUAGE pljs;
+
+-- ============================================================
+-- CommonJS modules get their own module and exports
+-- ============================================================
+INSERT INTO pljs.modules (path, source) VALUES
+  ('cjs/inner', 'exports.inner = "inner"; var leaked = 1;'),
+  ('cjs/outer', 'var i = pljs.require("cjs/inner"); exports.outer = "outer"; exports.sawInner = i.inner; exports.innerGotOuter = i.outer === undefined ? "no" : "yes";'),
+  ('cjs/outer_reassign', 'var i = pljs.require("cjs/inner"); module.exports = { mine: true, inner: i.inner };');
+
+DO $$
+  var o = pljs.require('cjs/outer');
+  pljs.elog(INFO, JSON.stringify(o));
+  var r = pljs.require('cjs/outer_reassign');
+  pljs.elog(INFO, JSON.stringify(r));
+  // The requiring module's exports are not the inner module's.
+  var i = pljs.require('cjs/inner');
+  pljs.elog(INFO, JSON.stringify(i));
+  // Nothing leaks into the global scope.
+  pljs.elog(INFO, typeof module + ' ' + typeof exports + ' ' + typeof leaked);
+$$ LANGUAGE pljs;
+
+-- ============================================================
+-- Circular imports stop at pljs.max_module_depth
+-- ============================================================
+INSERT INTO pljs.modules (path, source) VALUES
+  ('circ/a', 'const b = pljs.import("circ/b"); export const a = 1;'),
+  ('circ/b', 'const a = pljs.import("circ/a"); export const b = 1;'),
+  ('circ/c', 'const c = pljs.require("circ/d"); exports.c = 1;'),
+  ('circ/d', 'const c = pljs.require("circ/c"); exports.d = 1;');
+
+SET pljs.max_module_depth = 8;
+
+DO $$
+  try {
+    pljs.import('circ/a');
+    pljs.elog(ERROR, 'should not reach here');
+  } catch (e) {
+    pljs.elog(INFO, e.message);
+  }
+$$ LANGUAGE pljs;
+
+DO $$
+  try {
+    pljs.require('circ/c');
+    pljs.elog(ERROR, 'should not reach here');
+  } catch (e) {
+    pljs.elog(INFO, e.message);
+  }
+$$ LANGUAGE pljs;
+
+RESET pljs.max_module_depth;
+
+-- The depth counter was unwound: ordinary imports still work at a low limit.
+SET pljs.max_module_depth = 2;
+DO $$
+  pljs.elog(INFO, pljs.import('constants').PI);
+$$ LANGUAGE pljs;
+RESET pljs.max_module_depth;
+
+-- ============================================================
+-- Standalone lookups agree with the index's collation
+-- ============================================================
+INSERT INTO pljs.modules (path, source)
+  SELECT p, 'exports.p = ' || quote_literal(p) || ';'
+  FROM unnest(ARRAY['alpha', 'Alpha', 'ALPHA', '_alpha', 'alpha-2', 'Zulu', 'zulu', 'beta', 'Beta', '9lives']) AS p;
+
+DO $$
+  var paths = ['alpha', 'Alpha', 'ALPHA', '_alpha', 'alpha-2', 'Zulu', 'zulu', 'beta', 'Beta', '9lives'];
+  var bad = paths.filter(function(p) { return pljs.require(p).p !== p; });
+  pljs.elog(INFO, 'mismatches: ' + bad.length);
+$$ LANGUAGE pljs;
+
+
+-- ============================================================
+-- A module row with no source is not a module
+-- ============================================================
+INSERT INTO pljs.modules (path, source) VALUES ('no_source', NULL);
+
+DO $$
+  try {
+    pljs.import('no_source');
+    pljs.elog(ERROR, 'should not reach here');
+  } catch (e) {
+    pljs.elog(INFO, e.message);
+  }
+$$ LANGUAGE pljs;
+
+-- Non-ASCII source survives the round trip.
+INSERT INTO pljs.modules (path, source) VALUES
+  ('cjs/unicode', 'exports.word = "caf\u00e9 \u65e5\u672c\u8a9e"; exports.raw = "café 日本語";');
+
+DO $$
+  var u = pljs.require('cjs/unicode');
+  pljs.elog(INFO, u.raw + ' ' + u.raw.length + ' ' + (u.raw === u.word));
+$$ LANGUAGE pljs;
+
+
 -- Cleanup
 DROP FUNCTION circle_info_chained(float8);
 DROP FUNCTION test_module_import();

@@ -123,6 +123,99 @@ DO $$
   }
 $$ LANGUAGE pljs;
 INFO:  could not load module 'DateUtils/nonexistent'
+-- ============================================================
+-- ^ ranges below 1.0.0 stay inside the left-most non-zero part
+-- ============================================================
+INSERT INTO pljs.packages (name, version, entry_point) VALUES
+  ('ZeroX', '0.2.3', 'index'),
+  ('ZeroX', '0.2.9', 'index'),
+  ('ZeroX', '0.3.0', 'index'),
+  ('ZeroX', '0.0.3', 'index'),
+  ('ZeroX', '0.0.4', 'index');
+INSERT INTO pljs.modules (path, source, package_name, package_version) VALUES
+  ('index', 'module.exports = "0.2.3";', 'ZeroX', '0.2.3'),
+  ('index', 'module.exports = "0.2.9";', 'ZeroX', '0.2.9'),
+  ('index', 'module.exports = "0.3.0";', 'ZeroX', '0.3.0'),
+  ('index', 'module.exports = "0.0.3";', 'ZeroX', '0.0.3'),
+  ('index', 'module.exports = "0.0.4";', 'ZeroX', '0.0.4');
+INSERT INTO pljs.packages (name, version, entry_point, dependencies) VALUES
+  ('NeedsMinor', '1.0.0', 'index', '{"ZeroX": "^0.2.3"}'),
+  ('NeedsPatch', '1.0.0', 'index', '{"ZeroX": "^0.0.3"}'),
+  ('NeedsTilde', '1.0.0', 'index', '{"ZeroX": "~0.2.3"}'),
+  ('NeedsNone', '1.0.0', 'index', '{}');
+INSERT INTO pljs.modules (path, source, package_name, package_version) VALUES
+  ('index', 'module.exports = pljs.require("ZeroX");', 'NeedsMinor', '1.0.0'),
+  ('index', 'module.exports = pljs.require("ZeroX");', 'NeedsPatch', '1.0.0'),
+  ('index', 'module.exports = pljs.require("ZeroX");', 'NeedsTilde', '1.0.0'),
+  ('index', 'module.exports = pljs.require("ZeroX");', 'NeedsNone', '1.0.0');
+DO $$
+  pljs.elog(INFO, '^0.2.3 -> ' + pljs.require('NeedsMinor'));
+  pljs.elog(INFO, '^0.0.3 -> ' + pljs.require('NeedsPatch'));
+  pljs.elog(INFO, '~0.2.3 -> ' + pljs.require('NeedsTilde'));
+  pljs.elog(INFO, 'unlisted -> ' + pljs.require('NeedsNone'));
+$$ LANGUAGE pljs;
+INFO:  ^0.2.3 -> 0.2.9
+INFO:  ^0.0.3 -> 0.0.3
+INFO:  ~0.2.3 -> 0.2.9
+INFO:  unlisted -> 0.3.0
+-- ============================================================
+-- Versions that are not plain major.minor.patch are never selected
+-- ============================================================
+INSERT INTO pljs.packages (name, version, entry_point) VALUES
+  ('Pre', '1.0.0', 'index'),
+  ('Pre', '2.0.0-beta', 'index'),
+  ('Pre', '1.5', 'index');
+INSERT INTO pljs.modules (path, source, package_name, package_version) VALUES
+  ('index', 'module.exports = "1.0.0";', 'Pre', '1.0.0'),
+  ('index', 'module.exports = "2.0.0-beta";', 'Pre', '2.0.0-beta'),
+  ('index', 'module.exports = "1.5";', 'Pre', '1.5');
+DO $$
+  pljs.elog(INFO, pljs.require('Pre'));
+$$ LANGUAGE pljs;
+INFO:  1.0.0
+-- ============================================================
+-- Scoped package names
+-- ============================================================
+INSERT INTO pljs.packages (name, version, entry_point) VALUES
+  ('@acme/util', '1.0.0', 'index');
+INSERT INTO pljs.modules (path, source, package_name, package_version) VALUES
+  ('index', 'module.exports = { name: "acme util" };', '@acme/util', '1.0.0'),
+  ('strings', 'module.exports = { up: function(s) { return s.toUpperCase(); } };', '@acme/util', '1.0.0');
+DO $$
+  pljs.elog(INFO, pljs.require('@acme/util').name);
+  pljs.elog(INFO, pljs.require('@acme/util/strings').up('scoped'));
+$$ LANGUAGE pljs;
+INFO:  acme util
+INFO:  SCOPED
+-- A malformed range in a dependency fails to load rather than guessing.
+INSERT INTO pljs.packages (name, version, entry_point, dependencies) VALUES
+  ('BadRange', '1.0.0', 'index', '{"ZeroX": "not-a-range"}');
+INSERT INTO pljs.modules (path, source, package_name, package_version) VALUES
+  ('index', 'module.exports = pljs.require("ZeroX");', 'BadRange', '1.0.0');
+DO $$
+  try {
+    pljs.require('BadRange');
+    pljs.elog(ERROR, 'should not reach here');
+  } catch (e) {
+    pljs.elog(INFO, e.message);
+  }
+$$ LANGUAGE pljs;
+INFO:  could not load module 'ZeroX'
+-- ============================================================
+-- Lookups agree with the index's collation (names that sort differently
+-- under C and a linguistic collation, with several rows in the index)
+-- ============================================================
+INSERT INTO pljs.packages (name, version, entry_point)
+  SELECT n, '1.0.0', 'index' FROM unnest(ARRAY['alpha', 'Alpha', 'ALPHA', '_alpha', 'alpha-2', 'Zulu', 'zulu', 'beta', 'Beta', '9lives']) AS n;
+INSERT INTO pljs.modules (path, source, package_name, package_version)
+  SELECT 'index', 'module.exports = ' || quote_literal(n) || ';', n, '1.0.0'
+  FROM unnest(ARRAY['alpha', 'Alpha', 'ALPHA', '_alpha', 'alpha-2', 'Zulu', 'zulu', 'beta', 'Beta', '9lives']) AS n;
+DO $$
+  var names = ['alpha', 'Alpha', 'ALPHA', '_alpha', 'alpha-2', 'Zulu', 'zulu', 'beta', 'Beta', '9lives'];
+  var bad = names.filter(function(n) { return pljs.require(n) !== n; });
+  pljs.elog(INFO, 'mismatches: ' + bad.length);
+$$ LANGUAGE pljs;
+INFO:  mismatches: 0
 -- Cleanup
 DELETE FROM pljs.modules;
 DELETE FROM pljs.packages;

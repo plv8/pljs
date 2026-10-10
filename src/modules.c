@@ -2,6 +2,7 @@
 
 #include "access/genam.h"
 #include "catalog/namespace.h"
+#include "catalog/pg_collation_d.h"
 #include "utils/builtins.h"
 #include "utils/fmgroids.h"
 #include "utils/jsonb.h"
@@ -62,6 +63,71 @@ static Oid get_pljs_package_pkey_relid(void) {
 }
 
 /**
+ * @brief Initialize a scan key that matches a TEXT column against a C string.
+ *
+ * ScanKeyInit() stamps the key with the C collation, which is right for
+ * catalog columns but not for these: their indexes are ordered by the
+ * database's default collation, and a key compared under a different one
+ * makes the btree search land in the wrong place and miss rows that exist.
+ */
+static void pljs_text_key(ScanKey key, AttrNumber attno, const char *value) {
+  ScanKeyInit(key, attno, BTEqualStrategyNumber, F_TEXTEQ,
+              CStringGetTextDatum(value));
+  key->sk_collation = DEFAULT_COLLATION_OID;
+}
+
+/**
+ * @brief Copy a module's TEXT source out of a catalog tuple, as UTF-8.
+ *
+ * QuickJS reads UTF-8, so source stored in another database encoding is
+ * converted the way a function's source is.  The result is NUL-terminated.
+ */
+static uint8_t *pljs_module_source(Datum source_datum, size_t *len_out) {
+  text *source = DatumGetTextPP(source_datum);
+  size_t len = VARSIZE_ANY_EXHDR(source);
+  char *utf8 = pljs_server_to_utf8(VARDATA_ANY(source), len);
+  uint8_t *ret;
+
+  if (utf8 == VARDATA_ANY(source)) {
+    // Not converted, and not NUL-terminated either: copy it.
+    ret = (uint8_t *)palloc(len + 1);
+    memcpy(ret, utf8, len);
+    ret[len] = 0;
+  } else {
+    ret = (uint8_t *)utf8;
+    len = strlen(utf8);
+  }
+
+  *len_out = len;
+
+  return ret;
+}
+
+/**
+ * @brief Snapshot for a catalog scan, pushing one if none is active.
+ *
+ * A module can be loaded where no snapshot is active yet (for example from
+ * pljs.start_proc), and a scan without one would crash.  Pair with
+ * pljs_scan_snapshot_release().
+ */
+static Snapshot pljs_scan_snapshot(bool *pushed) {
+  *pushed = false;
+
+  if (!ActiveSnapshotSet()) {
+    PushActiveSnapshot(GetTransactionSnapshot());
+    *pushed = true;
+  }
+
+  return GetActiveSnapshot();
+}
+
+static void pljs_scan_snapshot_release(bool pushed) {
+  if (pushed) {
+    PopActiveSnapshot();
+  }
+}
+
+/**
  * @brief Read a standalone module source from the database by path.
  */
 static uint8_t *pljs_read_module(size_t *pbuf_len, const char *filename) {
@@ -70,14 +136,16 @@ static uint8_t *pljs_read_module(size_t *pbuf_len, const char *filename) {
 
   ScanKeyData scankey[1];
 
-  ScanKeyInit(&scankey[0], Amodule_path, BTEqualStrategyNumber, F_TEXTEQ,
-              CStringGetTextDatum(filename));
+  pljs_text_key(&scankey[0], Amodule_path, filename);
 
   Relation table = table_open(get_pljs_module_relid(), AccessShareLock);
   Relation index = index_open(get_pljs_module_index_relid(), AccessShareLock);
 
+  bool pushed;
+  Snapshot snapshot = pljs_scan_snapshot(&pushed);
+
   SysScanDesc scan_descriptor =
-      systable_beginscan_ordered(table, index, GetActiveSnapshot(), 1, scankey);
+      systable_beginscan_ordered(table, index, snapshot, 1, scankey);
 
   HeapTuple tuple =
       systable_getnext_ordered(scan_descriptor, ForwardScanDirection);
@@ -92,14 +160,9 @@ static uint8_t *pljs_read_module(size_t *pbuf_len, const char *filename) {
 
     // Only match standalone modules (package_name IS NULL).
     if (is_null_array[Amodule_package_name - 1]) {
-      text *source = DatumGetTextP(datum_array[Amodule_source - 1]);
-      size_t len = VARSIZE(source) - VARHDRSZ;
-
-      ret = (uint8_t *)palloc(len + 1);
-      memcpy(ret, VARDATA(source), len);
-      ret[len] = 0;
-
-      *pbuf_len = len;
+      if (!is_null_array[Amodule_source - 1]) {
+        ret = pljs_module_source(datum_array[Amodule_source - 1], pbuf_len);
+      }
       break;
     }
 
@@ -107,6 +170,7 @@ static uint8_t *pljs_read_module(size_t *pbuf_len, const char *filename) {
   }
 
   systable_endscan_ordered(scan_descriptor);
+  pljs_scan_snapshot_release(pushed);
   index_close(index, AccessShareLock);
   table_close(table, AccessShareLock);
 
@@ -126,19 +190,19 @@ static uint8_t *pljs_read_package_module(size_t *pbuf_len,
   ScanKeyData scankey[3];
 
   // Attribute numbers are table column positions, not index positions.
-  ScanKeyInit(&scankey[0], Amodule_package_name, BTEqualStrategyNumber,
-              F_TEXTEQ, CStringGetTextDatum(package_name));
-  ScanKeyInit(&scankey[1], Amodule_package_version, BTEqualStrategyNumber,
-              F_TEXTEQ, CStringGetTextDatum(package_version));
-  ScanKeyInit(&scankey[2], Amodule_path, BTEqualStrategyNumber, F_TEXTEQ,
-              CStringGetTextDatum(module_path));
+  pljs_text_key(&scankey[0], Amodule_package_name, package_name);
+  pljs_text_key(&scankey[1], Amodule_package_version, package_version);
+  pljs_text_key(&scankey[2], Amodule_path, module_path);
 
   Relation table = table_open(get_pljs_module_relid(), AccessShareLock);
   Relation index =
       index_open(get_pljs_package_module_index_relid(), AccessShareLock);
 
+  bool pushed;
+  Snapshot snapshot = pljs_scan_snapshot(&pushed);
+
   SysScanDesc scan =
-      systable_beginscan_ordered(table, index, GetActiveSnapshot(), 3, scankey);
+      systable_beginscan_ordered(table, index, snapshot, 3, scankey);
 
   HeapTuple tuple = systable_getnext_ordered(scan, ForwardScanDirection);
 
@@ -149,17 +213,13 @@ static uint8_t *pljs_read_package_module(size_t *pbuf_len,
     heap_deform_tuple(tuple, RelationGetDescr(table), datum_array,
                       is_null_array);
 
-    text *source = DatumGetTextP(datum_array[Amodule_source - 1]);
-    size_t len = VARSIZE(source) - VARHDRSZ;
-
-    ret = (uint8_t *)palloc(len + 1);
-    memcpy(ret, VARDATA(source), len);
-    ret[len] = 0;
-
-    *pbuf_len = len;
+    if (!is_null_array[Amodule_source - 1]) {
+      ret = pljs_module_source(datum_array[Amodule_source - 1], pbuf_len);
+    }
   }
 
   systable_endscan_ordered(scan);
+  pljs_scan_snapshot_release(pushed);
   index_close(index, AccessShareLock);
   table_close(table, AccessShareLock);
 
@@ -186,8 +246,7 @@ static char *pljs_resolve_package_version(const char *pkg_name,
   }
 
   ScanKeyData scankey[1];
-  ScanKeyInit(&scankey[0], Apackage_name, BTEqualStrategyNumber, F_TEXTEQ,
-              CStringGetTextDatum(pkg_name));
+  pljs_text_key(&scankey[0], Apackage_name, pkg_name);
 
   Relation table = table_open(get_pljs_package_relid(), AccessShareLock);
   Relation index =
@@ -251,11 +310,14 @@ static char *pljs_get_package_info(const char *pkg_name,
                                    Datum *deps_out, bool *deps_is_null) {
   char *entry_point = NULL;
 
+  // Defined even when the package is not found, so callers can read them.
+  if (deps_is_null) {
+    *deps_is_null = true;
+  }
+
   ScanKeyData scankey[2];
-  ScanKeyInit(&scankey[0], Apackage_name, BTEqualStrategyNumber, F_TEXTEQ,
-              CStringGetTextDatum(pkg_name));
-  ScanKeyInit(&scankey[1], Apackage_version, BTEqualStrategyNumber, F_TEXTEQ,
-              CStringGetTextDatum(pkg_version));
+  pljs_text_key(&scankey[0], Apackage_name, pkg_name);
+  pljs_text_key(&scankey[1], Apackage_version, pkg_version);
 
   Relation table = table_open(get_pljs_package_relid(), AccessShareLock);
   Relation index =
@@ -301,8 +363,8 @@ static char *pljs_get_package_info(const char *pkg_name,
 static char *pljs_get_package_dependency_range(const char *pkg_name,
                                                const char *pkg_version,
                                                const char *dep_name) {
-  Datum deps_datum;
-  bool deps_is_null;
+  Datum deps_datum = (Datum)0;
+  bool deps_is_null = true;
 
   char *ep = pljs_get_package_info(pkg_name, pkg_version, &deps_datum,
                                     &deps_is_null);
@@ -322,11 +384,15 @@ static char *pljs_get_package_dependency_range(const char *pkg_name,
   kval.val.string.len = strlen(dep_name);
 
   JsonbValue *found = findJsonbValueFromContainer(&jb->root, JB_FOBJECT, &kval);
-  if (!found || found->type != jbvString) {
-    return NULL;
+  char *range = NULL;
+
+  if (found && found->type == jbvString) {
+    range = pnstrdup(found->val.string.val, found->val.string.len);
   }
 
-  return pnstrdup(found->val.string.val, found->val.string.len);
+  pfree(jb);
+
+  return range;
 }
 
 typedef struct pljs_resolved_module {
@@ -352,7 +418,12 @@ static pljs_resolved_module pljs_resolve_module(const char *specifier) {
   // Parse "PackageName/submodule" into package name and module path.
   char *pkg_name = pstrdup(specifier);
   char *sub_path = NULL;
-  char *slash = strchr(pkg_name, '/');
+  // A scoped name ("@scope/pkg") keeps its first slash: the package name is
+  // "@scope/pkg", and a sub-module path may follow it.
+  char *slash = strchr(pkg_name + (pkg_name[0] == '@' ? 1 : 0), '/');
+  if (slash && pkg_name[0] == '@') {
+    slash = strchr(slash + 1, '/');
+  }
   if (slash) {
     *slash = '\0';
     sub_path = slash + 1;
@@ -418,62 +489,69 @@ static pljs_resolved_module pljs_resolve_module(const char *specifier) {
 }
 
 /**
+ * @brief Package and depth state saved around a nested import or require.
+ */
+typedef struct pljs_module_scope {
+  const char *package_name;
+  const char *package_version;
+} pljs_module_scope;
+
+static pljs_module_scope pljs_module_scope_enter(
+    const pljs_resolved_module *resolved) {
+  pljs_module_scope saved = {current_package_name, current_package_version};
+
+  current_package_name = resolved->package_name;
+  current_package_version = resolved->package_version;
+  current_module_depth++;
+
+  return saved;
+}
+
+static void pljs_module_scope_leave(pljs_module_scope saved) {
+  current_package_name = saved.package_name;
+  current_package_version = saved.package_version;
+  current_module_depth--;
+}
+
+/**
  * @brief Import a JavaScript module from the database.
+ *
+ * Any failure leaves the JavaScript exception pending, so the caller sees the
+ * real error (a syntax error in the module, or whatever it threw).
  *
  * @param ctx The JavaScript context to use for loading the module.
  * @param module_name The name of the module to load.
- * @returns JSValue A copy of the compiled module.
+ * @returns JSValue The module namespace, or JS_EXCEPTION.
  */
 JSValue pljs_module_import(JSContext *ctx, const char *module_name) {
   if (current_module_depth >= configuration.max_module_depth) {
-    JS_ThrowInternalError(
+    return JS_ThrowInternalError(
         ctx, "module import depth exceeded (%d): possible circular dependency",
         configuration.max_module_depth);
-    return JS_EXCEPTION;
   }
 
   pljs_resolved_module resolved = pljs_resolve_module(module_name);
 
   if (!resolved.source) {
-    JS_ThrowReferenceError(ctx, "could not load module '%s'", module_name);
-    return JS_EXCEPTION;
+    return JS_ThrowReferenceError(ctx, "could not load module '%s'",
+                                  module_name);
   }
 
-  // Save and set package context for nested imports.
-  const char *old_pkg_name = current_package_name;
-  const char *old_pkg_version = current_package_version;
-  current_package_name = resolved.package_name;
-  current_package_version = resolved.package_version;
-  current_module_depth++;
+  pljs_module_scope saved = pljs_module_scope_enter(&resolved);
+  JSValue ret = JS_EXCEPTION;
 
-  char *buf = (char *)resolved.source;
-  size_t buf_len = resolved.source_len;
-
-  JSValue res = JS_Eval(ctx, buf, buf_len, module_name,
+  JSValue res = JS_Eval(ctx, (char *)resolved.source, resolved.source_len,
+                        module_name,
                         JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY);
-  pfree(buf);
+  pfree(resolved.source);
 
   if (JS_IsException(res)) {
-    JSValue ex = JS_GetException(ctx);
-    const char *err = JS_ToCString(ctx, ex);
-    elog(WARNING, "could not compile module '%s': %s", module_name, err);
-    JS_FreeCString(ctx, err);
-    JS_FreeValue(ctx, ex);
-
-    current_package_name = old_pkg_name;
-    current_package_version = old_pkg_version;
-    current_module_depth--;
-    return JS_EXCEPTION;
+    goto done;
   }
 
   if (JS_ResolveModule(ctx, res) < 0) {
     JS_FreeValue(ctx, res);
-    elog(WARNING, "unable to resolve module %s", module_name);
-
-    current_package_name = old_pkg_name;
-    current_package_version = old_pkg_version;
-    current_module_depth--;
-    return JS_EXCEPTION;
+    goto done;
   }
 
   JSValue mod_res = JS_EvalFunction(ctx, JS_DupValue(ctx, res));
@@ -481,126 +559,92 @@ JSValue pljs_module_import(JSContext *ctx, const char *module_name) {
 
   if (JS_IsException(mod_res)) {
     JS_FreeValue(ctx, res);
-    js_std_dump_error(ctx);
-
-    current_package_name = old_pkg_name;
-    current_package_version = old_pkg_version;
-    current_module_depth--;
-    return JS_EXCEPTION;
+    goto done;
   }
   JS_FreeValue(ctx, mod_res);
 
   JSModuleDef *m = JS_VALUE_GET_PTR(res);
   JS_FreeValue(ctx, res);
-  JSValue ns = JS_GetModuleNamespace(ctx, m);
+  ret = JS_GetModuleNamespace(ctx, m);
 
-  current_package_name = old_pkg_name;
-  current_package_version = old_pkg_version;
-  current_module_depth--;
+done:
+  pljs_module_scope_leave(saved);
 
-  return ns;
+  return ret;
 }
 
 /**
  * @brief Require a JavaScript commonjs module from the database.
  *
+ * The module runs inside a function that is given its own `exports` and
+ * `module`, so nothing leaks into the global object and a nested require
+ * cannot overwrite the module that is requiring it.  Any failure leaves the
+ * JavaScript exception pending.
+ *
  * @param ctx The JavaScript context to use for loading the module.
  * @param module_name The name of the module to load.
- * @returns JSValue A copy of the compiled module.
+ * @returns JSValue The module's exports, or JS_EXCEPTION.
  */
 JSValue pljs_module_require(JSContext *ctx, const char *module_name) {
   if (current_module_depth >= configuration.max_module_depth) {
-    JS_ThrowInternalError(
+    return JS_ThrowInternalError(
         ctx, "module require depth exceeded (%d): possible circular dependency",
         configuration.max_module_depth);
-    return JS_EXCEPTION;
   }
 
   pljs_resolved_module resolved = pljs_resolve_module(module_name);
 
   if (!resolved.source) {
-    JS_ThrowReferenceError(ctx, "could not load module '%s'", module_name);
-    return JS_EXCEPTION;
+    return JS_ThrowReferenceError(ctx, "could not load module '%s'",
+                                  module_name);
   }
 
-  // Save and set package context for nested requires.
-  const char *old_pkg_name = current_package_name;
-  const char *old_pkg_version = current_package_version;
-  current_package_name = resolved.package_name;
-  current_package_version = resolved.package_version;
-  current_module_depth++;
+  pljs_module_scope saved = pljs_module_scope_enter(&resolved);
+  JSValue ret = JS_EXCEPTION;
 
-  JSValue global = JS_GetGlobalObject(ctx);
+  /*
+   * The wrapper's first line is the source's first line, so error positions
+   * still point into the module.  The trailing newline guards against a
+   * final "//" comment swallowing the closing brace.
+   */
+  StringInfoData wrapped;
+  initStringInfo(&wrapped);
+  appendStringInfoString(&wrapped, "(function (exports, module) {");
+  appendBinaryStringInfo(&wrapped, (char *)resolved.source,
+                         (int)resolved.source_len);
+  appendStringInfoString(&wrapped, "\n})");
+  pfree(resolved.source);
+
+  JSValue fn = JS_Eval(ctx, wrapped.data, wrapped.len, module_name, 0);
+  pfree(wrapped.data);
+
+  if (JS_IsException(fn)) {
+    goto done;
+  }
 
   JSValue module_obj = JS_NewObject(ctx);
   JSValue exports_obj = JS_NewObject(ctx);
   JS_SetPropertyStr(ctx, module_obj, "exports", JS_DupValue(ctx, exports_obj));
-  JS_SetPropertyStr(ctx, global, "module", JS_DupValue(ctx, module_obj));
-  JS_SetPropertyStr(ctx, global, "exports", JS_DupValue(ctx, exports_obj));
+
+  JSValue args[2] = {exports_obj, module_obj};
+  JSValue call_res = JS_Call(ctx, fn, exports_obj, 2, args);
+  JS_FreeValue(ctx, fn);
+
+  if (JS_IsException(call_res)) {
+    JS_FreeValue(ctx, exports_obj);
+    JS_FreeValue(ctx, module_obj);
+    goto done;
+  }
+  JS_FreeValue(ctx, call_res);
+
+  // module.exports may have been reassigned; that wins over `exports`.
+  ret = JS_GetPropertyStr(ctx, module_obj, "exports");
+
   JS_FreeValue(ctx, exports_obj);
   JS_FreeValue(ctx, module_obj);
 
-  char *buf = (char *)resolved.source;
-  size_t buf_len = resolved.source_len;
+done:
+  pljs_module_scope_leave(saved);
 
-  JSValue res =
-      JS_Eval(ctx, buf, buf_len, module_name, JS_EVAL_FLAG_COMPILE_ONLY);
-  pfree(buf);
-
-  if (JS_IsException(res)) {
-    JSValue ex = JS_GetException(ctx);
-    const char *err = JS_ToCString(ctx, ex);
-    elog(WARNING, "could not compile commonjs module '%s': %s", module_name,
-         err);
-    JS_FreeCString(ctx, err);
-    JS_FreeValue(ctx, ex);
-    JS_FreeValue(ctx, global);
-
-    current_package_name = old_pkg_name;
-    current_package_version = old_pkg_version;
-    current_module_depth--;
-    return JS_EXCEPTION;
-  }
-
-  JSValue eval_res = JS_EvalFunction(ctx, res);
-
-  if (JS_IsException(eval_res)) {
-    JSValue ex = JS_GetException(ctx);
-    const char *err = JS_ToCString(ctx, ex);
-    elog(WARNING, "could not execute commonjs module '%s': %s", module_name,
-         err);
-    JS_FreeCString(ctx, err);
-    JS_FreeValue(ctx, ex);
-    JS_FreeValue(ctx, global);
-
-    current_package_name = old_pkg_name;
-    current_package_version = old_pkg_version;
-    current_module_depth--;
-    return JS_EXCEPTION;
-  }
-
-  JS_FreeValue(ctx, eval_res);
-
-  JSValue result = JS_UNDEFINED;
-  JSValue mod = JS_GetPropertyStr(ctx, global, "module");
-
-  if (!JS_IsUndefined(mod) && !JS_IsNull(mod)) {
-    result = JS_GetPropertyStr(ctx, mod, "exports");
-  }
-
-  JS_FreeValue(ctx, mod);
-
-  if (JS_IsUndefined(result) || JS_IsNull(result)) {
-    JS_FreeValue(ctx, result);
-    result = JS_GetPropertyStr(ctx, global, "exports");
-  }
-
-  JS_FreeValue(ctx, global);
-
-  // Restore previous package context.
-  current_package_name = old_pkg_name;
-  current_package_version = old_pkg_version;
-  current_module_depth--;
-
-  return result;
+  return ret;
 }

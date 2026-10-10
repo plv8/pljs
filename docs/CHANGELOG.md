@@ -54,3 +54,11 @@ Released _January 27, 2026_.
 - Added `pljs.import`
 - Added initial hook support
 - Added `pljs.require` for commonjs modules
+- Added packages (`pljs.packages`) with semver dependency resolution
+- Fixed `^` ranges below 1.0.0, scoped package names (`@scope/pkg`), and
+  versions with a pre-release suffix, which were taken for releases
+- Errors raised while loading a module reach the caller with their message
+- CommonJS modules get their own `module` and `exports` instead of globals
+- Module source is converted from the database encoding to UTF-8
+- Fixed module and package lookups missing rows when the database collation is
+  not `C`

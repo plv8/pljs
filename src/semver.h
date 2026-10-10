@@ -11,7 +11,7 @@ typedef struct semver {
 
 typedef enum semver_range_type {
   SEMVER_EXACT,  // 1.2.3
-  SEMVER_CARET,  // ^1.2.3 (>=1.2.3 <2.0.0)
+  SEMVER_CARET,  // ^1.2.3 (>=1.2.3 <2.0.0), ^0.2.3 (<0.3.0), ^0.0.3 (=0.0.3)
   SEMVER_TILDE,  // ~1.2.3 (>=1.2.3 <1.3.0)
   SEMVER_GTE,    // >=1.2.3
   SEMVER_LTE,    // <=1.2.3

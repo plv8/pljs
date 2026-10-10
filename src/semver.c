@@ -26,6 +26,15 @@ bool semver_parse(const char *str, semver *out) {
     return false;
   }
 
+  // Anything after the patch ("1.2.3-beta", "1.2.3.4") is not a plain
+  // major.minor.patch version; refuse it rather than silently truncating.
+  while (isspace((unsigned char)*end)) {
+    end++;
+  }
+  if (*end != '\0') {
+    return false;
+  }
+
   out->major = (int)major;
   out->minor = (int)minor;
   out->patch = (int)patch;
@@ -90,11 +99,19 @@ bool semver_satisfies(const semver *version, const semver_range *range) {
     return cmp == 0;
 
   case SEMVER_CARET:
-    // >=range.version AND <next major
+    // >=range.version, and nothing that changes the left-most non-zero part:
+    // ^1.2.3 is <2.0.0, ^0.2.3 is <0.3.0, ^0.0.3 is exactly 0.0.3.
     if (cmp < 0) {
       return false;
     }
-    return version->major == range->version.major;
+    if (range->version.major != 0) {
+      return version->major == range->version.major;
+    }
+    if (range->version.minor != 0) {
+      return version->major == 0 && version->minor == range->version.minor;
+    }
+    return version->major == 0 && version->minor == 0 &&
+           version->patch == range->version.patch;
 
   case SEMVER_TILDE:
     // >=range.version AND <next minor
