@@ -140,6 +140,18 @@ Two things follow from how QuickJS works:
 - A module that throws while it is evaluated is evaluated again the next time
   it is imported, rather than throwing the same error forever.
 
+## Backups
+
+`pg_dump` includes the contents of `pljs.modules` and `pljs.packages`, and a restore puts
+them back, so modules installed in a database go with it. Nothing needs to be done to
+turn this on. A database made from an earlier build of 1.1.0-dev has the tables but not
+the setting; run this once in it:
+
+```sql
+SELECT pg_extension_config_dump('pljs.packages', '');
+SELECT pg_extension_config_dump('pljs.modules', '');
+```
+
 ## Security
 
 Loading reads the tables directly and does not check privileges on them: any

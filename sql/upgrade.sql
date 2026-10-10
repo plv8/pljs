@@ -54,6 +54,10 @@ CREATE FUNCTION pg_temp.describe_install() RETURNS SETOF text AS $$
     FROM pg_trigger WHERE tgrelid IN ('pljs.modules'::regclass, 'pljs.packages'::regclass)
       AND NOT tgisinternal
   UNION ALL
+  SELECT 'dumped ' || u.relid::regclass::text || ' [' || coalesce(u.cond, '') || ']'
+    FROM pg_extension e, unnest(e.extconfig, e.extcondition) AS u(relid, cond)
+    WHERE e.extname = 'pljs'
+  UNION ALL
   SELECT 'function ' || pg_get_functiondef(p.oid)
     FROM pg_proc p JOIN pg_depend d ON d.objid = p.oid AND d.classid = 'pg_proc'::regclass
     WHERE d.refobjid = (SELECT oid FROM pg_extension WHERE extname = 'pljs') AND d.deptype = 'e'

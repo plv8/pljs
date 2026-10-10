@@ -51,6 +51,12 @@ CREATE TABLE IF NOT EXISTS pljs.modules (
   FOREIGN KEY (package_name, package_version) REFERENCES pljs.packages (name, version)
 );
 
+-- What is installed in these tables is the user's, not the extension's, so a
+-- dump has to include it: without this, pg_dump skips the tables' contents and
+-- a restore leaves them empty.
+SELECT pg_catalog.pg_extension_config_dump('pljs.packages', '');
+SELECT pg_catalog.pg_extension_config_dump('pljs.modules', '');
+
 CREATE UNIQUE INDEX IF NOT EXISTS pljs_modules_standalone_path ON pljs.modules (path)
   WHERE package_name IS NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS pljs_modules_package_path ON pljs.modules (package_name, package_version, path)

@@ -127,6 +127,7 @@ REGRESS = init-extension function json jsonb json_conv types bytea context \
 	pg_resource_cleanup \
 	pg_parallel_mode \
 	hooks \
+	dump_restore \
 	upgrade
 
 all: deps/quickjs/quickjs.h deps/quickjs/libquickjs.a $(EXTENSION_SQL)

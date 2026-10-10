@@ -72,3 +72,4 @@ Released _January 27, 2026_.
 - `import` statements at the start of a function or `DO` block (the function
   then runs as a module, so in strict mode)
 - Upgrade scripts from every 1.0.x release (`ALTER EXTENSION pljs UPDATE`)
+- `pg_dump` includes the contents of `pljs.modules` and `pljs.packages`
