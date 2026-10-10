@@ -75,3 +75,5 @@ Released _January 27, 2026_.
 - `pg_dump` includes the contents of `pljs.modules` and `pljs.packages`
 - `pljs_info()` and `pljs_reset()` can only be called by superusers, or roles they are
   granted to
+- `pljs_reset()` raises an error when called from inside PL/JS code, instead of stopping the
+  backend

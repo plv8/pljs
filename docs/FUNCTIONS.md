@@ -276,7 +276,7 @@ Only superusers can call it, unless it has been granted to a role: `GRANT EXECUT
 
 `SELECT pljs_reset();`
 
-Discards the JavaScript contexts cached in the session, for every user, along with the modules loaded in them, so that the next call starts afresh. Global state that functions have set is lost. Call it from SQL, not from inside a PL/JS function.
+Discards the JavaScript contexts cached in the session, for every user, along with the modules loaded in them, so that the next call starts afresh. Global state that functions have set is lost. It raises an error if it is called from inside PL/JS code -- a function, a trigger or a `DO` block, even through another language -- since that code is running in the contexts it would discard. Call it from a top-level SQL statement.
 
 Only superusers can call it, unless it has been granted to a role: `GRANT EXECUTE ON FUNCTION pljs_reset() TO maintenance;`.
 

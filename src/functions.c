@@ -3800,7 +3800,24 @@ Datum pljs_info(PG_FUNCTION_ARGS) {
   return CStringGetTextDatum(buf.data);
 }
 
+/**
+ * @brief Discards every cached JavaScript context and starts a new runtime.
+ *
+ * Refused while PL/JS code is running.  A function that reaches this through
+ * pljs.execute() is running in one of the contexts about to be freed: its
+ * stack and the objects it holds would be torn out from under it, which
+ * stops the backend at QuickJS's check that nothing is left in the runtime
+ * and, in a build without it, reads freed memory.
+ */
 Datum pljs_reset(PG_FUNCTION_ARGS) {
+  if (pljs_current_storage() != NULL) {
+    ereport(ERROR, (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+                    errmsg("pljs_reset() cannot be called while PL/JS code is "
+                           "running"),
+                    errhint("Call it from a top-level SQL statement, not from "
+                            "inside a PL/JS function, trigger or DO block.")));
+  }
+
   pljs_cache_free_all();
   JS_FreeRuntime(rt);
 
