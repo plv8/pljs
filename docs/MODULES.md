@@ -39,8 +39,9 @@ INSERT INTO pljs.modules (path, source, sloppy) VALUES
   ('legacy', 'total = 41; with ({ n: 1 }) { total += n; } module.exports = total;', true);
 ```
 
-The flag can be changed with an `UPDATE`, and takes effect like any other change to a
-module. It has no effect on an ES module, which is always strict, or on a function's own code.
+or `pljs install --sloppy` from the command line. The flag can be changed with an
+`UPDATE`, and takes effect like any other change to a module. It has no effect on an
+ES module, which is always strict, or on a function's own code.
 
 ### `import` in a function
 

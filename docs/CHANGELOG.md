@@ -68,7 +68,7 @@ Released _January 27, 2026_.
 - Changing `pljs.modules` or `pljs.packages` takes effect in every session
   without a reload (see [MODULES.md](MODULES.md))
 - CommonJS modules run in strict mode, as ES modules do, unless their row in
-  `pljs.modules` has `sloppy` set
+  `pljs.modules` has `sloppy` set (`pljs install --sloppy`)
 - `import` statements at the start of a function or `DO` block (the function
   then runs as a module, so in strict mode)
 - Upgrade scripts from every 1.0.x release (`ALTER EXTENSION pljs UPDATE`)
