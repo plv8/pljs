@@ -25,6 +25,12 @@ CREATE OR REPLACE FUNCTION pljs_reset() RETURNS void
  AS 'MODULE_PATHNAME', 'pljs_reset'
  LANGUAGE C;
 
+-- These act on the whole session rather than on one function: pljs_info shows
+-- its memory and configuration, and pljs_reset discards the cached contexts of
+-- every user in it.  They are for superusers, or the roles they are granted to.
+REVOKE ALL ON FUNCTION pljs_info() FROM PUBLIC;
+REVOKE ALL ON FUNCTION pljs_reset() FROM PUBLIC;
+
 CREATE SCHEMA IF NOT EXISTS pljs;
 
 CREATE TABLE IF NOT EXISTS pljs.packages (

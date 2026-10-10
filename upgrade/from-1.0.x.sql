@@ -9,6 +9,13 @@ CREATE OR REPLACE FUNCTION pljs_reset() RETURNS void
  AS 'MODULE_PATHNAME', 'pljs_reset'
  LANGUAGE C;
 
+-- (pljs_info is revoked already, in a 1.0.x install; saying so again changes
+-- nothing.)  These act on the whole session rather than on one function: pljs_info shows
+-- its memory and configuration, and pljs_reset discards the cached contexts of
+-- every user in it.  They are for superusers, or the roles they are granted to.
+REVOKE ALL ON FUNCTION pljs_info() FROM PUBLIC;
+REVOKE ALL ON FUNCTION pljs_reset() FROM PUBLIC;
+
 CREATE SCHEMA pljs;
 
 CREATE TABLE pljs.packages (

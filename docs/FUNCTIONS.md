@@ -270,6 +270,16 @@ Returns a `JSON` object describing the PLJS build and current configuration:
 }
 ```
 
+Only superusers can call it, unless it has been granted to a role: `GRANT EXECUTE ON FUNCTION pljs_info() TO monitoring;`.
+
+### `pljs_reset`
+
+`SELECT pljs_reset();`
+
+Discards the JavaScript contexts cached in the session, for every user, along with the modules loaded in them, so that the next call starts afresh. Global state that functions have set is lost. Call it from SQL, not from inside a PL/JS function.
+
+Only superusers can call it, unless it has been granted to a role: `GRANT EXECUTE ON FUNCTION pljs_reset() TO maintenance;`.
+
 ### `pljs_version`
 
 `SELECT pljs_version();`

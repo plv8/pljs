@@ -73,3 +73,5 @@ Released _January 27, 2026_.
   then runs as a module, so in strict mode)
 - Upgrade scripts from every 1.0.x release (`ALTER EXTENSION pljs UPDATE`)
 - `pg_dump` includes the contents of `pljs.modules` and `pljs.packages`
+- `pljs_info()` and `pljs_reset()` can only be called by superusers, or roles they are
+  granted to

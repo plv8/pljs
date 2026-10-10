@@ -127,6 +127,7 @@ REGRESS = init-extension function json jsonb json_conv types bytea context \
 	pg_resource_cleanup \
 	pg_parallel_mode \
 	hooks \
+	privileges \
 	dump_restore \
 	upgrade
 
