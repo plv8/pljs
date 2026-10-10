@@ -3,14 +3,37 @@
 #include "access/genam.h"
 #include "catalog/namespace.h"
 #include "catalog/pg_collation_d.h"
+#include "commands/trigger.h"
+#include "access/xact.h"
+#include "miscadmin.h"
 #include "utils/builtins.h"
 #include "utils/fmgroids.h"
+#include "utils/inval.h"
 #include "utils/jsonb.h"
 #include "utils/lsyscache.h"
+#include "utils/rel.h"
 #include "utils/snapmgr.h"
 
 #include "pljs.h"
 #include "semver.h"
+
+/*
+ * Modules and packages live in pljs.modules and pljs.packages.
+ *
+ * They are loaded through QuickJS's own module system: pljs_module_normalize()
+ * turns whatever a module asked for into the canonical name of one stored
+ * module, and pljs_module_loader() compiles it.  QuickJS keeps a module under
+ * its canonical name, so a module is evaluated once per context and every
+ * importer shares that instance.
+ *
+ * The canonical name carries a generation number.  Anything that changes
+ * pljs.modules or pljs.packages (see pljs_modules_changed()) bumps the
+ * generation in every backend, so the next import asks for modules under new
+ * names and QuickJS loads them afresh.  That is the whole cache invalidation:
+ * a context cannot unload a module, so the old instances stay until the
+ * context goes (pljs_reset(), or the backend ending), but nothing refers to
+ * them by name any more.
+ */
 
 // Column positions in pljs.modules (1-based).
 enum module_data_access {
@@ -20,7 +43,8 @@ enum module_data_access {
   Amodule_package_version,
   Amodule_created_at,
   Amodule_updated_at,
-  Amodule_length = 6
+  Amodule_sloppy,
+  Amodule_length = 7
 };
 
 // Column positions in pljs.packages (1-based).
@@ -34,33 +58,138 @@ enum package_data_access {
   Apackage_length = 6
 };
 
-static Oid get_pljs_schema_oid(void) {
-  return get_namespace_oid("pljs", false);
+PGDLLEXPORT Datum pljs_modules_changed(PG_FUNCTION_ARGS);
+PG_FUNCTION_INFO_V1(pljs_modules_changed);
+
+/*
+ * ---------- Generation, and the catalog OIDs it also invalidates ----------
+ */
+
+/*
+ * Part of every canonical name, and what everything loaded is kept against: it
+ * moves on, and all of it is dropped, when the module tables change and when a
+ * module's evaluation fails.  QuickJS keeps a module whose evaluation threw,
+ * and throws the same error at every later import of it, so loading it again
+ * has to be under a new name -- and so does everything else, or a module that
+ * was fine would be loaded twice, with state of its own.
+ */
+static uint64 module_generation = 1;
+
+// Bumped only when the module tables change; see pljs_module_load_once().
+static uint64 module_table_changes = 0;
+
+// Whether a module could not be found or compiled, as against evaluated; set
+// by the normalizer and loader, to tell the two kinds of failure apart.
+static bool module_load_failed = false;
+
+// Whether this transaction read modules under its own snapshot; see
+// pljs_scan_snapshot().
+static bool modules_read_in_snapshot_xact = false;
+
+// The tables and indexes the module readers scan, found once.
+static Oid modules_relid = InvalidOid;
+static Oid packages_relid = InvalidOid;
+static Oid modules_path_index = InvalidOid;
+static Oid modules_package_index = InvalidOid;
+static Oid packages_name_index = InvalidOid;
+static Oid packages_pkey_index = InvalidOid;
+
+/**
+ * @brief Relcache callback: drop everything derived from the module tables.
+ *
+ * Runs in the backend that sees the invalidation -- the one that changed the
+ * tables at the end of the statement, and any other at its next transaction or
+ * lock -- and must not touch the catalogs.
+ */
+static void pljs_modules_inval_cb(Datum arg, Oid relid) {
+  if (relid == InvalidOid || relid == modules_relid || relid == packages_relid) {
+    module_generation++;
+    module_table_changes++;
+
+    modules_relid = InvalidOid;
+    packages_relid = InvalidOid;
+    modules_path_index = InvalidOid;
+    modules_package_index = InvalidOid;
+    packages_name_index = InvalidOid;
+    packages_pkey_index = InvalidOid;
+  }
 }
 
-static Oid get_pljs_module_relid(void) {
-  return get_relname_relid("modules", get_pljs_schema_oid());
+/**
+ * @brief Forgets what a transaction loaded under its own snapshot.
+ *
+ * A repeatable-read transaction reads the modules as they were when it began,
+ * which may be older than a change this backend has already been told about.
+ * What it loaded is then not the current modules, and nothing will say so
+ * later, so it is dropped when the transaction ends.
+ */
+static void pljs_modules_xact_cb(XactEvent event, void *arg) {
+  if ((event == XACT_EVENT_COMMIT || event == XACT_EVENT_ABORT) &&
+      modules_read_in_snapshot_xact) {
+    module_generation++;
+    modules_read_in_snapshot_xact = false;
+  }
 }
 
-static Oid get_pljs_module_index_relid(void) {
-  return get_relname_relid("pljs_modules_path", get_pljs_schema_oid());
+/**
+ * @brief Registers the invalidation callbacks; called from _PG_init().
+ */
+void pljs_modules_init(void) {
+  CacheRegisterRelcacheCallback(pljs_modules_inval_cb, (Datum)0);
+  RegisterXactCallback(pljs_modules_xact_cb, NULL);
 }
 
-static Oid get_pljs_package_module_index_relid(void) {
-  return get_relname_relid("pljs_modules_pkg", get_pljs_schema_oid());
+/**
+ * @brief Trigger function that invalidates cached modules.
+ *
+ * Attached, for every statement that changes them, to pljs.modules and
+ * pljs.packages.  Invalidating the table's relcache entry reaches every
+ * backend, at commit, and this one now -- and again if the transaction rolls
+ * back, which is what puts a rolled-back change's modules back.
+ */
+Datum pljs_modules_changed(PG_FUNCTION_ARGS) {
+  if (!CALLED_AS_TRIGGER(fcinfo)) {
+    elog(ERROR, "pljs_modules_changed: not called by trigger manager");
+  }
+
+  CacheInvalidateRelcache(((TriggerData *)fcinfo->context)->tg_relation);
+
+  return PointerGetDatum(NULL);
 }
 
-static Oid get_pljs_package_relid(void) {
-  return get_relname_relid("packages", get_pljs_schema_oid());
+/**
+ * @brief Finds the module tables and their indexes, if they are not known.
+ *
+ * @returns @c bool - false when the tables are not there
+ */
+static bool pljs_module_relids(void) {
+  if (OidIsValid(modules_relid) && OidIsValid(packages_relid) &&
+      OidIsValid(modules_path_index) && OidIsValid(modules_package_index) &&
+      OidIsValid(packages_name_index) && OidIsValid(packages_pkey_index)) {
+    return true;
+  }
+
+  Oid nsp = get_namespace_oid("pljs", true);
+
+  if (!OidIsValid(nsp)) {
+    return false;
+  }
+
+  modules_relid = get_relname_relid("modules", nsp);
+  packages_relid = get_relname_relid("packages", nsp);
+  modules_path_index = get_relname_relid("pljs_modules_path", nsp);
+  modules_package_index = get_relname_relid("pljs_modules_pkg", nsp);
+  packages_name_index = get_relname_relid("pljs_packages_name", nsp);
+  packages_pkey_index = get_relname_relid("packages_pkey", nsp);
+
+  return OidIsValid(modules_relid) && OidIsValid(packages_relid) &&
+         OidIsValid(modules_path_index) && OidIsValid(modules_package_index) &&
+         OidIsValid(packages_name_index) && OidIsValid(packages_pkey_index);
 }
 
-static Oid get_pljs_package_name_index_relid(void) {
-  return get_relname_relid("pljs_packages_name", get_pljs_schema_oid());
-}
-
-static Oid get_pljs_package_pkey_relid(void) {
-  return get_relname_relid("packages_pkey", get_pljs_schema_oid());
-}
+/*
+ * ---------- Reading the tables ----------
+ */
 
 /**
  * @brief Initialize a scan key that matches a TEXT column against a C string.
@@ -104,10 +233,17 @@ static uint8_t *pljs_module_source(Datum source_datum, size_t *len_out) {
 }
 
 /**
- * @brief Snapshot for a catalog scan, pushing one if none is active.
+ * @brief Snapshot for a catalog scan.
  *
- * A module can be loaded where no snapshot is active yet (for example from
- * pljs.start_proc), and a scan without one would crash.  Pair with
+ * The current statement's snapshot may be older than a change to the modules
+ * that this backend has just been told about, and what is read under it would
+ * be loaded as the new generation's.  So a read-committed transaction reads
+ * with a snapshot of its own, as current as can be.  A repeatable-read or
+ * serializable one must keep to its snapshot, and its loaded modules are
+ * dropped when it ends; see pljs_modules_xact_cb().
+ *
+ * Also pushes one when none is active (a module can be loaded from
+ * pljs.start_proc, say), which a scan could not do without.  Pair with
  * pljs_scan_snapshot_release().
  */
 static Snapshot pljs_scan_snapshot(bool *pushed) {
@@ -116,6 +252,15 @@ static Snapshot pljs_scan_snapshot(bool *pushed) {
   if (!ActiveSnapshotSet()) {
     PushActiveSnapshot(GetTransactionSnapshot());
     *pushed = true;
+  } else if (IsolationUsesXactSnapshot()) {
+    modules_read_in_snapshot_xact = true;
+  } else {
+    PushActiveSnapshot(GetLatestSnapshot());
+    *pushed = true;
+  }
+
+  if (IsolationUsesXactSnapshot()) {
+    modules_read_in_snapshot_xact = true;
   }
 
   return GetActiveSnapshot();
@@ -128,94 +273,107 @@ static void pljs_scan_snapshot_release(bool pushed) {
 }
 
 /**
- * @brief Read a standalone module source from the database by path.
+ * @brief Identifies one stored module: a standalone one by its path, a
+ * package's by package, version and path within the package.
  */
-static uint8_t *pljs_read_module(size_t *pbuf_len, const char *filename) {
-  uint8_t *ret = NULL;
-  *pbuf_len = 0;
+typedef struct pljs_module_id {
+  char *package; // NULL for a standalone module
+  char *version;
+  char *path;
+} pljs_module_id;
 
-  ScanKeyData scankey[1];
-
-  pljs_text_key(&scankey[0], Amodule_path, filename);
-
-  Relation table = table_open(get_pljs_module_relid(), AccessShareLock);
-  Relation index = index_open(get_pljs_module_index_relid(), AccessShareLock);
-
-  bool pushed;
-  Snapshot snapshot = pljs_scan_snapshot(&pushed);
-
-  SysScanDesc scan_descriptor =
-      systable_beginscan_ordered(table, index, snapshot, 1, scankey);
-
-  HeapTuple tuple =
-      systable_getnext_ordered(scan_descriptor, ForwardScanDirection);
-
-  // Walk results to find one with package_name IS NULL.
-  while (HeapTupleIsValid(tuple)) {
-    Datum datum_array[Amodule_length];
-    bool is_null_array[Amodule_length];
-
-    TupleDesc tuple_desc = RelationGetDescr(table);
-    heap_deform_tuple(tuple, tuple_desc, datum_array, is_null_array);
-
-    // Only match standalone modules (package_name IS NULL).
-    if (is_null_array[Amodule_package_name - 1]) {
-      if (!is_null_array[Amodule_source - 1]) {
-        ret = pljs_module_source(datum_array[Amodule_source - 1], pbuf_len);
-      }
-      break;
-    }
-
-    tuple = systable_getnext_ordered(scan_descriptor, ForwardScanDirection);
+static void pljs_module_id_free(pljs_module_id *id) {
+  if (id->package) {
+    pfree(id->package);
   }
-
-  systable_endscan_ordered(scan_descriptor);
-  pljs_scan_snapshot_release(pushed);
-  index_close(index, AccessShareLock);
-  table_close(table, AccessShareLock);
-
-  return ret;
+  if (id->version) {
+    pfree(id->version);
+  }
+  if (id->path) {
+    pfree(id->path);
+  }
+  memset(id, 0, sizeof(*id));
 }
 
 /**
- * @brief Read a package module source from the database.
+ * @brief Looks a stored module up, and optionally reads its source.
+ *
+ * @param id #pljs_module_id - the module
+ * @param source @c uint8_t** - set to the UTF-8 source, NUL-terminated, or
+ * NULL to only find out whether the module exists
+ * @param source_len @c size_t* - set to the source's length
+ * @param sloppy @c bool* - set to whether the module asks for sloppy mode, or
+ * NULL
+ * @returns @c bool - whether the module exists with a source
  */
-static uint8_t *pljs_read_package_module(size_t *pbuf_len,
-                                         const char *package_name,
-                                         const char *package_version,
-                                         const char *module_path) {
-  uint8_t *ret = NULL;
-  *pbuf_len = 0;
-
+static bool pljs_fetch_module(const pljs_module_id *id, uint8_t **source,
+                              size_t *source_len, bool *sloppy) {
+  bool found = false;
   ScanKeyData scankey[3];
+  int nkeys;
+  Oid index_oid;
 
-  // Attribute numbers are table column positions, not index positions.
-  pljs_text_key(&scankey[0], Amodule_package_name, package_name);
-  pljs_text_key(&scankey[1], Amodule_package_version, package_version);
-  pljs_text_key(&scankey[2], Amodule_path, module_path);
+  if (source) {
+    *source = NULL;
+    *source_len = 0;
+  }
+  if (sloppy) {
+    *sloppy = false;
+  }
 
-  Relation table = table_open(get_pljs_module_relid(), AccessShareLock);
-  Relation index =
-      index_open(get_pljs_package_module_index_relid(), AccessShareLock);
+  if (id->package) {
+    // Attribute numbers are table column positions, not index positions.
+    pljs_text_key(&scankey[0], Amodule_package_name, id->package);
+    pljs_text_key(&scankey[1], Amodule_package_version, id->version);
+    pljs_text_key(&scankey[2], Amodule_path, id->path);
+    nkeys = 3;
+    index_oid = modules_package_index;
+  } else {
+    pljs_text_key(&scankey[0], Amodule_path, id->path);
+    nkeys = 1;
+    index_oid = modules_path_index;
+  }
+
+  Relation table = table_open(modules_relid, AccessShareLock);
+  Relation index = index_open(index_oid, AccessShareLock);
 
   bool pushed;
   Snapshot snapshot = pljs_scan_snapshot(&pushed);
 
   SysScanDesc scan =
-      systable_beginscan_ordered(table, index, snapshot, 3, scankey);
+      systable_beginscan_ordered(table, index, snapshot, nkeys, scankey);
 
-  HeapTuple tuple = systable_getnext_ordered(scan, ForwardScanDirection);
+  HeapTuple tuple;
 
-  if (HeapTupleIsValid(tuple)) {
+  while (!found &&
+         HeapTupleIsValid(tuple = systable_getnext_ordered(
+                              scan, ForwardScanDirection))) {
     Datum datum_array[Amodule_length];
     bool is_null_array[Amodule_length];
 
+    // A table made before the sloppy column has fewer attributes; deforming
+    // leaves the rest alone, so they start out null.
+    memset(is_null_array, true, sizeof(is_null_array));
     heap_deform_tuple(tuple, RelationGetDescr(table), datum_array,
                       is_null_array);
 
-    if (!is_null_array[Amodule_source - 1]) {
-      ret = pljs_module_source(datum_array[Amodule_source - 1], pbuf_len);
+    // The path index also holds package modules; a standalone module is the
+    // one with no package.
+    if (!id->package && !is_null_array[Amodule_package_name - 1]) {
+      continue;
     }
+
+    if (is_null_array[Amodule_source - 1]) {
+      break;
+    }
+
+    if (source) {
+      *source = pljs_module_source(datum_array[Amodule_source - 1], source_len);
+    }
+    if (sloppy && !is_null_array[Amodule_sloppy - 1]) {
+      *sloppy = DatumGetBool(datum_array[Amodule_sloppy - 1]);
+    }
+    found = true;
   }
 
   systable_endscan_ordered(scan);
@@ -223,7 +381,7 @@ static uint8_t *pljs_read_package_module(size_t *pbuf_len,
   index_close(index, AccessShareLock);
   table_close(table, AccessShareLock);
 
-  return ret;
+  return found;
 }
 
 /**
@@ -248,12 +406,14 @@ static char *pljs_resolve_package_version(const char *pkg_name,
   ScanKeyData scankey[1];
   pljs_text_key(&scankey[0], Apackage_name, pkg_name);
 
-  Relation table = table_open(get_pljs_package_relid(), AccessShareLock);
-  Relation index =
-      index_open(get_pljs_package_name_index_relid(), AccessShareLock);
+  Relation table = table_open(packages_relid, AccessShareLock);
+  Relation index = index_open(packages_name_index, AccessShareLock);
+
+  bool pushed;
+  Snapshot snapshot = pljs_scan_snapshot(&pushed);
 
   SysScanDesc scan =
-      systable_beginscan_ordered(table, index, GetActiveSnapshot(), 1, scankey);
+      systable_beginscan_ordered(table, index, snapshot, 1, scankey);
 
   HeapTuple tuple;
   while ((tuple = systable_getnext_ordered(scan, ForwardScanDirection)) !=
@@ -268,8 +428,7 @@ static char *pljs_resolve_package_version(const char *pkg_name,
       continue;
     }
 
-    char *ver_str =
-        TextDatumGetCString(datum_array[Apackage_version - 1]);
+    char *ver_str = TextDatumGetCString(datum_array[Apackage_version - 1]);
     semver ver;
     if (!semver_parse(ver_str, &ver)) {
       pfree(ver_str);
@@ -291,6 +450,7 @@ static char *pljs_resolve_package_version(const char *pkg_name,
   }
 
   systable_endscan_ordered(scan);
+  pljs_scan_snapshot_release(pushed);
   index_close(index, AccessShareLock);
   table_close(table, AccessShareLock);
 
@@ -305,8 +465,7 @@ static char *pljs_resolve_package_version(const char *pkg_name,
  * If deps_out is non-NULL and the package has a dependencies JSONB column,
  * the Datum is written there for the caller to extract dependency ranges.
  */
-static char *pljs_get_package_info(const char *pkg_name,
-                                   const char *pkg_version,
+static char *pljs_get_package_info(const char *pkg_name, const char *pkg_version,
                                    Datum *deps_out, bool *deps_is_null) {
   char *entry_point = NULL;
 
@@ -319,12 +478,14 @@ static char *pljs_get_package_info(const char *pkg_name,
   pljs_text_key(&scankey[0], Apackage_name, pkg_name);
   pljs_text_key(&scankey[1], Apackage_version, pkg_version);
 
-  Relation table = table_open(get_pljs_package_relid(), AccessShareLock);
-  Relation index =
-      index_open(get_pljs_package_pkey_relid(), AccessShareLock);
+  Relation table = table_open(packages_relid, AccessShareLock);
+  Relation index = index_open(packages_pkey_index, AccessShareLock);
+
+  bool pushed;
+  Snapshot snapshot = pljs_scan_snapshot(&pushed);
 
   SysScanDesc scan =
-      systable_beginscan_ordered(table, index, GetActiveSnapshot(), 2, scankey);
+      systable_beginscan_ordered(table, index, snapshot, 2, scankey);
 
   HeapTuple tuple = systable_getnext_ordered(scan, ForwardScanDirection);
 
@@ -337,7 +498,7 @@ static char *pljs_get_package_info(const char *pkg_name,
 
     if (!is_null_array[Apackage_entry_point - 1]) {
       entry_point =
-          pstrdup(TextDatumGetCString(datum_array[Apackage_entry_point - 1]));
+          TextDatumGetCString(datum_array[Apackage_entry_point - 1]);
     }
 
     if (deps_out && deps_is_null) {
@@ -351,6 +512,7 @@ static char *pljs_get_package_info(const char *pkg_name,
   }
 
   systable_endscan_ordered(scan);
+  pljs_scan_snapshot_release(pushed);
   index_close(index, AccessShareLock);
   table_close(table, AccessShareLock);
 
@@ -366,8 +528,8 @@ static char *pljs_get_package_dependency_range(const char *pkg_name,
   Datum deps_datum = (Datum)0;
   bool deps_is_null = true;
 
-  char *ep = pljs_get_package_info(pkg_name, pkg_version, &deps_datum,
-                                    &deps_is_null);
+  char *ep =
+      pljs_get_package_info(pkg_name, pkg_version, &deps_datum, &deps_is_null);
   if (ep) {
     pfree(ep);
   }
@@ -395,32 +557,224 @@ static char *pljs_get_package_dependency_range(const char *pkg_name,
   return range;
 }
 
-typedef struct pljs_resolved_module {
-  uint8_t *source;
-  size_t source_len;
-  char *package_name;
-  char *package_version;
-  char *module_path;
-} pljs_resolved_module;
+/*
+ * ---------- Canonical names, and resolving what a module asked for ----------
+ */
 
-// Current package context for nested require/import resolution.
-// Set before evaluating a package module, restored after.
-static const char *current_package_name = NULL;
-static const char *current_package_version = NULL;
+#define PLJS_STANDALONE_PREFIX "pljs:"
+#define PLJS_PACKAGE_PREFIX "pljs-pkg:"
 
-// Depth of the current nested import/require chain. Guarded by
-// pljs.max_module_depth to prevent unbounded recursion via circular deps.
-static int current_module_depth = 0;
+/**
+ * @brief The canonical name QuickJS knows a stored module by.
+ *
+ *   pljs:<path>#<generation>
+ *   pljs-pkg:<package>@<version>/<path>#<generation>
+ */
+static char *pljs_module_id_format(const pljs_module_id *id) {
+  if (id->package) {
+    return psprintf(PLJS_PACKAGE_PREFIX "%s@%s/%s#" UINT64_FORMAT, id->package,
+                    id->version, id->path, module_generation);
+  }
 
-static pljs_resolved_module pljs_resolve_module(const char *specifier) {
-  pljs_resolved_module result = {0};
+  return psprintf(PLJS_STANDALONE_PREFIX "%s#" UINT64_FORMAT, id->path,
+                  module_generation);
+}
 
-  // Parse "PackageName/submodule" into package name and module path.
-  char *pkg_name = pstrdup(specifier);
+/**
+ * @brief Reads a canonical name back into the module it names.
+ *
+ * The generation is ignored: it says when the name was made, not which module
+ * it is.
+ *
+ * @returns @c bool - false when @p name is not a canonical name of ours
+ */
+static bool pljs_module_id_parse(const char *name, pljs_module_id *id) {
+  memset(id, 0, sizeof(*id));
+
+  if (name == NULL) {
+    return false;
+  }
+
+  bool is_package = strncmp(name, PLJS_PACKAGE_PREFIX,
+                            strlen(PLJS_PACKAGE_PREFIX)) == 0;
+
+  if (!is_package &&
+      strncmp(name, PLJS_STANDALONE_PREFIX, strlen(PLJS_STANDALONE_PREFIX)) !=
+          0) {
+    return false;
+  }
+
+  const char *rest = name + strlen(is_package ? PLJS_PACKAGE_PREFIX
+                                              : PLJS_STANDALONE_PREFIX);
+  const char *hash = strrchr(rest, '#');
+  char *body = hash ? pnstrdup(rest, hash - rest) : pstrdup(rest);
+
+  if (!is_package) {
+    id->path = body;
+    return true;
+  }
+
+  // "<package>@<version>/<path>"; a scoped package name starts with '@'.
+  char *at = strchr(body + (body[0] == '@' ? 1 : 0), '@');
+  char *slash = at ? strchr(at, '/') : NULL;
+
+  if (!at || !slash) {
+    pfree(body);
+    return false;
+  }
+
+  id->package = pnstrdup(body, at - body);
+  id->version = pnstrdup(at + 1, slash - at - 1);
+  id->path = pstrdup(slash + 1);
+  pfree(body);
+
+  return true;
+}
+
+/**
+ * @brief Whether a specifier is relative to the module asking for it.
+ */
+static bool pljs_spec_is_relative(const char *spec) {
+  return spec[0] == '.' &&
+         (spec[1] == '\0' || spec[1] == '/' ||
+          (spec[1] == '.' && (spec[2] == '\0' || spec[2] == '/')));
+}
+
+/**
+ * @brief Resolves a relative specifier against the directory of a module's
+ * path: "./a" from "lib/b" is "lib/a", and "../a" is "a".
+ *
+ * @returns @c char* - the path, or NULL when it climbs above the root
+ */
+static char *pljs_join_relative(const char *base_path, const char *spec) {
+  StringInfoData combined;
+  char *dir = pstrdup(base_path);
+  char *slash = strrchr(dir, '/');
+
+  if (slash) {
+    *slash = '\0';
+  } else {
+    dir[0] = '\0';
+  }
+
+  initStringInfo(&combined);
+  if (dir[0] != '\0') {
+    appendStringInfo(&combined, "%s/", dir);
+  }
+  appendStringInfoString(&combined, spec);
+
+  // Walk the segments, keeping a stack of the ones that survive.
+  char **segments = palloc(sizeof(char *) * (combined.len + 1));
+  int count = 0;
+  bool escaped = false;
+  char *cursor = combined.data;
+
+  while (cursor != NULL && !escaped) {
+    char *next = strchr(cursor, '/');
+
+    if (next) {
+      *next++ = '\0';
+    }
+
+    if (strcmp(cursor, "..") == 0) {
+      if (count == 0) {
+        escaped = true;
+      } else {
+        count--;
+      }
+    } else if (cursor[0] != '\0' && strcmp(cursor, ".") != 0) {
+      segments[count++] = cursor;
+    }
+
+    cursor = next;
+  }
+
+  char *result = NULL;
+
+  if (!escaped && count > 0) {
+    StringInfoData joined;
+
+    initStringInfo(&joined);
+    for (int i = 0; i < count; i++) {
+      if (i > 0) {
+        appendStringInfoChar(&joined, '/');
+      }
+      appendStringInfoString(&joined, segments[i]);
+    }
+    result = joined.data;
+  }
+
+  pfree(segments);
+  pfree(combined.data);
+  pfree(dir);
+
+  return result;
+}
+
+typedef enum pljs_resolve_result {
+  PLJS_RESOLVED,
+  PLJS_NOT_FOUND,
+  PLJS_ESCAPES_ROOT,
+} pljs_resolve_result;
+
+/**
+ * @brief Works out which stored module a specifier means.
+ *
+ * @param spec @c char* - what the importing code wrote
+ * @param importer #pljs_module_id - the module it is written in, or NULL for
+ * code that is not a stored module (a function, or a DO block)
+ * @param out #pljs_module_id - the module, when it was found
+ *
+ * A canonical name means that module.  A relative path ("./x", "../x") is
+ * looked for beside the importer, in its own package if it is in one.  Any
+ * other name is a standalone module of that path if there is one, or else a
+ * package: the importing package's own version for its own name, the version
+ * the importing package's dependencies ask for for another, and the latest
+ * otherwise.
+ */
+static pljs_resolve_result pljs_resolve_spec(const char *spec,
+                                             const pljs_module_id *importer,
+                                             pljs_module_id *out) {
+  memset(out, 0, sizeof(*out));
+
+  if (pljs_module_id_parse(spec, out)) {
+    if (pljs_fetch_module(out, NULL, NULL, NULL)) {
+      return PLJS_RESOLVED;
+    }
+    pljs_module_id_free(out);
+    return PLJS_NOT_FOUND;
+  }
+
+  if (pljs_spec_is_relative(spec)) {
+    if (importer == NULL) {
+      return PLJS_NOT_FOUND;
+    }
+
+    char *path = pljs_join_relative(importer->path, spec);
+
+    if (path == NULL) {
+      return PLJS_ESCAPES_ROOT;
+    }
+
+    out->path = path;
+    if (importer->package) {
+      out->package = pstrdup(importer->package);
+      out->version = pstrdup(importer->version);
+    }
+
+    if (pljs_fetch_module(out, NULL, NULL, NULL)) {
+      return PLJS_RESOLVED;
+    }
+    pljs_module_id_free(out);
+    return PLJS_NOT_FOUND;
+  }
+
+  // Otherwise a package: "<package>" or "<package>/<module>", where a scoped
+  // package keeps its first slash ("@scope/pkg/module").
+  char *pkg_name = pstrdup(spec);
   char *sub_path = NULL;
-  // A scoped name ("@scope/pkg") keeps its first slash: the package name is
-  // "@scope/pkg", and a sub-module path may follow it.
   char *slash = strchr(pkg_name + (pkg_name[0] == '@' ? 1 : 0), '/');
+
   if (slash && pkg_name[0] == '@') {
     slash = strchr(slash + 1, '/');
   }
@@ -429,222 +783,725 @@ static pljs_resolved_module pljs_resolve_module(const char *specifier) {
     sub_path = slash + 1;
   }
 
-  // Step 1: Try standalone module (exact path match, no package).
-  result.source = pljs_read_module(&result.source_len, specifier);
-  if (result.source) {
-    result.module_path = pstrdup(specifier);
-    pfree(pkg_name);
-    return result;
-  }
+  /*
+   * What the importing package says it depends on, or its own name, is that
+   * package.  A standalone module of the same name does not stand in for it:
+   * rows anyone could add would otherwise replace a package's pinned
+   * dependency.
+   */
+  char *range = NULL;
+  bool is_declared = false;
 
-  // Step 2: Resolve as a package.
-  // Check if we're inside a package context (nested require).
-  char *range_str = NULL;
-
-  if (current_package_name && current_package_version) {
-    // Look up the dependency constraint from the calling package.
-    range_str = pljs_get_package_dependency_range(
-        current_package_name, current_package_version, pkg_name);
-  }
-
-  // Resolve the version (latest if no range, best match if range).
-  char *version = pljs_resolve_package_version(pkg_name, range_str);
-  if (range_str) {
-    pfree(range_str);
-  }
-
-  if (!version) {
-    pfree(pkg_name);
-    return result; // source is NULL — caller handles the error.
-  }
-
-  // Determine the module path within the package.
-  char *module_path;
-  if (sub_path) {
-    module_path = pstrdup(sub_path);
-  } else {
-    module_path = pljs_get_package_info(pkg_name, version, NULL, NULL);
-    if (!module_path) {
-      pfree(pkg_name);
-      pfree(version);
-      return result;
+  if (importer && importer->package) {
+    if (strcmp(importer->package, pkg_name) == 0) {
+      is_declared = true;
+    } else {
+      range = pljs_get_package_dependency_range(importer->package,
+                                                importer->version, pkg_name);
+      is_declared = range != NULL;
     }
   }
 
-  // Load the module source from the package.
-  result.source =
-      pljs_read_package_module(&result.source_len, pkg_name, version,
-                               module_path);
-  if (result.source) {
-    result.package_name = pkg_name;
-    result.package_version = version;
-    result.module_path = module_path;
+  // A standalone module, by its whole path.
+  if (!is_declared) {
+    out->path = pstrdup(spec);
+    if (pljs_fetch_module(out, NULL, NULL, NULL)) {
+      pfree(pkg_name);
+      return PLJS_RESOLVED;
+    }
+    pljs_module_id_free(out);
+  }
+
+  char *version = NULL;
+
+  if (importer && importer->package && strcmp(importer->package, pkg_name) == 0) {
+    version = pstrdup(importer->version);
   } else {
+    version = pljs_resolve_package_version(pkg_name, range);
+  }
+
+  if (range) {
+    pfree(range);
+  }
+
+  if (version == NULL) {
+    pfree(pkg_name);
+    return PLJS_NOT_FOUND;
+  }
+
+  char *path = sub_path ? pstrdup(sub_path)
+                        : pljs_get_package_info(pkg_name, version, NULL, NULL);
+
+  if (path == NULL) {
     pfree(pkg_name);
     pfree(version);
-    pfree(module_path);
+    return PLJS_NOT_FOUND;
   }
+
+  out->package = pkg_name;
+  out->version = version;
+  out->path = path;
+
+  if (pljs_fetch_module(out, NULL, NULL, NULL)) {
+    return PLJS_RESOLVED;
+  }
+  pljs_module_id_free(out);
+
+  return PLJS_NOT_FOUND;
+}
+
+/**
+ * @brief Throws the error for a specifier that could not be resolved.
+ */
+static void pljs_throw_unresolved(JSContext *ctx, pljs_resolve_result result,
+                                  const char *spec) {
+  module_load_failed = true;
+
+  if (result == PLJS_ESCAPES_ROOT) {
+    JS_ThrowReferenceError(
+        ctx, "relative module specifier '%s' goes above the module root", spec);
+  } else {
+    JS_ThrowReferenceError(ctx, "could not load module '%s'", spec);
+  }
+}
+
+/*
+ * ---------- The QuickJS loader ----------
+ */
+
+/**
+ * @brief The canonical name of the module running at a stack level, or NULL
+ * when the code there is not a stored module.
+ */
+static bool pljs_running_module(JSContext *ctx, int level,
+                                pljs_module_id *importer) {
+  JSAtom atom = JS_GetScriptOrModuleName(ctx, level);
+  bool ok = false;
+
+  memset(importer, 0, sizeof(*importer));
+
+  if (atom != JS_ATOM_NULL) {
+    const char *name = JS_AtomToCString(ctx, atom);
+
+    if (name != NULL) {
+      ok = pljs_module_id_parse(name, importer);
+      JS_FreeCString(ctx, name);
+    }
+
+    JS_FreeAtom(ctx, atom);
+  }
+
+  return ok;
+}
+
+/**
+ * @brief QuickJS module normalizer: the canonical name of what a module's
+ * `import` asked for.
+ */
+char *pljs_module_normalize(JSContext *ctx, const char *base_name,
+                            const char *name, void *opaque) {
+  pljs_module_id importer, id;
+  bool has_importer;
+  char *canonical, *ret;
+
+  if (!pljs_module_relids()) {
+    module_load_failed = true;
+    JS_ThrowInternalError(ctx, "the pljs module tables are not installed");
+    return NULL;
+  }
+
+  has_importer = pljs_module_id_parse(base_name, &importer);
+
+  pljs_resolve_result result =
+      pljs_resolve_spec(name, has_importer ? &importer : NULL, &id);
+
+  if (has_importer) {
+    pljs_module_id_free(&importer);
+  }
+
+  if (result != PLJS_RESOLVED) {
+    pljs_throw_unresolved(ctx, result, name);
+    return NULL;
+  }
+
+  canonical = pljs_module_id_format(&id);
+  ret = js_strdup(ctx, canonical);
+
+  pfree(canonical);
+  pljs_module_id_free(&id);
+
+  return ret;
+}
+
+/*
+ * The module state lives in the JavaScript context, as a hidden property of
+ * the pljs object, so it goes with the context however the context goes:
+ *
+ *   gen      the generation it was made for
+ *   memo     what each import resolved to, by importer and specifier
+ *   kinds    the canonical names of modules that are CommonJS
+ *   loading  the canonical names being loaded now
+ *   load     a function that imports a name, for the module system to run
+ */
+#define PLJS_STATE_PROPERTY "__modules"
+
+/**
+ * @brief The context's module state, emptied if the generation moved on.
+ *
+ * @returns #JSValue - a reference the caller frees, or JS_EXCEPTION
+ */
+static JSValue pljs_module_state(JSContext *ctx) {
+  JSValue global = JS_GetGlobalObject(ctx);
+  JSValue ns = JS_GetPropertyStr(ctx, global, "pljs");
+  JSValue state = JS_GetPropertyStr(ctx, ns, PLJS_STATE_PROPERTY);
+
+  JS_FreeValue(ctx, global);
+
+  if (!JS_IsObject(state)) {
+    JS_FreeValue(ctx, state);
+    state = JS_NewObject(ctx);
+
+    // Writable and configurable, so tearing the context down can clear it.
+    JS_DefinePropertyValueStr(ctx, ns, PLJS_STATE_PROPERTY,
+                              JS_DupValue(ctx, state),
+                              JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE);
+  }
+
+  JS_FreeValue(ctx, ns);
+
+  JSValue gen = JS_GetPropertyStr(ctx, state, "gen");
+  int64_t known = -1;
+
+  JS_ToInt64(ctx, &known, gen);
+  JS_FreeValue(ctx, gen);
+
+  // Functions of sloppy modules, by canonical name.  Not emptied with the rest:
+  // a name is only ever made once, and a module that is being loaded must find
+  // its function even if the names move on before it runs.
+  JSValue sloppy_map = JS_GetPropertyStr(ctx, state, "sloppy");
+
+  if (!JS_IsObject(sloppy_map)) {
+    JS_SetPropertyStr(ctx, state, "sloppy", JS_NewObject(ctx));
+  }
+  JS_FreeValue(ctx, sloppy_map);
+
+  if (known != (int64_t)module_generation) {
+    JS_SetPropertyStr(ctx, state, "gen",
+                      JS_NewInt64(ctx, (int64_t)module_generation));
+    JS_SetPropertyStr(ctx, state, "memo", JS_NewObject(ctx));
+    JS_SetPropertyStr(ctx, state, "kinds", JS_NewObject(ctx));
+    JS_SetPropertyStr(ctx, state, "loading", JS_NewObject(ctx));
+  }
+
+  return state;
+}
+
+/**
+ * @brief Whether source is CommonJS: it compiles as the body of a function
+ * with `exports`, `module` and `require`, which an `import` or an `export`
+ * statement does not.
+ */
+static bool pljs_source_is_commonjs(JSContext *ctx, const char *source,
+                                    size_t len) {
+  if (JS_DetectModule(source, len)) {
+    return false;
+  }
+
+  StringInfoData wrapped;
+
+  initStringInfo(&wrapped);
+  appendStringInfoString(&wrapped, "(function (exports, module, require) {");
+  appendBinaryStringInfo(&wrapped, source, (int)len);
+  appendStringInfoString(&wrapped, "\n})");
+
+  JSValue fn = JS_Eval(ctx, wrapped.data, wrapped.len, "<commonjs>",
+                       JS_EVAL_FLAG_COMPILE_ONLY);
+  pfree(wrapped.data);
+
+  if (JS_IsException(fn)) {
+    JS_FreeValue(ctx, JS_GetException(ctx));
+    return false;
+  }
+
+  JS_FreeValue(ctx, fn);
+
+  return true;
+}
+
+/**
+ * @brief Appends a string as a JavaScript string literal.
+ */
+static void pljs_append_js_string(StringInfo out, const char *s) {
+  appendStringInfoChar(out, '"');
+
+  for (; *s; s++) {
+    unsigned char c = (unsigned char)*s;
+
+    if (c == '"' || c == '\\') {
+      appendStringInfoChar(out, '\\');
+      appendStringInfoChar(out, c);
+    } else if (c < 0x20) {
+      appendStringInfo(out, "\\u%04x", c);
+    } else {
+      appendStringInfoChar(out, c);
+    }
+  }
+
+  appendStringInfoChar(out, '"');
+}
+
+/**
+ * @brief Compiles a CommonJS module that asked for sloppy mode.
+ *
+ * Its code is a function compiled as a plain script, which is sloppy unless
+ * the code says otherwise, and the module made for the loader only calls it.
+ * Everything else about it is as for any CommonJS module: its own `module` and
+ * `exports`, `require`, the default export being its `module.exports`.
+ *
+ * @returns #JSValue - the module, compiled, or JS_EXCEPTION
+ */
+static JSValue pljs_compile_sloppy_commonjs(JSContext *ctx, const char *name,
+                                            const char *source, size_t len) {
+  StringInfoData wrapped;
+
+  initStringInfo(&wrapped);
+  appendStringInfoString(&wrapped, "(function (exports, module, require) {");
+  appendBinaryStringInfo(&wrapped, source, (int)len);
+  appendStringInfoString(&wrapped, "\n})");
+
+  JSValue fn = JS_Eval(ctx, wrapped.data, wrapped.len, name, 0);
+  pfree(wrapped.data);
+
+  if (JS_IsException(fn)) {
+    return fn;
+  }
+
+  JSValue state = pljs_module_state(ctx);
+  JSValue sloppy_map = JS_GetPropertyStr(ctx, state, "sloppy");
+
+  JS_SetPropertyStr(ctx, sloppy_map, name, fn);
+  JS_FreeValue(ctx, sloppy_map);
+  JS_FreeValue(ctx, state);
+
+  initStringInfo(&wrapped);
+  appendStringInfoString(&wrapped, "const module = { exports: {} }; pljs."
+                                   PLJS_STATE_PROPERTY ".sloppy[");
+  pljs_append_js_string(&wrapped, name);
+  appendStringInfoString(
+      &wrapped, "].call(module.exports, module.exports, module, "
+                "pljs.require);\nexport default module.exports;\n");
+
+  JSValue compiled = JS_Eval(ctx, wrapped.data, wrapped.len, name,
+                             JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY);
+  pfree(wrapped.data);
+
+  return compiled;
+}
+
+/**
+ * @brief QuickJS module loader: compiles the stored module a canonical name
+ * names.
+ *
+ * A CommonJS module becomes an ES module whose default export is its
+ * `module.exports`, so the two kinds import each other.  The wrapper starts on
+ * the source's first line, so errors still point into the stored source.
+ */
+JSModuleDef *pljs_module_loader(JSContext *ctx, const char *name,
+                                void *opaque) {
+  pljs_module_id id;
+  uint8_t *source = NULL;
+  size_t source_len = 0;
+  bool sloppy = false;
+  JSModuleDef *m = NULL;
+
+  if (!pljs_module_relids()) {
+    module_load_failed = true;
+    JS_ThrowInternalError(ctx, "the pljs module tables are not installed");
+    return NULL;
+  }
+
+  if (!pljs_module_id_parse(name, &id) ||
+      !pljs_fetch_module(&id, &source, &source_len, &sloppy)) {
+    module_load_failed = true;
+    JS_ThrowReferenceError(ctx, "could not load module '%s'", name);
+    pljs_module_id_free(&id);
+    return NULL;
+  }
+
+  pljs_module_id_free(&id);
+
+  bool commonjs = pljs_source_is_commonjs(ctx, (char *)source, source_len);
+  JSValue compiled;
+
+  if (commonjs && sloppy) {
+    compiled = pljs_compile_sloppy_commonjs(ctx, name, (char *)source,
+                                            source_len);
+  } else if (commonjs) {
+    StringInfoData wrapped;
+
+    initStringInfo(&wrapped);
+    appendStringInfoString(
+        &wrapped, "const module = { exports: {} }; (function (exports, module, "
+                  "require) {");
+    appendBinaryStringInfo(&wrapped, (char *)source, (int)source_len);
+    appendStringInfoString(&wrapped,
+                           "\n}).call(module.exports, module.exports, module, "
+                           "pljs.require);\nexport default module.exports;\n");
+
+    compiled = JS_Eval(ctx, wrapped.data, wrapped.len, name,
+                       JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY);
+    pfree(wrapped.data);
+  } else {
+    compiled = JS_Eval(ctx, (char *)source, source_len, name,
+                       JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY);
+  }
+
+  pfree(source);
+
+  if (JS_IsException(compiled)) {
+    module_load_failed = true;
+    return NULL;
+  }
+
+  m = JS_VALUE_GET_PTR(compiled);
+  JS_FreeValue(ctx, compiled);
+
+  if (commonjs) {
+    JSValue state = pljs_module_state(ctx);
+    JSValue kinds = JS_GetPropertyStr(ctx, state, "kinds");
+
+    JS_SetPropertyStr(ctx, kinds, name, JS_TRUE);
+    JS_FreeValue(ctx, kinds);
+    JS_FreeValue(ctx, state);
+  }
+
+  return m;
+}
+
+/**
+ * @brief Waits for a promise, running the jobs that settle it.
+ *
+ * Unlike js_std_await() it gives up, with an error, when nothing is left to
+ * run and the promise still has not settled: a module waiting on one that is
+ * waiting on it, or on an `await` that never finishes, would otherwise spin
+ * the backend forever.
+ *
+ * @param obj #JSValue - the promise; consumed
+ */
+static JSValue pljs_await(JSContext *ctx, JSValue obj) {
+  for (;;) {
+    switch (JS_PromiseState(ctx, obj)) {
+    case JS_PROMISE_FULFILLED: {
+      JSValue ret = JS_PromiseResult(ctx, obj);
+
+      JS_FreeValue(ctx, obj);
+      return ret;
+    }
+    case JS_PROMISE_REJECTED: {
+      JSValue ret = JS_Throw(ctx, JS_PromiseResult(ctx, obj));
+
+      JS_FreeValue(ctx, obj);
+      return ret;
+    }
+    case JS_PROMISE_PENDING: {
+      JSContext *job_ctx;
+
+      int ran = JS_ExecutePendingJob(JS_GetRuntime(ctx), &job_ctx);
+
+      if (ran < 0) {
+        JS_FreeValue(job_ctx, JS_GetException(job_ctx));
+      } else if (ran == 0) {
+        JS_FreeValue(ctx, obj);
+        return JS_ThrowInternalError(
+            ctx, "module did not finish loading: it is waiting on itself, or "
+                 "on an await that never completes");
+      }
+      break;
+    }
+    default:
+      // Not a promise: the value itself.
+      return obj;
+    }
+  }
+}
+
+/**
+ * @brief Imports a canonical name and returns the module's namespace.
+ *
+ * Goes through a dynamic `import()` in a function made once per context, so
+ * QuickJS finds the module it already holds under that name, or loads it.
+ */
+static JSValue pljs_import_canonical(JSContext *ctx, JSValueConst state,
+                                     const char *canonical) {
+  JSValue load = JS_GetPropertyStr(ctx, state, "load");
+
+  if (!JS_IsFunction(ctx, load)) {
+    JS_FreeValue(ctx, load);
+    static const char helper[] = "(function (name) { return import(name); })";
+
+    load = JS_Eval(ctx, helper, sizeof(helper) - 1, "<pljs-import>", 0);
+
+    if (JS_IsException(load)) {
+      return load;
+    }
+
+    JS_SetPropertyStr(ctx, state, "load", JS_DupValue(ctx, load));
+  }
+
+  module_load_failed = false;
+
+  JSValue arg = JS_NewString(ctx, canonical);
+  JSValue promise = JS_Call(ctx, load, JS_UNDEFINED, 1, &arg);
+
+  JS_FreeValue(ctx, arg);
+  JS_FreeValue(ctx, load);
+
+  if (JS_IsException(promise)) {
+    return promise;
+  }
+
+  return pljs_await(ctx, promise);
+}
+
+// Depth of the pljs.import()/pljs.require() calls running now, against
+// pljs.max_module_depth.
+static int module_depth = 0;
+
+/**
+ * @brief One attempt at importing or requiring a stored module.
+ *
+ * @param stale @c bool* - set when the module tables changed while the module
+ * was loading, so the result may be of the wrong generation
+ */
+static JSValue pljs_module_load_once(JSContext *ctx, const char *spec,
+                                     bool as_require, bool *stale) {
+  JSValue state = pljs_module_state(ctx);
+  JSValue memo = JS_GetPropertyStr(ctx, state, "memo");
+  JSValue result = JS_EXCEPTION;
+  pljs_module_id importer, id;
+  char *importer_name = NULL;
+  char *canonical = NULL;
+  uint64 generation = module_generation;
+  uint64 table_changes = module_table_changes;
+  JSValue kinds_before = JS_GetPropertyStr(ctx, state, "kinds");
+
+  memset(&id, 0, sizeof(id));
+  *stale = false;
+
+  // Level 1 is the code that called this native function.
+  bool has_importer = pljs_running_module(ctx, 1, &importer);
+
+  if (has_importer) {
+    importer_name = pljs_module_id_format(&importer);
+  }
+
+  char *key = psprintf("%c\x1f%s\x1f%s", as_require ? 'r' : 'i',
+                       importer_name ? importer_name : "", spec);
+  JSValue hit = JS_GetPropertyStr(ctx, memo, key);
+
+  if (!JS_IsUndefined(hit)) {
+    result = hit;
+    goto done;
+  }
+
+  pljs_resolve_result resolved =
+      pljs_resolve_spec(spec, has_importer ? &importer : NULL, &id);
+
+  if (resolved != PLJS_RESOLVED) {
+    pljs_throw_unresolved(ctx, resolved, spec);
+    goto done;
+  }
+
+  canonical = pljs_module_id_format(&id);
+
+  JSValue loading = JS_GetPropertyStr(ctx, state, "loading");
+  JSValue being = JS_GetPropertyStr(ctx, loading, canonical);
+
+  if (JS_ToBool(ctx, being)) {
+    JS_ThrowInternalError(ctx, "circular module dependency: '%s' is loading",
+                          spec);
+  } else {
+    JS_SetPropertyStr(ctx, loading, canonical, JS_TRUE);
+    module_depth++;
+
+    JSValue ns = pljs_import_canonical(ctx, state, canonical);
+
+    module_depth--;
+
+    JSAtom atom = JS_NewAtom(ctx, canonical);
+
+    JS_DeleteProperty(ctx, loading, atom, 0);
+    JS_FreeAtom(ctx, atom);
+
+    if (module_table_changes != table_changes) {
+      // The tables changed while it loaded, so it may be the old modules under
+      // a new name; the caller tries again.
+      *stale = true;
+
+      if (JS_IsException(ns)) {
+        JS_FreeValue(ctx, JS_GetException(ctx));
+      } else {
+        JS_FreeValue(ctx, ns);
+      }
+    } else if (JS_IsException(ns)) {
+      // A module that threw while it was evaluated stays broken under its
+      // name, so move the names on; see module_generation.  Not for one that
+      // was merely not found, which left nothing behind.
+      if (!module_load_failed) {
+        module_generation++;
+      }
+    } else {
+      // The loader noted a CommonJS module in the kinds of whichever state was
+      // current as it loaded.
+      JSValue kinds = JS_GetPropertyStr(ctx, state, "kinds");
+      JSValue is_cjs = JS_GetPropertyStr(ctx, kinds, canonical);
+
+      if (!JS_ToBool(ctx, is_cjs)) {
+        JS_FreeValue(ctx, is_cjs);
+        is_cjs = JS_GetPropertyStr(ctx, kinds_before, canonical);
+      }
+
+      if (as_require && JS_ToBool(ctx, is_cjs)) {
+        result = JS_GetPropertyStr(ctx, ns, "default");
+        JS_FreeValue(ctx, ns);
+      } else {
+        result = ns;
+      }
+
+      JS_FreeValue(ctx, is_cjs);
+      JS_FreeValue(ctx, kinds);
+
+      // Remembered unless the names moved on meanwhile, which emptied the
+      // state this was loaded against.
+      if (!JS_IsException(result) && module_generation == generation) {
+        JS_SetPropertyStr(ctx, memo, key, JS_DupValue(ctx, result));
+      }
+    }
+  }
+
+  JS_FreeValue(ctx, being);
+  JS_FreeValue(ctx, loading);
+
+done:
+  if (canonical) {
+    pfree(canonical);
+  }
+  if (has_importer) {
+    pljs_module_id_free(&importer);
+  }
+  if (importer_name) {
+    pfree(importer_name);
+  }
+  pljs_module_id_free(&id);
+  pfree(key);
+  JS_FreeValue(ctx, kinds_before);
+  JS_FreeValue(ctx, memo);
+  JS_FreeValue(ctx, state);
 
   return result;
 }
 
 /**
- * @brief Package and depth state saved around a nested import or require.
+ * @brief Import or require a stored module.
+ *
+ * What an import resolved to is remembered per context, by the module it was
+ * written in and the specifier, so the second `pljs.import('x')` in a function
+ * does no catalog reads at all.  It is forgotten, with the module, when the
+ * generation moves on.
+ *
+ * Any failure leaves the JavaScript exception pending.
+ *
+ * @param spec @c char* - what the code asked for
+ * @param as_require @c bool - whether to give a CommonJS module's exports
+ * rather than its namespace
  */
-typedef struct pljs_module_scope {
-  const char *package_name;
-  const char *package_version;
-} pljs_module_scope;
+static JSValue pljs_module_load(JSContext *ctx, const char *spec,
+                                bool as_require) {
+  const char *what = as_require ? "require" : "import";
 
-static pljs_module_scope pljs_module_scope_enter(
-    const pljs_resolved_module *resolved) {
-  pljs_module_scope saved = {current_package_name, current_package_version};
+  if (module_depth >= configuration.max_module_depth) {
+    return JS_ThrowInternalError(
+        ctx, "module %s depth exceeded (%d): possible circular dependency",
+        what, configuration.max_module_depth);
+  }
 
-  current_package_name = resolved->package_name;
-  current_package_version = resolved->package_version;
-  current_module_depth++;
+  // See changes other backends have committed since this one last looked.
+  AcceptInvalidationMessages();
 
-  return saved;
-}
+  if (!pljs_module_relids()) {
+    return JS_ThrowInternalError(ctx,
+                                 "the pljs module tables are not installed");
+  }
 
-static void pljs_module_scope_leave(pljs_module_scope saved) {
-  current_package_name = saved.package_name;
-  current_package_version = saved.package_version;
-  current_module_depth--;
+  /*
+   * Looking at the tables can itself show this backend a change that was
+   * committed meanwhile.  A load that straddles one is done again, under the
+   * new generation.
+   *
+   * The tables are read in the middle of QuickJS's work, and a PostgreSQL error
+   * there -- a cancel while waiting for a lock on them, running out of memory
+   * -- leaves for the caller without unwinding what this keeps: how deep the
+   * loads are, and which modules are marked as loading, the latter of which
+   * would make every later import of them a "circular dependency".
+   */
+  volatile int saved_depth = module_depth;
+  volatile bool loaded = false;
+  JSValue volatile result = JS_UNDEFINED;
+
+  PG_TRY();
+  {
+    for (int attempt = 0; attempt < 3 && !loaded; attempt++) {
+      bool stale;
+      JSValue attempted = pljs_module_load_once(ctx, spec, as_require, &stale);
+
+      if (stale) {
+        JS_FreeValue(ctx, attempted);
+      } else {
+        result = attempted;
+        loaded = true;
+      }
+    }
+  }
+  PG_CATCH();
+  {
+    module_depth = saved_depth;
+
+    JSValue state = pljs_module_state(ctx);
+
+    JS_SetPropertyStr(ctx, state, "loading", JS_NewObject(ctx));
+    JS_FreeValue(ctx, state);
+
+    PG_RE_THROW();
+  }
+  PG_END_TRY();
+
+  if (loaded) {
+    return result;
+  }
+
+  return JS_ThrowInternalError(ctx, "module '%s' kept changing while it loaded",
+                               spec);
 }
 
 /**
  * @brief Import a JavaScript module from the database.
  *
- * Any failure leaves the JavaScript exception pending, so the caller sees the
- * real error (a syntax error in the module, or whatever it threw).
- *
  * @param ctx The JavaScript context to use for loading the module.
- * @param module_name The name of the module to load.
+ * @param module_name What to import.
  * @returns JSValue The module namespace, or JS_EXCEPTION.
  */
 JSValue pljs_module_import(JSContext *ctx, const char *module_name) {
-  if (current_module_depth >= configuration.max_module_depth) {
-    return JS_ThrowInternalError(
-        ctx, "module import depth exceeded (%d): possible circular dependency",
-        configuration.max_module_depth);
-  }
-
-  pljs_resolved_module resolved = pljs_resolve_module(module_name);
-
-  if (!resolved.source) {
-    return JS_ThrowReferenceError(ctx, "could not load module '%s'",
-                                  module_name);
-  }
-
-  pljs_module_scope saved = pljs_module_scope_enter(&resolved);
-  JSValue ret = JS_EXCEPTION;
-
-  JSValue res = JS_Eval(ctx, (char *)resolved.source, resolved.source_len,
-                        module_name,
-                        JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY);
-  pfree(resolved.source);
-
-  if (JS_IsException(res)) {
-    goto done;
-  }
-
-  if (JS_ResolveModule(ctx, res) < 0) {
-    JS_FreeValue(ctx, res);
-    goto done;
-  }
-
-  JSValue mod_res = JS_EvalFunction(ctx, JS_DupValue(ctx, res));
-  mod_res = js_std_await(ctx, mod_res);
-
-  if (JS_IsException(mod_res)) {
-    JS_FreeValue(ctx, res);
-    goto done;
-  }
-  JS_FreeValue(ctx, mod_res);
-
-  JSModuleDef *m = JS_VALUE_GET_PTR(res);
-  JS_FreeValue(ctx, res);
-  ret = JS_GetModuleNamespace(ctx, m);
-
-done:
-  pljs_module_scope_leave(saved);
-
-  return ret;
+  return pljs_module_load(ctx, module_name, false);
 }
 
 /**
- * @brief Require a JavaScript commonjs module from the database.
- *
- * The module runs inside a function that is given its own `exports` and
- * `module`, so nothing leaks into the global object and a nested require
- * cannot overwrite the module that is requiring it.  Any failure leaves the
- * JavaScript exception pending.
+ * @brief Require a JavaScript module from the database.
  *
  * @param ctx The JavaScript context to use for loading the module.
- * @param module_name The name of the module to load.
- * @returns JSValue The module's exports, or JS_EXCEPTION.
+ * @param module_name What to require.
+ * @returns JSValue A CommonJS module's `module.exports`, or an ES module's
+ * namespace, or JS_EXCEPTION.
  */
 JSValue pljs_module_require(JSContext *ctx, const char *module_name) {
-  if (current_module_depth >= configuration.max_module_depth) {
-    return JS_ThrowInternalError(
-        ctx, "module require depth exceeded (%d): possible circular dependency",
-        configuration.max_module_depth);
-  }
-
-  pljs_resolved_module resolved = pljs_resolve_module(module_name);
-
-  if (!resolved.source) {
-    return JS_ThrowReferenceError(ctx, "could not load module '%s'",
-                                  module_name);
-  }
-
-  pljs_module_scope saved = pljs_module_scope_enter(&resolved);
-  JSValue ret = JS_EXCEPTION;
-
-  /*
-   * The wrapper's first line is the source's first line, so error positions
-   * still point into the module.  The trailing newline guards against a
-   * final "//" comment swallowing the closing brace.
-   */
-  StringInfoData wrapped;
-  initStringInfo(&wrapped);
-  appendStringInfoString(&wrapped, "(function (exports, module) {");
-  appendBinaryStringInfo(&wrapped, (char *)resolved.source,
-                         (int)resolved.source_len);
-  appendStringInfoString(&wrapped, "\n})");
-  pfree(resolved.source);
-
-  JSValue fn = JS_Eval(ctx, wrapped.data, wrapped.len, module_name, 0);
-  pfree(wrapped.data);
-
-  if (JS_IsException(fn)) {
-    goto done;
-  }
-
-  JSValue module_obj = JS_NewObject(ctx);
-  JSValue exports_obj = JS_NewObject(ctx);
-  JS_SetPropertyStr(ctx, module_obj, "exports", JS_DupValue(ctx, exports_obj));
-
-  JSValue args[2] = {exports_obj, module_obj};
-  JSValue call_res = JS_Call(ctx, fn, exports_obj, 2, args);
-  JS_FreeValue(ctx, fn);
-
-  if (JS_IsException(call_res)) {
-    JS_FreeValue(ctx, exports_obj);
-    JS_FreeValue(ctx, module_obj);
-    goto done;
-  }
-  JS_FreeValue(ctx, call_res);
-
-  // module.exports may have been reassigned; that wins over `exports`.
-  ret = JS_GetPropertyStr(ctx, module_obj, "exports");
-
-  JS_FreeValue(ctx, exports_obj);
-  JS_FreeValue(ctx, module_obj);
-
-done:
-  pljs_module_scope_leave(saved);
-
-  return ret;
+  return pljs_module_load(ctx, module_name, true);
 }

@@ -216,6 +216,89 @@ DO $$
   pljs.elog(INFO, 'mismatches: ' + bad.length);
 $$ LANGUAGE pljs;
 INFO:  mismatches: 0
+-- ============================================================
+-- Modules inside a package import each other, and their own package
+-- ============================================================
+INSERT INTO pljs.packages (name, version, entry_point) VALUES
+  ('Inner', '1.0.0', 'index'),
+  ('Inner', '2.0.0', 'index');
+INSERT INTO pljs.modules (path, source, package_name, package_version) VALUES
+  ('index', 'import { helper } from "./lib/helper"; import { name } from "Inner/lib/named"; export const out = helper() + ":" + name;', 'Inner', '1.0.0'),
+  ('lib/helper', 'import { version } from "../version"; export function helper() { return "v" + version; }', 'Inner', '1.0.0'),
+  ('lib/named', 'export const name = "one";', 'Inner', '1.0.0'),
+  ('version', 'export const version = 1;', 'Inner', '1.0.0'),
+  ('index', 'import { helper } from "./lib/helper"; import { name } from "Inner/lib/named"; export const out = helper() + ":" + name;', 'Inner', '2.0.0'),
+  ('lib/helper', 'import { version } from "../version"; export function helper() { return "v" + version; }', 'Inner', '2.0.0'),
+  ('lib/named', 'export const name = "two";', 'Inner', '2.0.0'),
+  ('version', 'export const version = 2;', 'Inner', '2.0.0');
+-- The latest version's modules import that version's siblings, not the other's.
+DO $$
+  pljs.elog(INFO, pljs.import('Inner').out);
+$$ LANGUAGE pljs;
+INFO:  v2:two
+-- A package reaches the version its dependencies ask for through static import.
+INSERT INTO pljs.packages (name, version, entry_point, dependencies) VALUES
+  ('UsesOld', '1.0.0', 'index', '{"Inner": "^1.0.0"}');
+INSERT INTO pljs.modules (path, source, package_name, package_version) VALUES
+  ('index', 'import { out } from "Inner"; export const got = out;', 'UsesOld', '1.0.0');
+DO $$
+  pljs.elog(INFO, pljs.import('UsesOld').got);
+$$ LANGUAGE pljs;
+INFO:  v1:one
+-- ============================================================
+-- Changing a package invalidates what was loaded from it
+-- ============================================================
+INSERT INTO pljs.packages (name, version, entry_point) VALUES ('Moving', '1.0.0', 'index');
+INSERT INTO pljs.modules (path, source, package_name, package_version) VALUES
+  ('index', 'module.exports = "moving 1.0.0";', 'Moving', '1.0.0');
+DO $$ pljs.elog(INFO, pljs.require('Moving')); $$ LANGUAGE pljs;
+INFO:  moving 1.0.0
+-- A newer version appears: it becomes the latest.
+INSERT INTO pljs.packages (name, version, entry_point) VALUES ('Moving', '1.1.0', 'index');
+INSERT INTO pljs.modules (path, source, package_name, package_version) VALUES
+  ('index', 'module.exports = "moving 1.1.0";', 'Moving', '1.1.0');
+DO $$ pljs.elog(INFO, pljs.require('Moving')); $$ LANGUAGE pljs;
+INFO:  moving 1.1.0
+-- A module of the package is rewritten.
+UPDATE pljs.modules SET source = 'module.exports = "moving 1.1.0 rewritten";'
+  WHERE package_name = 'Moving' AND package_version = '1.1.0';
+DO $$ pljs.elog(INFO, pljs.require('Moving')); $$ LANGUAGE pljs;
+INFO:  moving 1.1.0 rewritten
+-- Its entry point moves.
+INSERT INTO pljs.modules (path, source, package_name, package_version) VALUES
+  ('main', 'module.exports = "moving via main";', 'Moving', '1.1.0');
+UPDATE pljs.packages SET entry_point = 'main' WHERE name = 'Moving' AND version = '1.1.0';
+DO $$ pljs.elog(INFO, pljs.require('Moving')); $$ LANGUAGE pljs;
+INFO:  moving via main
+-- The newest version is removed: the previous one is the latest again.
+DELETE FROM pljs.modules WHERE package_name = 'Moving' AND package_version = '1.1.0';
+DELETE FROM pljs.packages WHERE name = 'Moving' AND version = '1.1.0';
+DO $$ pljs.elog(INFO, pljs.require('Moving')); $$ LANGUAGE pljs;
+INFO:  moving 1.0.0
+-- ============================================================
+-- A standalone module does not replace a package's declared dependency
+-- ============================================================
+INSERT INTO pljs.packages (name, version, entry_point) VALUES ('Shadowed', '1.0.0', 'index');
+INSERT INTO pljs.modules (path, source, package_name, package_version) VALUES
+  ('index', 'module.exports = "the package";', 'Shadowed', '1.0.0');
+INSERT INTO pljs.modules (path, source) VALUES ('Shadowed', 'module.exports = "a standalone module";');
+INSERT INTO pljs.packages (name, version, entry_point, dependencies) VALUES
+  ('NeedsShadowed', '1.0.0', 'index', '{"Shadowed": "^1.0.0"}'),
+  ('NamesShadowed', '1.0.0', 'index', '{}');
+INSERT INTO pljs.modules (path, source, package_name, package_version) VALUES
+  ('index', 'module.exports = pljs.require("Shadowed");', 'NeedsShadowed', '1.0.0'),
+  ('index', 'module.exports = pljs.require("Shadowed");', 'NamesShadowed', '1.0.0');
+DO $$
+  // Code that is not in a package: the standalone module, as its whole name.
+  pljs.elog(INFO, pljs.require('Shadowed'));
+  // A package that depends on it: the package.
+  pljs.elog(INFO, pljs.require('NeedsShadowed'));
+  // A package that does not list it: the standalone module, as before.
+  pljs.elog(INFO, pljs.require('NamesShadowed'));
+$$ LANGUAGE pljs;
+INFO:  a standalone module
+INFO:  the package
+INFO:  a standalone module
 -- Cleanup
 DELETE FROM pljs.modules;
 DELETE FROM pljs.packages;

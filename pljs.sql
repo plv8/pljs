@@ -44,6 +44,10 @@ CREATE TABLE IF NOT EXISTS pljs.modules (
   package_version TEXT,
   created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMP WITH TIME ZONE,
+  -- A CommonJS module that needs sloppy mode (implicit globals, `with`, octal
+  -- literals) rather than the strict mode an ES module imposes.  Has no effect
+  -- on an ES module, which is always strict.
+  sloppy BOOLEAN NOT NULL DEFAULT false,
   FOREIGN KEY (package_name, package_version) REFERENCES pljs.packages (name, version)
 );
 
@@ -56,3 +60,20 @@ CREATE UNIQUE INDEX IF NOT EXISTS pljs_modules_package_path ON pljs.modules (pac
 CREATE INDEX IF NOT EXISTS pljs_modules_path ON pljs.modules (path);
 CREATE INDEX IF NOT EXISTS pljs_modules_pkg ON pljs.modules (package_name, package_version, path);
 CREATE INDEX IF NOT EXISTS pljs_packages_name ON pljs.packages (name);
+
+-- Changing the module tables invalidates every backend's loaded modules: this
+-- trigger makes the change visible to them (see src/modules.c).  It is ENABLE
+-- ALWAYS so that replication and restores keep invalidating too.
+CREATE OR REPLACE FUNCTION pljs_modules_changed() RETURNS trigger
+ AS 'MODULE_PATHNAME', 'pljs_modules_changed'
+ LANGUAGE C;
+
+CREATE TRIGGER pljs_modules_changed
+  AFTER INSERT OR UPDATE OR DELETE OR TRUNCATE ON pljs.modules
+  FOR EACH STATEMENT EXECUTE FUNCTION pljs_modules_changed();
+ALTER TABLE pljs.modules ENABLE ALWAYS TRIGGER pljs_modules_changed;
+
+CREATE TRIGGER pljs_modules_changed
+  AFTER INSERT OR UPDATE OR DELETE OR TRUNCATE ON pljs.packages
+  FOR EACH STATEMENT EXECUTE FUNCTION pljs_modules_changed();
+ALTER TABLE pljs.packages ENABLE ALWAYS TRIGGER pljs_modules_changed;

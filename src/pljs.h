@@ -357,9 +357,10 @@ ParamListInfo pljs_setup_variable_paramlist(pljs_param_state *, Datum *,
                                             char *);
 
 // modules.c
-JSModuleDef *pljs_defaultjs_module_loader(JSContext *ctx,
-                                          const char *module_name,
-                                          void *opaque);
+void pljs_modules_init(void);
+char *pljs_module_normalize(JSContext *ctx, const char *base_name,
+                            const char *name, void *opaque);
+JSModuleDef *pljs_module_loader(JSContext *ctx, const char *name, void *opaque);
 JSValue pljs_module_import(JSContext *ctx, const char *module_name);
 extern PGDLLEXPORT JSValue pljs_module_require(JSContext *ctx,
                                                const char *module_name);

@@ -62,3 +62,10 @@ Released _January 27, 2026_.
 - Module source is converted from the database encoding to UTF-8
 - Fixed module and package lookups missing rows when the database collation is
   not `C`
+- Stored modules load through the QuickJS module system: `import` statements
+  and relative paths work inside modules, and each module is evaluated once
+  per session and shared
+- Changing `pljs.modules` or `pljs.packages` takes effect in every session
+  without a reload (see [MODULES.md](MODULES.md))
+- CommonJS modules run in strict mode, as ES modules do, unless their row in
+  `pljs.modules` has `sloppy` set

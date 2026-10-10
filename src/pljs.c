@@ -159,6 +159,9 @@ void pljs_runtime_init(void) {
     JS_SetMemoryLimit(rt, configuration.memory_limit * 1024 * 1024);
   }
 
+  // Stored modules are loaded through QuickJS's module system.
+  JS_SetModuleLoaderFunc(rt, pljs_module_normalize, pljs_module_loader, NULL);
+
   // Initialize hook JS classes.
   pljs_hooks_init(rt);
 }
@@ -188,6 +191,9 @@ void _PG_init(void) {
 
   // Set up the quickjs runtime.
   pljs_runtime_init();
+
+  // Notice changes to the module tables.
+  pljs_modules_init();
 
   // Install hook callbacks.
   pljs_hooks_install();

@@ -292,15 +292,13 @@ DO $$
 $$ LANGUAGE pljs;
 
 -- ============================================================
--- Circular imports stop at pljs.max_module_depth
+-- Circular imports are an error, not a hang
 -- ============================================================
 INSERT INTO pljs.modules (path, source) VALUES
   ('circ/a', 'const b = pljs.import("circ/b"); export const a = 1;'),
   ('circ/b', 'const a = pljs.import("circ/a"); export const b = 1;'),
   ('circ/c', 'const c = pljs.require("circ/d"); exports.c = 1;'),
   ('circ/d', 'const c = pljs.require("circ/c"); exports.d = 1;');
-
-SET pljs.max_module_depth = 8;
 
 DO $$
   try {
@@ -320,14 +318,46 @@ DO $$
   }
 $$ LANGUAGE pljs;
 
+-- ============================================================
+-- A chain deeper than pljs.max_module_depth stops
+-- ============================================================
+INSERT INTO pljs.modules (path, source)
+  SELECT 'chain/' || n, 'const next = pljs.import("chain/' || (n + 1) || '"); export const depth = next.depth + 1;'
+  FROM generate_series(0, 9) AS n;
+INSERT INTO pljs.modules (path, source) VALUES ('chain/10', 'export const depth = 0;');
+
+SET pljs.max_module_depth = 5;
+
+DO $$
+  try {
+    pljs.import('chain/0');
+    pljs.elog(ERROR, 'should not reach here');
+  } catch (e) {
+    pljs.elog(INFO, e.message);
+  }
+$$ LANGUAGE pljs;
+
 RESET pljs.max_module_depth;
 
--- The depth counter was unwound: ordinary imports still work at a low limit.
-SET pljs.max_module_depth = 2;
+-- The depth was unwound by the failure: the whole chain loads at the default.
 DO $$
-  pljs.elog(INFO, pljs.import('constants').PI);
+  pljs.elog(INFO, pljs.import('chain/0').depth);
 $$ LANGUAGE pljs;
-RESET pljs.max_module_depth;
+
+-- ============================================================
+-- A module that waits forever fails instead of hanging the backend
+-- ============================================================
+INSERT INTO pljs.modules (path, source) VALUES
+  ('hang', 'await new Promise(function () {}); export const x = 1;');
+
+DO $$
+  try {
+    pljs.import('hang');
+    pljs.elog(ERROR, 'should not reach here');
+  } catch (e) {
+    pljs.elog(INFO, e.message);
+  }
+$$ LANGUAGE pljs;
 
 -- ============================================================
 -- Standalone lookups agree with the index's collation
@@ -365,6 +395,245 @@ DO $$
   var u = pljs.require('cjs/unicode');
   pljs.elog(INFO, u.raw + ' ' + u.raw.length + ' ' + (u.raw === u.word));
 $$ LANGUAGE pljs;
+
+
+-- ============================================================
+-- A module is evaluated once and shared
+-- ============================================================
+INSERT INTO pljs.modules (path, source) VALUES
+  ('once/counter', 'globalThis.__evaluations = (globalThis.__evaluations || 0) + 1; export const state = { n: 0 };'),
+  ('once/a', 'import { state } from "once/counter"; export function bump() { return ++state.n; }'),
+  ('once/b', 'import { state } from "once/counter"; export function read() { return state.n; }');
+
+DO $$
+  var a = pljs.import('once/a');
+  var b = pljs.import('once/b');
+  a.bump(); a.bump();
+  pljs.elog(INFO, 'b sees ' + b.read());
+  pljs.elog(INFO, 'same namespace: ' + (pljs.import('once/a') === a));
+  pljs.elog(INFO, 'evaluated ' + globalThis.__evaluations + ' time');
+$$ LANGUAGE pljs;
+
+-- Remembered across calls of a function, too.
+CREATE FUNCTION use_once() RETURNS int AS $$
+  return pljs.import('once/a').bump();
+$$ LANGUAGE pljs;
+SELECT use_once(), use_once(), use_once();
+DROP FUNCTION use_once();
+
+-- ============================================================
+-- Static import inside stored modules
+-- ============================================================
+INSERT INTO pljs.modules (path, source) VALUES
+  ('static/base', 'export const BASE = 100; export default function triple(n) { return n * 3; }'),
+  ('static/lib/util', 'import triple, { BASE } from "../base"; export const scaled = triple(2) + BASE;'),
+  ('static/lib/sibling', 'import { scaled } from "./util"; export const doubled = scaled * 2;'),
+  ('static/cjs_dep', 'exports.answer = 42;'),
+  ('static/uses_cjs', 'import dep from "static/cjs_dep"; export const answer = dep.answer;'),
+  ('static/esm_for_cjs', 'export const v = "from esm";'),
+  ('static/cjs_uses_esm', 'var esm = pljs.require("static/esm_for_cjs"); exports.v = esm.v;'),
+  ('static/up', 'import x from "../../../nowhere"; export default x;');
+
+DO $$
+  pljs.elog(INFO, pljs.import('static/lib/sibling').doubled);
+  pljs.elog(INFO, pljs.import('static/uses_cjs').answer);
+  pljs.elog(INFO, pljs.require('static/cjs_uses_esm').v);
+  pljs.elog(INFO, pljs.require('static/cjs_dep').answer + ' ' + Object.keys(pljs.import('static/cjs_dep')).join());
+$$ LANGUAGE pljs;
+
+DO $$
+  try {
+    pljs.import('static/up');
+    pljs.elog(ERROR, 'should not reach here');
+  } catch (e) {
+    pljs.elog(INFO, e.message);
+  }
+$$ LANGUAGE pljs;
+
+-- A relative specifier means nothing outside a stored module.
+DO $$
+  try {
+    pljs.import('./base');
+    pljs.elog(ERROR, 'should not reach here');
+  } catch (e) {
+    pljs.elog(INFO, e.message);
+  }
+$$ LANGUAGE pljs;
+
+-- ============================================================
+-- Changing a module invalidates it
+-- ============================================================
+INSERT INTO pljs.modules (path, source) VALUES
+  ('inv/leaf', 'export const v = 1;'),
+  ('inv/mid', 'import { v } from "inv/leaf"; export const mid = v + 10;'),
+  ('inv/cjs', 'exports.v = "one";');
+
+CREATE FUNCTION inv_value() RETURNS text AS $$
+  return pljs.import('inv/mid').mid + ' ' + pljs.require('inv/cjs').v;
+$$ LANGUAGE pljs;
+
+SELECT inv_value();
+SELECT inv_value();
+
+-- UPDATE: a dependency changes, and so does what depends on it.
+UPDATE pljs.modules SET source = 'export const v = 2;' WHERE path = 'inv/leaf';
+UPDATE pljs.modules SET source = 'exports.v = "two";' WHERE path = 'inv/cjs';
+SELECT inv_value();
+
+-- Inside one transaction, and undone by a rollback.
+BEGIN;
+UPDATE pljs.modules SET source = 'export const v = 3;' WHERE path = 'inv/leaf';
+SELECT inv_value();
+ROLLBACK;
+SELECT inv_value();
+
+-- DELETE: the module is gone, and the error says so.
+DELETE FROM pljs.modules WHERE path = 'inv/leaf';
+DO $$
+  try {
+    pljs.import('inv/mid');
+    pljs.elog(ERROR, 'should not reach here');
+  } catch (e) {
+    pljs.elog(INFO, e.message);
+  }
+$$ LANGUAGE pljs;
+
+-- INSERT: and it is back.
+INSERT INTO pljs.modules (path, source) VALUES ('inv/leaf', 'export const v = 4;');
+SELECT inv_value();
+
+-- A module whose evaluation failed is tried again once it is fixed.
+INSERT INTO pljs.modules (path, source) VALUES ('inv/broken', 'throw new Error("not yet"); export const ok = 1;');
+DO $$
+  try { pljs.import('inv/broken'); } catch (e) { pljs.elog(INFO, e.message); }
+  try { pljs.import('inv/broken'); } catch (e) { pljs.elog(INFO, 'again: ' + e.message); }
+$$ LANGUAGE pljs;
+UPDATE pljs.modules SET source = 'export const ok = "fixed";' WHERE path = 'inv/broken';
+DO $$
+  pljs.elog(INFO, pljs.import('inv/broken').ok);
+$$ LANGUAGE pljs;
+
+-- TRUNCATE empties the table and invalidates too.
+SELECT inv_value();
+TRUNCATE pljs.modules;
+DO $$
+  try {
+    pljs.import('inv/mid');
+    pljs.elog(ERROR, 'should not reach here');
+  } catch (e) {
+    pljs.elog(INFO, e.message);
+  }
+$$ LANGUAGE pljs;
+
+-- Another session changes a module while this one has it loaded.
+INSERT INTO pljs.modules (path, source) VALUES ('inv/shared', 'export const who = "first";');
+DO $$ pljs.elog(INFO, pljs.import('inv/shared').who); $$ LANGUAGE pljs;
+\! psql -X -q -d contrib_regression -o /dev/null -c "UPDATE pljs.modules SET source = 'export const who = \"second\";' WHERE path = 'inv/shared'"
+DO $$ pljs.elog(INFO, pljs.import('inv/shared').who); $$ LANGUAGE pljs;
+
+DROP FUNCTION inv_value();
+DELETE FROM pljs.modules;
+
+
+-- ============================================================
+-- Resetting drops the loaded modules with their contexts
+-- ============================================================
+INSERT INTO pljs.modules (path, source) VALUES
+  ('reset/dep', 'export const v = "dep";'),
+  ('reset/top', 'import { v } from "reset/dep"; export const t = v + "!";'),
+  ('reset/cjs', 'exports.c = pljs.import("reset/top").t;');
+DO $$ pljs.elog(INFO, pljs.require('reset/cjs').c); $$ LANGUAGE pljs;
+SELECT pljs_reset();
+DO $$ pljs.elog(INFO, pljs.require('reset/cjs').c); $$ LANGUAGE pljs;
+SELECT pljs_reset();
+DELETE FROM pljs.modules;
+
+
+-- ============================================================
+-- A repeatable-read transaction reads the modules as it began, and what it
+-- loaded is not kept past it
+-- ============================================================
+INSERT INTO pljs.modules (path, source) VALUES ('rr/m', 'export const v = 1;');
+BEGIN ISOLATION LEVEL REPEATABLE READ;
+SELECT count(*) FROM pljs.modules WHERE path = 'rr/m';
+\! psql -X -q -d contrib_regression -o /dev/null -c "UPDATE pljs.modules SET source = 'export const v = 2;' WHERE path = 'rr/m'"
+DO $$ pljs.elog(INFO, 'in the transaction: ' + pljs.import('rr/m').v); $$ LANGUAGE pljs;
+COMMIT;
+DO $$ pljs.elog(INFO, 'after it: ' + pljs.import('rr/m').v); $$ LANGUAGE pljs;
+DELETE FROM pljs.modules;
+
+
+-- ============================================================
+-- Sloppy mode, for CommonJS modules that ask for it
+-- ============================================================
+INSERT INTO pljs.modules (path, source) VALUES
+  ('sl/implicit', 'implicit_global = 5; exports.v = implicit_global;'),
+  ('sl/toggle', 'toggle_global = 7; exports.v = toggle_global;'),
+  ('sl/with', 'var o = { a: 1 }; with (o) { exports.v = a; }'),
+  ('sl/octal', 'exports.v = 010;');
+INSERT INTO pljs.modules (path, source, sloppy) VALUES
+  ('sl/implicit_ok', 'implicit_global = 5; exports.v = implicit_global;', true),
+  ('sl/with_ok', 'var o = { a: 1 }; with (o) { exports.v = a; }', true),
+  ('sl/octal_ok', 'exports.v = 010;', true),
+  ('sl/q"uote\back', 'exports.name = "quoted"; exports.self = typeof module + typeof exports + typeof require; exports.thisIsExports = this === exports;', true),
+  ('sl/esm', 'export const strict = (function () { return this === undefined; })();', true);
+
+-- Strict unless asked otherwise.
+DO $$
+  ['sl/implicit', 'sl/with', 'sl/octal'].forEach(function (m) {
+    try {
+      pljs.require(m);
+      pljs.elog(ERROR, m + ' should not load');
+    } catch (e) {
+      pljs.elog(INFO, m + ': ' + e.name);
+    }
+  });
+$$ LANGUAGE pljs;
+
+DO $$
+  pljs.elog(INFO, pljs.require('sl/implicit_ok').v);
+  pljs.elog(INFO, pljs.require('sl/with_ok').v);
+  pljs.elog(INFO, pljs.require('sl/octal_ok').v);
+  var q = pljs.require('sl/q"uote\\back');
+  pljs.elog(INFO, q.name + ' ' + q.self + ' ' + q.thisIsExports);
+$$ LANGUAGE pljs;
+
+-- It imports like any other CommonJS module, and is still a module of its own.
+INSERT INTO pljs.modules (path, source) VALUES
+  ('sl/importer', 'import m from "sl/with_ok"; export const v = m.v + 1;');
+DO $$ pljs.elog(INFO, pljs.import('sl/importer').v); $$ LANGUAGE pljs;
+
+-- An ES module is strict whatever it asks.
+DO $$ pljs.elog(INFO, 'esm strict: ' + pljs.import('sl/esm').strict); $$ LANGUAGE pljs;
+
+-- Turning it on, or off, takes effect without a reload.
+UPDATE pljs.modules SET sloppy = true WHERE path = 'sl/toggle';
+DO $$ pljs.elog(INFO, pljs.require('sl/toggle').v); $$ LANGUAGE pljs;
+UPDATE pljs.modules SET sloppy = false WHERE path = 'sl/toggle';
+DO $$
+  // The sloppy run made a global of its own; take it away, so that strict mode
+  // has something to refuse.
+  delete globalThis.toggle_global;
+  try {
+    pljs.require('sl/toggle');
+    pljs.elog(ERROR, 'should not reach here');
+  } catch (e) {
+    pljs.elog(INFO, 'strict again: ' + e.name);
+  }
+$$ LANGUAGE pljs;
+
+-- Errors in a sloppy module still point into its own source.
+INSERT INTO pljs.modules (path, source, sloppy) VALUES
+  ('sl/throws', E'var a = 1;\nthrow new Error("sloppy failure");', true);
+DO $$
+  try {
+    pljs.require('sl/throws');
+  } catch (e) {
+    pljs.elog(INFO, e.message + ' ' + e.stack.split('\n')[0].replace(/#[0-9]+/, '#N').trim());
+  }
+$$ LANGUAGE pljs;
+
+DELETE FROM pljs.modules;
 
 
 -- Cleanup
