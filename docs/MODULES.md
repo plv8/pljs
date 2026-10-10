@@ -19,7 +19,7 @@ $$ LANGUAGE pljs;
 |---|---|
 | `pljs.import(name)` | Returns the module's namespace (`{ hello }` above). |
 | `pljs.require(name)` | Returns a CommonJS module's `module.exports`; for an ES module, the same namespace as `pljs.import()`. |
-| `import ... from 'name'` | Inside a stored module. |
+| `import ... from 'name'` | Inside a stored module, or at the start of a function. |
 
 A module is CommonJS if its source can be the body of a function that is given
 `exports`, `module` and `require`; if it uses `import` or `export` it is an ES
@@ -40,7 +40,37 @@ INSERT INTO pljs.modules (path, source, sloppy) VALUES
 ```
 
 The flag can be changed with an `UPDATE`, and takes effect like any other change to a
-module. It has no effect on an ES module, which is always strict.
+module. It has no effect on an ES module, which is always strict, or on a function's own code.
+
+### `import` in a function
+
+A function or `DO` block can start with `import` statements:
+
+```sql
+CREATE FUNCTION circumference(r float8) RETURNS float8 AS $$
+  import { PI } from "constants";
+  return 2 * PI * r;
+$$ LANGUAGE pljs;
+```
+
+Only the imports at the very start count, after any white space and comments
+and before any other code. An `import` anywhere else is a syntax error, as it is
+in any module. `import(...)` and `import.meta` are not static imports.
+
+- The imports are hoisted into a module that the function is declared in, so
+  **a function that imports runs in strict mode**. It is still a global of its
+  user's context, as any function is, and other functions can call it by name.
+- Errors report the function's own lines, as they do without imports.
+- Only the syntax is checked when the function is created, so a function can be
+  created before the modules it imports are.
+- A relative path (`./x`) has no module to be relative to in a function; use
+  the module's whole name.
+- The modules are bound when the function is compiled. When `pljs.modules` or
+  `pljs.packages` change, the function is compiled again on its next call, in
+  every session, so it always runs the current modules. Each compile of such a
+  function leaves a little behind until the session ends or `pljs_reset()`
+  (see below), so a function does not need to be rewritten to be kept current,
+  but a session that changes modules constantly will grow.
 
 ## What a name means
 

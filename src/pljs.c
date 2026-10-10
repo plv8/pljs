@@ -43,7 +43,7 @@ static Datum convert_result(FunctionCallInfo fcinfo, pljs_context *context,
                             Oid rettype, JSValue ret);
 
 static void pljs_source_to_utf8(StringInfoData *src);
-static void pljs_build_function_source(StringInfoData *src,
+static bool pljs_build_function_source(StringInfoData *src,
                                        pljs_context *context, bool is_trigger);
 static void call_anonymous_function(const char *, JSContext *);
 static Datum call_trigger(FunctionCallInfo fcinfo, pljs_context *context);
@@ -1776,7 +1776,7 @@ Datum pljs_call_validator(PG_FUNCTION_ARGS) {
     PG_RETURN_VOID();
   }
 
-  pljs_build_function_source(&src, &context, is_trigger);
+  bool is_module = pljs_build_function_source(&src, &context, is_trigger);
 
   ReleaseSysCache(proctuple);
 
@@ -1788,8 +1788,16 @@ Datum pljs_call_validator(PG_FUNCTION_ARGS) {
 
   context.ctx = ctx;
 
-  JSValue val = JS_Eval(ctx, src.data, strlen(src.data), "<function>",
-                        JS_EVAL_FLAG_COMPILE_ONLY);
+  /*
+   * Only the syntax is checked.  A function's imports are not loaded here, so
+   * a function can be created before the modules it uses are.
+   */
+  JSValue val =
+      is_module
+          ? pljs_module_eval_source(ctx, src.data, strlen(src.data),
+                                    "<function>", true)
+          : JS_Eval(ctx, src.data, strlen(src.data), "<function>",
+                    JS_EVAL_FLAG_COMPILE_ONLY);
 
   pfree(src.data);
 
@@ -1873,13 +1881,30 @@ static void pljs_source_to_utf8(StringInfoData *src) {
  * makes the two agree by construction rather than by two copies staying in
  * step.
  *
+ * A body that starts with `import` statements is built as a module instead:
+ * the imports go first, on the first line so that nothing after them moves,
+ * and the function is declared in the module, made a global as a script's
+ * would be, and exported as the default.
+ *
  * The returned StringInfo's data is palloc'd; the caller frees it.
+ *
+ * @returns @c bool - whether the source is a module
  */
-static void pljs_build_function_source(StringInfoData *src,
+static bool pljs_build_function_source(StringInfoData *src,
                                        pljs_context *context, bool is_trigger) {
   int i;
+  StringInfoData imports, body;
+  bool is_module;
+
+  initStringInfo(&imports);
+  initStringInfo(&body);
+  is_module = pljs_extract_static_imports(context->function->prosrc, &imports,
+                                          &body);
 
   initStringInfo(src);
+
+  // the imports of a module come first
+  appendStringInfoString(src, imports.data);
 
   // generate the function as javascript with all of its arguments
   appendStringInfo(src, "function %s (", context->function->proname);
@@ -1921,10 +1946,22 @@ static void pljs_build_function_source(StringInfoData *src,
                           "TG_RELID, TG_TABLE_NAME, TG_TABLE_SCHEMA, TG_ARGV");
   }
 
-  appendStringInfo(src, ") {\n%s\n}\n %s;\n", context->function->prosrc,
-                   context->function->proname);
+  appendStringInfo(src, ") {\n%s\n}\n", body.data);
+
+  if (is_module) {
+    appendStringInfo(src, "globalThis.%s = %s;\nexport default %s;\n",
+                     context->function->proname, context->function->proname,
+                     context->function->proname);
+  } else {
+    appendStringInfo(src, " %s;\n", context->function->proname);
+  }
+
+  pfree(imports.data);
+  pfree(body.data);
 
   pljs_source_to_utf8(src);
+
+  return is_module;
 }
 
 /**
@@ -1946,6 +1983,7 @@ static void pljs_build_function_source(StringInfoData *src,
 typedef struct pljs_compile_run {
   pljs_context *context;
   StringInfoData src;
+  bool is_module;
   JSValue val;
 } pljs_compile_run;
 
@@ -1958,8 +1996,28 @@ typedef struct pljs_compile_run {
 static void compile_run(void *arg) {
   pljs_compile_run *run = (pljs_compile_run *)arg;
   JSContext *ctx = run->context->ctx;
-  JSValue val =
-      JS_Eval(ctx, run->src.data, strlen(run->src.data), "<function>", 0);
+  JSValue val;
+
+  if (run->is_module) {
+    /*
+     * The modules it imports are bound now, so note which generation of them
+     * these are before loading any; see pljs_modules_generation().
+     */
+    run->context->function->module_generation = pljs_modules_generation();
+
+    JSValue ns = pljs_module_eval_source(ctx, run->src.data,
+                                         strlen(run->src.data), "<function>",
+                                         false);
+
+    if (JS_IsException(ns)) {
+      val = ns;
+    } else {
+      val = JS_GetPropertyStr(ctx, ns, "default");
+      JS_FreeValue(ctx, ns);
+    }
+  } else {
+    val = JS_Eval(ctx, run->src.data, strlen(run->src.data), "<function>", 0);
+  }
 
   pfree(run->src.data);
 
@@ -1986,7 +2044,8 @@ static void compile_run(void *arg) {
 JSValue pljs_compile_function(pljs_context *context, bool is_trigger) {
   pljs_compile_run run = {.context = context, .val = JS_UNDEFINED};
 
-  pljs_build_function_source(&run.src, context, is_trigger);
+  context->function->module_generation = 0;
+  run.is_module = pljs_build_function_source(&run.src, context, is_trigger);
   pljs_run_with_storage(NULL, NULL, true, compile_run, &run);
 
   return run.val;
@@ -2002,12 +2061,22 @@ JSValue pljs_compile_function(pljs_context *context, bool is_trigger) {
  * @param ctx #JSContext - the Javascript context to compile and execute in
  */
 static void call_anonymous_function(const char *source, JSContext *ctx) {
-  StringInfoData src;
+  StringInfoData src, imports, body;
 
   initStringInfo(&src);
+  initStringInfo(&imports);
+  initStringInfo(&body);
+
+  /*
+   * A block that starts with `import` statements is run as a module, with the
+   * imports first.
+   */
+  bool is_module = pljs_extract_static_imports(source, &imports, &body);
 
   // generate the function as javascript with all of its arguments
-  appendStringInfo(&src, "(function () {%s})();", source);
+  appendStringInfo(&src, "%s(function () {%s})();", imports.data, body.data);
+  pfree(imports.data);
+  pfree(body.data);
   pljs_source_to_utf8(&src);
 
   /*
@@ -2021,7 +2090,14 @@ static void call_anonymous_function(const char *source, JSContext *ctx) {
    */
   JS_UpdateStackTop(JS_GetRuntime(ctx));
 
-  JSValue val = JS_Eval(ctx, src.data, strlen(src.data), "<function>", 0);
+  JSValue val;
+
+  if (is_module) {
+    val = pljs_module_eval_source(ctx, src.data, strlen(src.data), "<function>",
+                                  false);
+  } else {
+    val = JS_Eval(ctx, src.data, strlen(src.data), "<function>", 0);
+  }
 
   if (!JS_IsException(val)) {
     JS_FreeValue(ctx, val);
@@ -2210,8 +2286,16 @@ static Datum call_trigger(FunctionCallInfo fcinfo, pljs_context *context) {
    */
   JS_UpdateStackTop(JS_GetRuntime(context->ctx));
 
-  JSValue ret =
-      JS_Call(context->ctx, context->js_function, JS_UNDEFINED, 10, argv);
+  /*
+   * Hold a reference of our own for the call.  The cache owns the function and
+   * drops it when it goes stale -- a module it imports changed, say, seen by a
+   * nested call of the same function -- and a function that is running must
+   * not be freed under itself.
+   */
+  JSValue running = JS_DupValue(context->ctx, context->js_function);
+  JSValue ret = JS_Call(context->ctx, running, JS_UNDEFINED, 10, argv);
+
+  JS_FreeValue(context->ctx, running);
 
   /* JS_Call() took references of its own; see dispatch_call(). */
   for (int i = 0; i < 10; i++) {
@@ -2334,8 +2418,12 @@ static Datum call_function(FunctionCallInfo fcinfo, pljs_context *context,
    */
   JS_UpdateStackTop(JS_GetRuntime(context->ctx));
 
-  JSValue ret = JS_Call(context->ctx, context->js_function, JS_UNDEFINED,
+  // Held for the call; see call_trigger().
+  JSValue running = JS_DupValue(context->ctx, context->js_function);
+  JSValue ret = JS_Call(context->ctx, running, JS_UNDEFINED,
                         context->function->inargs, argv);
+
+  JS_FreeValue(context->ctx, running);
 
   if (JS_IsException(ret)) {
     char *message = NULL, *pg_detail = NULL, *sqlstate = NULL;
@@ -2713,8 +2801,12 @@ static Datum call_srf_function(FunctionCallInfo fcinfo, pljs_context *context,
    */
   JS_UpdateStackTop(JS_GetRuntime(context->ctx));
 
-  JSValue ret = JS_Call(context->ctx, context->js_function, JS_UNDEFINED,
+  // Held for the call; see call_trigger().
+  JSValue running = JS_DupValue(context->ctx, context->js_function);
+  JSValue ret = JS_Call(context->ctx, running, JS_UNDEFINED,
                         context->function->inargs, argv);
+
+  JS_FreeValue(context->ctx, running);
 
   if (JS_IsException(ret)) {
     char *message = NULL, *pg_detail = NULL, *sqlstate = NULL;

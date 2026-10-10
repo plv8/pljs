@@ -69,3 +69,5 @@ Released _January 27, 2026_.
   without a reload (see [MODULES.md](MODULES.md))
 - CommonJS modules run in strict mode, as ES modules do, unless their row in
   `pljs.modules` has `sloppy` set
+- `import` statements at the start of a function or `DO` block (the function
+  then runs as a module, so in strict mode)

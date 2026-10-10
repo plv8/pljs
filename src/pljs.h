@@ -95,6 +95,13 @@ typedef struct pljs_function_cache_value {
    */
   TransactionId fn_xmin;
   ItemPointerData fn_tid;
+
+  /*
+   * The module generation it was compiled against, if it imports modules, or
+   * 0.  Its imports are bound when it is compiled, so it is stale once the
+   * modules have changed.
+   */
+  uint64 module_generation;
 } pljs_function_cache_value;
 
 typedef struct pljs_param_state {
@@ -157,6 +164,10 @@ typedef struct pljs_func {
   TransactionId fn_xmin;
   ItemPointerData fn_tid;
   Oid user_id; // the user id
+
+  // The module generation it was compiled against, if it imports modules, or
+  // 0; see pljs_modules_generation().
+  uint64 module_generation;
 
   bool trigger;
   bool is_srf;                  // are we a set returning function?
@@ -358,6 +369,11 @@ ParamListInfo pljs_setup_variable_paramlist(pljs_param_state *, Datum *,
 
 // modules.c
 void pljs_modules_init(void);
+uint64 pljs_modules_generation(void);
+bool pljs_extract_static_imports(const char *source, StringInfo imports,
+                                 StringInfo body);
+JSValue pljs_module_eval_source(JSContext *ctx, const char *source, size_t len,
+                                const char *name, bool check_only);
 char *pljs_module_normalize(JSContext *ctx, const char *base_name,
                             const char *name, void *opaque);
 JSModuleDef *pljs_module_loader(JSContext *ctx, const char *name, void *opaque);

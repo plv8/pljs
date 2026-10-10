@@ -527,6 +527,16 @@ pljs_function_cache_value *pljs_cache_function_find(Oid user_id, Oid fn_oid,
     return NULL;
   }
 
+  /*
+   * A function that imports modules has them bound as of when it was compiled.
+   * Once the module tables have changed it would go on calling the old ones.
+   */
+  if (value->module_generation != 0 &&
+      value->module_generation != pljs_modules_generation()) {
+    pljs_cache_function_remove(fn_oid);
+    return NULL;
+  }
+
   return value;
 }
 
@@ -556,6 +566,7 @@ void pljs_function_cache_to_context(pljs_context *context,
   context->function->user_id = function_entry->user_id;
   context->function->trigger = function_entry->trigger;
   context->function->is_srf = function_entry->is_srf;
+  context->function->module_generation = function_entry->module_generation;
 
   context->js_function = function_entry->fn;
 
@@ -604,6 +615,7 @@ void pljs_context_to_function_cache(pljs_function_cache_value *function_entry,
 
   function_entry->fn_xmin = context->function->fn_xmin;
   function_entry->fn_tid = context->function->fn_tid;
+  function_entry->module_generation = context->function->module_generation;
 
   function_entry->fn = context->js_function;
   function_entry->nargs = context->function->inargs;

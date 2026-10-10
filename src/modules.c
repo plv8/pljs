@@ -1,5 +1,7 @@
 #include "postgres.h"
 
+#include <ctype.h>
+
 #include "access/genam.h"
 #include "catalog/namespace.h"
 #include "catalog/pg_collation_d.h"
@@ -85,6 +87,14 @@ static bool module_load_failed = false;
 // Whether this transaction read modules under its own snapshot; see
 // pljs_scan_snapshot().
 static bool modules_read_in_snapshot_xact = false;
+
+/*
+ * Set while a function's source is only being checked for syntax.  QuickJS
+ * loads a module's imports as it compiles it, which a check must not do: the
+ * modules may not exist yet, and a check should not read the tables at all.
+ * Imports then resolve to themselves, and to empty modules.
+ */
+static bool syntax_check_only = false;
 
 // The tables and indexes the module readers scan, found once.
 static Oid modules_relid = InvalidOid;
@@ -904,6 +914,10 @@ char *pljs_module_normalize(JSContext *ctx, const char *base_name,
   bool has_importer;
   char *canonical, *ret;
 
+  if (syntax_check_only) {
+    return js_strdup(ctx, name);
+  }
+
   if (!pljs_module_relids()) {
     module_load_failed = true;
     JS_ThrowInternalError(ctx, "the pljs module tables are not installed");
@@ -1113,6 +1127,20 @@ JSModuleDef *pljs_module_loader(JSContext *ctx, const char *name,
   size_t source_len = 0;
   bool sloppy = false;
   JSModuleDef *m = NULL;
+
+  if (syntax_check_only) {
+    JSValue empty = JS_Eval(ctx, "", 0, name,
+                            JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY);
+
+    if (JS_IsException(empty)) {
+      return NULL;
+    }
+
+    m = JS_VALUE_GET_PTR(empty);
+    JS_FreeValue(ctx, empty);
+
+    return m;
+  }
 
   if (!pljs_module_relids()) {
     module_load_failed = true;
@@ -1465,6 +1493,7 @@ static JSValue pljs_module_load(JSContext *ctx, const char *spec,
   PG_CATCH();
   {
     module_depth = saved_depth;
+    syntax_check_only = false;
 
     JSValue state = pljs_module_state(ctx);
 
@@ -1504,4 +1533,319 @@ JSValue pljs_module_import(JSContext *ctx, const char *module_name) {
  */
 JSValue pljs_module_require(JSContext *ctx, const char *module_name) {
   return pljs_module_load(ctx, module_name, true);
+}
+
+/**
+ * @brief The generation of the loaded modules, after seeing every change
+ * committed so far.
+ *
+ * A compiled function that imports modules binds them when it is compiled, so
+ * it records this and is compiled again when it no longer matches.  Never 0.
+ */
+uint64 pljs_modules_generation(void) {
+  AcceptInvalidationMessages();
+
+  return module_generation;
+}
+
+/**
+ * @brief Evaluates source as a module and returns its namespace.
+ *
+ * The module's own `import` statements are loaded the way any other module's
+ * are.  A failure leaves the JavaScript exception pending.
+ *
+ * @param source @c char* - the module's source
+ * @param len @c size_t - its length
+ * @param name @c char* - what to call it, as errors show it
+ * @param check_only @c bool - only compile it, so that a syntax error is found
+ * without reading what it imports; the result is then undefined
+ */
+JSValue pljs_module_eval_source(JSContext *ctx, const char *source, size_t len,
+                                const char *name, bool check_only) {
+  JSValue val;
+
+  if (check_only) {
+    syntax_check_only = true;
+    val = JS_Eval(ctx, source, len, name,
+                  JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY);
+    syntax_check_only = false;
+
+    if (JS_IsException(val)) {
+      return val;
+    }
+
+    JS_FreeValue(ctx, val);
+    return JS_UNDEFINED;
+  }
+
+  AcceptInvalidationMessages();
+
+  if (!pljs_module_relids()) {
+    return JS_ThrowInternalError(ctx,
+                                 "the pljs module tables are not installed");
+  }
+
+  module_load_failed = false;
+
+  val = JS_Eval(ctx, source, len, name,
+                JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY);
+
+  if (JS_IsException(val)) {
+    return val;
+  }
+
+  // Compiling a module loads what it imports; see syntax_check_only.
+  JSModuleDef *m = JS_VALUE_GET_PTR(val);
+  JSValue done = pljs_await(ctx, JS_EvalFunction(ctx, JS_DupValue(ctx, val)));
+
+  JS_FreeValue(ctx, val);
+
+  if (JS_IsException(done)) {
+    // See module_generation.
+    if (!module_load_failed) {
+      module_generation++;
+    }
+    return done;
+  }
+
+  JS_FreeValue(ctx, done);
+
+  return JS_GetModuleNamespace(ctx, m);
+}
+
+/*
+ * ---------- Static imports at the top of a function ----------
+ */
+
+static bool pljs_is_ident_char(char c) {
+  return isalnum((unsigned char)c) || c == '_' || c == '$' ||
+         (unsigned char)c >= 0x80;
+}
+
+/**
+ * @brief Skips white space and comments.
+ *
+ * @returns @c char* - where the next token starts, or the end of the string
+ * if a comment is not closed
+ */
+static const char *pljs_skip_trivia(const char *p) {
+  for (;;) {
+    while (isspace((unsigned char)*p)) {
+      p++;
+    }
+
+    if (p[0] == '/' && p[1] == '/') {
+      while (*p && *p != '\n') {
+        p++;
+      }
+    } else if (p[0] == '/' && p[1] == '*') {
+      const char *end = strstr(p + 2, "*/");
+
+      if (end == NULL) {
+        return p + strlen(p);
+      }
+      p = end + 2;
+    } else {
+      return p;
+    }
+  }
+}
+
+/**
+ * @brief Skips a quoted string.
+ *
+ * @param p @c char* - at the opening quote
+ * @returns @c char* - after the closing quote, or NULL if there is none
+ */
+static const char *pljs_skip_string(const char *p) {
+  char quote = *p++;
+
+  while (*p && *p != quote) {
+    if (*p == '\\' && p[1]) {
+      p++;
+    }
+    p++;
+  }
+
+  return *p ? p + 1 : NULL;
+}
+
+/**
+ * @brief Whether a word starts at p.
+ */
+static bool pljs_at_word(const char *p, const char *word) {
+  size_t len = strlen(word);
+
+  return strncmp(p, word, len) == 0 && !pljs_is_ident_char(p[len]);
+}
+
+/**
+ * @brief Finds the end of the static import statement at p.
+ *
+ * Strings and comments are skipped and braces counted, so a `;`, a newline or
+ * a quote inside `import { "a-b" as c } from "m"` does not end it early, and
+ * `import("m")` and `import.meta` are not imports at all.
+ *
+ * @param p @c char* - at the word `import`
+ * @returns @c char* - after the statement, or NULL if it is not one
+ */
+static const char *pljs_skip_import(const char *p) {
+  const char *q = p + strlen("import");
+  int depth = 0;
+
+  if (pljs_is_ident_char(*q)) {
+    return NULL;
+  }
+
+  q = pljs_skip_trivia(q);
+
+  if (*q == '(' || *q == '.') {
+    return NULL;
+  }
+
+  // Up to the module specifier: the first string outside the braces.
+  for (;;) {
+    q = pljs_skip_trivia(q);
+
+    if (*q == '\0') {
+      return NULL;
+    }
+
+    if (*q == '"' || *q == '\'') {
+      q = pljs_skip_string(q);
+
+      if (q == NULL) {
+        return NULL;
+      }
+      if (depth == 0) {
+        break;
+      }
+      continue;
+    }
+
+    if (*q == '{') {
+      depth++;
+    } else if (*q == '}') {
+      depth--;
+    }
+    q++;
+  }
+
+  // Import attributes: `with { type: "json" }`.
+  const char *r = pljs_skip_trivia(q);
+
+  if (pljs_at_word(r, "with") || pljs_at_word(r, "assert")) {
+    r = pljs_skip_trivia(r + (pljs_at_word(r, "with") ? 4 : 6));
+
+    if (*r == '{') {
+      depth = 0;
+      for (; *r; r++) {
+        if (*r == '"' || *r == '\'') {
+          r = pljs_skip_string(r);
+          if (r == NULL) {
+            return NULL;
+          }
+          r--;
+        } else if (*r == '{') {
+          depth++;
+        } else if (*r == '}' && --depth == 0) {
+          q = r + 1;
+          break;
+        }
+      }
+    }
+  }
+
+  // The statement's own semicolon, if it has one.
+  r = pljs_skip_trivia(q);
+  if (*r == ';') {
+    q = r + 1;
+  }
+
+  return q;
+}
+
+/**
+ * @brief Appends an import statement on a single line, so that hoisting it
+ * does not move the lines of the code after it.
+ */
+static void pljs_append_import(StringInfo out, const char *p, const char *end) {
+  while (p < end) {
+    if (*p == '"' || *p == '\'') {
+      const char *after = pljs_skip_string(p);
+
+      appendBinaryStringInfo(out, p, after - p);
+      p = after;
+    } else if (p[0] == '/' && p[1] == '/') {
+      while (p < end && *p != '\n') {
+        p++;
+      }
+      appendStringInfoChar(out, ' ');
+    } else if (p[0] == '/' && p[1] == '*') {
+      const char *close = strstr(p + 2, "*/");
+
+      p = close ? close + 2 : end;
+      appendStringInfoChar(out, ' ');
+    } else {
+      appendStringInfoChar(out, isspace((unsigned char)*p) ? ' ' : *p);
+      p++;
+    }
+  }
+
+  // Joined on one line, so a statement that relied on its newline needs a `;`.
+  while (out->len > 0 && out->data[out->len - 1] == ' ') {
+    out->data[--out->len] = '\0';
+  }
+  if (out->len > 0 && out->data[out->len - 1] != ';') {
+    appendStringInfoChar(out, ';');
+  }
+  appendStringInfoChar(out, ' ');
+}
+
+/**
+ * @brief Splits the static `import` statements off the front of a function.
+ *
+ * Only the imports at the very start count -- after white space and comments,
+ * before any other code -- as an `import` is only allowed at the top level of
+ * a module.
+ *
+ * @param source @c char* - the function's body
+ * @param imports #StringInfo - receives the imports, on one line
+ * @param body #StringInfo - receives the body with the imports blanked out, so
+ * every other character keeps its line and column
+ * @returns @c bool - whether there were any
+ */
+bool pljs_extract_static_imports(const char *source, StringInfo imports,
+                                 StringInfo body) {
+  const char *p = source;
+  bool found = false;
+
+  appendStringInfoString(body, source);
+
+  for (;;) {
+    p = pljs_skip_trivia(p);
+
+    if (!pljs_at_word(p, "import")) {
+      break;
+    }
+
+    const char *end = pljs_skip_import(p);
+
+    if (end == NULL) {
+      break;
+    }
+
+    pljs_append_import(imports, p, end);
+
+    for (const char *c = p; c < end; c++) {
+      if (*c != '\n' && *c != '\r') {
+        body->data[c - source] = ' ';
+      }
+    }
+
+    p = end;
+    found = true;
+  }
+
+  return found;
 }

@@ -38,7 +38,7 @@ endif
 
 REGRESS = init-extension function json jsonb json_conv types bytea context \
 	cursor array_spread plv8_regressions memory_limits inline composites \
-	trigger procedure find_function start_proc window modules packages regressions \
+	trigger procedure find_function start_proc window modules packages static_import regressions \
 	pg_spi_freetuptable \
 	pg_prepared_plan_lifetime \
 	currentresource \
