@@ -2,6 +2,7 @@
 
 #include <limits.h>
 
+#include "catalog/pg_type.h"
 #include "nodes/params.h"
 #include "parser/parse_node.h"
 #include "utils/builtins.h"

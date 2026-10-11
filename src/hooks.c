@@ -36,7 +36,9 @@ static get_relation_info_hook_type prev_get_relation_info = NULL;
 static needs_fmgr_hook_type prev_needs_fmgr = NULL;
 static fmgr_hook_type prev_fmgr = NULL;
 static object_access_hook_type prev_object_access = NULL;
+#if PG_VERSION_NUM >= 150000
 static object_access_hook_type_str prev_object_access_str = NULL;
+#endif
 static emit_log_hook_type prev_emit_log = NULL;
 
 /* Per-hook recursion depth counters. Each hook tracks its own depth so
@@ -71,8 +73,10 @@ static const char *cmdtype_to_string(CmdType operation) {
     return "UPDATE";
   case CMD_DELETE:
     return "DELETE";
+#if PG_VERSION_NUM >= 150000
   case CMD_MERGE:
     return "MERGE";
+#endif
   case CMD_UTILITY:
     return "UTILITY";
   case CMD_NOTHING:
@@ -105,8 +109,10 @@ static const char *upperrelkind_to_string(UpperRelationKind kind) {
     return "group_agg";
   case UPPERREL_WINDOW:
     return "window";
+#if PG_VERSION_NUM >= 150000
   case UPPERREL_PARTIAL_DISTINCT:
     return "partial_distinct";
+#endif
   case UPPERREL_DISTINCT:
     return "distinct";
   case UPPERREL_ORDERED:
@@ -149,8 +155,10 @@ static const char *objectaccess_to_string(ObjectAccessType access) {
     return "namespace_search";
   case OAT_FUNCTION_EXECUTE:
     return "function_execute";
+#if PG_VERSION_NUM >= 130000
   case OAT_TRUNCATE:
     return "truncate";
+#endif
   default:
     return "unknown";
   }
@@ -185,7 +193,9 @@ static const char *error_severity_to_string(int elevel) {
   case NOTICE:
     return "NOTICE";
   case WARNING:
+#ifdef WARNING_CLIENT_ONLY
   case WARNING_CLIENT_ONLY:
+#endif
     return "WARNING";
   case ERROR:
     return "ERROR";
@@ -561,10 +571,14 @@ static PlannedStmt *pljs_planner_hook(Query *parse, const char *query_string,
                                       int cursorOptions,
                                       ParamListInfo boundParams,
                                       ExplainState *es) {
-#else
+#elif PG_VERSION_NUM >= 130000
 static PlannedStmt *pljs_planner_hook(Query *parse, const char *query_string,
                                       int cursorOptions,
                                       ParamListInfo boundParams) {
+#else
+static PlannedStmt *pljs_planner_hook(Query *parse, int cursorOptions,
+                                      ParamListInfo boundParams) {
+  const char *query_string = NULL;
 #endif
   if (pljs_hook_is_active(configuration.hook_planner)) {
     if (depth_planner >= configuration.hooks_max_depth) {
@@ -621,11 +635,16 @@ static PlannedStmt *pljs_planner_hook(Query *parse, const char *query_string,
   else
     return standard_planner(parse, query_string, cursorOptions, boundParams,
                             es);
-#else
+#elif PG_VERSION_NUM >= 130000
   if (prev_planner)
     return prev_planner(parse, query_string, cursorOptions, boundParams);
   else
     return standard_planner(parse, query_string, cursorOptions, boundParams);
+#else
+  if (prev_planner)
+    return prev_planner(parse, cursorOptions, boundParams);
+  else
+    return standard_planner(parse, cursorOptions, boundParams);
 #endif
 }
 
@@ -1091,6 +1110,7 @@ static void pljs_object_access_hook(ObjectAccessType access, Oid classId,
     prev_object_access(access, classId, objectId, subId, arg);
 }
 
+#if PG_VERSION_NUM >= 150000
 static void pljs_object_access_str_hook(ObjectAccessType access, Oid classId,
                                         const char *objectStr, int subId,
                                         void *arg) {
@@ -1138,6 +1158,7 @@ static void pljs_object_access_str_hook(ObjectAccessType access, Oid classId,
   if (prev_object_access_str)
     prev_object_access_str(access, classId, objectStr, subId, arg);
 }
+#endif
 
 /**
  * @brief emit_log_hook callback.
@@ -1260,8 +1281,10 @@ void pljs_hooks_install(void) {
   prev_object_access = object_access_hook;
   object_access_hook = pljs_object_access_hook;
 
+#if PG_VERSION_NUM >= 150000
   prev_object_access_str = object_access_hook_str;
   object_access_hook_str = pljs_object_access_str_hook;
+#endif
 
   prev_emit_log = emit_log_hook;
   emit_log_hook = pljs_emit_log_hook;

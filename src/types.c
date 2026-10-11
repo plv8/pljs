@@ -6,7 +6,11 @@
 #include "catalog/pg_conversion.h"
 #include "catalog/pg_namespace.h"
 #include "catalog/pg_type.h"
+#if PG_VERSION_NUM >= 130000
 #include "common/hashfn.h"
+#else
+#include "utils/hashutils.h"
+#endif
 #include "executor/spi.h"
 #include "fmgr.h"
 #include "funcapi.h"
@@ -918,7 +922,11 @@ static void pljs_domain_relations_compare(void) {
             pfree(entry->columns);
           }
 
+#if PG_VERSION_NUM >= 140000
           pljs_domain_relations_delete_item(pljs_noted_relations, entry);
+#else
+          pljs_domain_relations_delete(pljs_noted_relations, entry->relid);
+#endif
         }
       }
 
@@ -1128,9 +1136,11 @@ static bool pljs_type_has_domain(Oid typid, bool checks_only, List **noted) {
   case TYPTYPE_RANGE:
     return pljs_type_has_domain(get_range_subtype(typid), checks_only, noted);
 
+#if PG_VERSION_NUM >= 140000
   case TYPTYPE_MULTIRANGE:
     return pljs_type_has_domain(get_multirange_range(typid), checks_only,
                                 noted);
+#endif
 
   case TYPTYPE_COMPOSITE: {
     Oid relid = get_typ_typrelid(typid);
@@ -1182,8 +1192,10 @@ static bool pljs_type_has_composite(Oid typid) {
   case TYPTYPE_RANGE:
     return pljs_type_has_composite(get_range_subtype(typid));
 
+#if PG_VERSION_NUM >= 140000
   case TYPTYPE_MULTIRANGE:
     return pljs_type_has_composite(get_multirange_range(typid));
+#endif
 
   default:
     inner = get_element_type(typid);
@@ -3008,7 +3020,11 @@ JSValue pljs_datum_to_jsvalue(Oid argtype, Datum arg, bool is_null,
    * argument that could not be resolved -- names no element type, but the
    * array itself does.
    */
-  if (argtype == ANYARRAYOID || argtype == ANYCOMPATIBLEARRAYOID) {
+  if (argtype == ANYARRAYOID
+#if PG_VERSION_NUM >= 130000
+      || argtype == ANYCOMPATIBLEARRAYOID
+#endif
+  ) {
     argtype = pljs_array_type_of(arg);
   }
 

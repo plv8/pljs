@@ -29,6 +29,48 @@
 #define pg_noreturn pg_attribute_noreturn()
 #endif
 
+#if PG_VERSION_NUM < 130000
+#undef PG_TRY
+#undef PG_CATCH
+#undef PG_END_TRY
+#define PG_TRY()                                                               \
+  do {                                                                         \
+    sigjmp_buf *_save_exception_stack = PG_exception_stack;                    \
+    ErrorContextCallback *_save_context_stack = error_context_stack;           \
+    sigjmp_buf _local_sigjmp_buf;                                              \
+    bool _do_rethrow = false;                                                  \
+    if (sigsetjmp(_local_sigjmp_buf, 0) == 0) {                                \
+      PG_exception_stack = &_local_sigjmp_buf
+
+#define PG_CATCH()                                                             \
+    } else {                                                                   \
+      PG_exception_stack = _save_exception_stack;                              \
+      error_context_stack = _save_context_stack
+
+#define PG_FINALLY()                                                           \
+    } else                                                                     \
+      _do_rethrow = true;                                                      \
+    {                                                                          \
+      PG_exception_stack = _save_exception_stack;                              \
+      error_context_stack = _save_context_stack
+
+#define PG_END_TRY()                                                           \
+    }                                                                          \
+    if (_do_rethrow)                                                           \
+      PG_RE_THROW();                                                           \
+    PG_exception_stack = _save_exception_stack;                                \
+    error_context_stack = _save_context_stack;                                 \
+  } while (0)
+
+#ifndef TYPALIGN_INT
+#define TYPALIGN_INT 'i'
+#endif
+#endif
+
+#if PG_VERSION_NUM < 140000
+#define message_level_is_interesting(elevel) (true)
+#endif
+
 #define STORAGE_HASH_LEN 32
 #define PLJS_MAX_LANG_HANDLER_DEPTH 32
 #ifndef PLJS_VERSION
