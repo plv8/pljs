@@ -441,6 +441,8 @@ JSModuleDef *pljs_module_loader(JSContext *ctx, const char *name, void *opaque);
 JSValue pljs_module_import(JSContext *ctx, const char *module_name);
 extern PGDLLEXPORT JSValue pljs_module_require(JSContext *ctx,
                                                const char *module_name);
+JSValue pljs_compile_bytecode_js(JSContext *ctx, JSValueConst this_val,
+                                 int argc, JSValueConst *argv);
 
 // hooks.c
 extern JSClassID js_querydesc_id;

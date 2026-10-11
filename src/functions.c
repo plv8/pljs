@@ -441,6 +441,13 @@ void pljs_setup_namespace(JSContext *ctx) {
   JS_SetPropertyStr(ctx, pljs, "require",
                     JS_NewCFunction(ctx, pljs_require, "require", 1));
 
+  JS_SetPropertyStr(ctx, pljs, "compile_bytecode",
+                    JS_NewCFunction(ctx, pljs_compile_bytecode_js,
+                                    "compile_bytecode", 2));
+
+  JS_SetPropertyStr(ctx, global_obj, "require",
+                    JS_NewCFunction(ctx, pljs_require, "require", 1));
+
   JS_SetPropertyStr(ctx, global_obj, "pljs", pljs);
 
   // Set up logging levels in the context.

@@ -39,6 +39,9 @@ CREATE TABLE pljs.modules (
   -- literals) rather than the strict mode an ES module imposes.  Has no effect
   -- on an ES module, which is always strict.
   sloppy BOOLEAN NOT NULL DEFAULT false,
+  bytecode BYTEA,
+  requires TEXT[],
+  is_trusted BOOLEAN NOT NULL DEFAULT true,
   FOREIGN KEY (package_name, package_version) REFERENCES pljs.packages (name, version)
 );
 

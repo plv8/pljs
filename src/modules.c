@@ -3,11 +3,14 @@
 #include <ctype.h>
 
 #include "access/genam.h"
+#include "access/table.h"
+#include "access/xact.h"
 #include "catalog/namespace.h"
 #include "catalog/pg_collation_d.h"
+#include "catalog/pg_type_d.h"
 #include "commands/trigger.h"
-#include "access/xact.h"
 #include "miscadmin.h"
+#include "utils/array.h"
 #include "utils/builtins.h"
 #include "utils/fmgroids.h"
 #include "utils/inval.h"
@@ -46,7 +49,10 @@ enum module_data_access {
   Amodule_created_at,
   Amodule_updated_at,
   Amodule_sloppy,
-  Amodule_length = 7
+  Amodule_bytecode,
+  Amodule_requires,
+  Amodule_is_trusted,
+  Amodule_length = 10
 };
 
 // Column positions in pljs.packages (1-based).
@@ -222,6 +228,7 @@ static void pljs_text_key(ScanKey key, AttrNumber attno, const char *value) {
  * converted the way a function's source is.  The result is NUL-terminated.
  */
 static uint8_t *pljs_module_source(Datum source_datum, size_t *len_out) {
+  pljs_encoding_init();
   text *source = DatumGetTextPP(source_datum);
   size_t len = VARSIZE_ANY_EXHDR(source);
   char *utf8 = pljs_server_to_utf8(VARDATA_ANY(source), len);
@@ -306,18 +313,26 @@ static void pljs_module_id_free(pljs_module_id *id) {
 }
 
 /**
- * @brief Looks a stored module up, and optionally reads its source.
+ * @brief Looks a stored module up, and optionally reads its source, bytecode,
+ * sloppy flag, requires allowlist, and is_trusted flag.
  *
  * @param id #pljs_module_id - the module
  * @param source @c uint8_t** - set to the UTF-8 source, NUL-terminated, or
- * NULL to only find out whether the module exists
+ * NULL
  * @param source_len @c size_t* - set to the source's length
+ * @param bytecode @c bytea** - set to a copy of the bytecode, or NULL
  * @param sloppy @c bool* - set to whether the module asks for sloppy mode, or
  * NULL
- * @returns @c bool - whether the module exists with a source
+ * @param requires_out @c ArrayType** - set to a copy of the requires text[],
+ * or NULL
+ * @param is_trusted_out @c bool* - set to whether the module is trusted, or
+ * NULL
+ * @returns @c bool - whether the module exists with a source or bytecode
  */
 static bool pljs_fetch_module(const pljs_module_id *id, uint8_t **source,
-                              size_t *source_len, bool *sloppy) {
+                              size_t *source_len, bytea **bytecode,
+                              bool *sloppy, ArrayType **requires_out,
+                              bool *is_trusted_out) {
   bool found = false;
   ScanKeyData scankey[3];
   int nkeys;
@@ -327,8 +342,17 @@ static bool pljs_fetch_module(const pljs_module_id *id, uint8_t **source,
     *source = NULL;
     *source_len = 0;
   }
+  if (bytecode) {
+    *bytecode = NULL;
+  }
   if (sloppy) {
     *sloppy = false;
+  }
+  if (requires_out) {
+    *requires_out = NULL;
+  }
+  if (is_trusted_out) {
+    *is_trusted_out = true;
   }
 
   if (id->package) {
@@ -358,10 +382,11 @@ static bool pljs_fetch_module(const pljs_module_id *id, uint8_t **source,
   while (!found &&
          HeapTupleIsValid(tuple = systable_getnext_ordered(
                               scan, ForwardScanDirection))) {
+    CHECK_FOR_INTERRUPTS();
     Datum datum_array[Amodule_length];
     bool is_null_array[Amodule_length];
 
-    // A table made before the sloppy column has fewer attributes; deforming
+    // A table made before newer columns has fewer attributes; deforming
     // leaves the rest alone, so they start out null.
     memset(is_null_array, true, sizeof(is_null_array));
     heap_deform_tuple(tuple, RelationGetDescr(table), datum_array,
@@ -373,15 +398,25 @@ static bool pljs_fetch_module(const pljs_module_id *id, uint8_t **source,
       continue;
     }
 
-    if (is_null_array[Amodule_source - 1]) {
+    if (is_null_array[Amodule_source - 1] &&
+        is_null_array[Amodule_bytecode - 1]) {
       break;
     }
 
-    if (source) {
+    if (source && !is_null_array[Amodule_source - 1]) {
       *source = pljs_module_source(datum_array[Amodule_source - 1], source_len);
+    }
+    if (bytecode && !is_null_array[Amodule_bytecode - 1]) {
+      *bytecode = DatumGetByteaPCopy(datum_array[Amodule_bytecode - 1]);
     }
     if (sloppy && !is_null_array[Amodule_sloppy - 1]) {
       *sloppy = DatumGetBool(datum_array[Amodule_sloppy - 1]);
+    }
+    if (requires_out && !is_null_array[Amodule_requires - 1]) {
+      *requires_out = DatumGetArrayTypePCopy(datum_array[Amodule_requires - 1]);
+    }
+    if (is_trusted_out && !is_null_array[Amodule_is_trusted - 1]) {
+      *is_trusted_out = DatumGetBool(datum_array[Amodule_is_trusted - 1]);
     }
     found = true;
   }
@@ -428,9 +463,11 @@ static char *pljs_resolve_package_version(const char *pkg_name,
   HeapTuple tuple;
   while ((tuple = systable_getnext_ordered(scan, ForwardScanDirection)) !=
          NULL) {
+    CHECK_FOR_INTERRUPTS();
     Datum datum_array[Apackage_length];
     bool is_null_array[Apackage_length];
 
+    memset(is_null_array, true, sizeof(is_null_array));
     heap_deform_tuple(tuple, RelationGetDescr(table), datum_array,
                       is_null_array);
 
@@ -503,6 +540,7 @@ static char *pljs_get_package_info(const char *pkg_name, const char *pkg_version
     Datum datum_array[Apackage_length];
     bool is_null_array[Apackage_length];
 
+    memset(is_null_array, true, sizeof(is_null_array));
     heap_deform_tuple(tuple, RelationGetDescr(table), datum_array,
                       is_null_array);
 
@@ -573,6 +611,25 @@ static char *pljs_get_package_dependency_range(const char *pkg_name,
 
 #define PLJS_STANDALONE_PREFIX "pljs:"
 #define PLJS_PACKAGE_PREFIX "pljs-pkg:"
+
+/**
+ * @brief Strip optional tle://, tle:, or pgtle: prefix from a module specifier.
+ */
+static const char *pljs_strip_spec_prefix(const char *spec) {
+  if (spec == NULL) {
+    return NULL;
+  }
+  if (strncmp(spec, "tle://", 6) == 0) {
+    return spec + 6;
+  }
+  if (strncmp(spec, "tle:", 4) == 0) {
+    return spec + 4;
+  }
+  if (strncmp(spec, "pgtle:", 6) == 0) {
+    return spec + 6;
+  }
+  return spec;
+}
 
 /**
  * @brief The canonical name QuickJS knows a stored module by.
@@ -730,30 +787,25 @@ typedef enum pljs_resolve_result {
 /**
  * @brief Works out which stored module a specifier means.
  *
- * @param spec @c char* - what the importing code wrote
+ * @param raw_spec @c char* - what the importing code wrote
  * @param importer #pljs_module_id - the module it is written in, or NULL for
  * code that is not a stored module (a function, or a DO block)
  * @param out #pljs_module_id - the module, when it was found
- *
- * A canonical name means that module.  A relative path ("./x", "../x") is
- * looked for beside the importer, in its own package if it is in one.  Any
- * other name is a standalone module of that path if there is one, or else a
- * package: the importing package's own version for its own name, the version
- * the importing package's dependencies ask for for another, and the latest
- * otherwise.
  */
-static pljs_resolve_result pljs_resolve_spec(const char *spec,
+static pljs_resolve_result pljs_resolve_spec(const char *raw_spec,
                                              const pljs_module_id *importer,
                                              pljs_module_id *out) {
   memset(out, 0, sizeof(*out));
 
-  if (pljs_module_id_parse(spec, out)) {
-    if (pljs_fetch_module(out, NULL, NULL, NULL)) {
+  if (pljs_module_id_parse(raw_spec, out)) {
+    if (pljs_fetch_module(out, NULL, NULL, NULL, NULL, NULL, NULL)) {
       return PLJS_RESOLVED;
     }
     pljs_module_id_free(out);
     return PLJS_NOT_FOUND;
   }
+
+  const char *spec = pljs_strip_spec_prefix(raw_spec);
 
   if (pljs_spec_is_relative(spec)) {
     if (importer == NULL) {
@@ -772,7 +824,7 @@ static pljs_resolve_result pljs_resolve_spec(const char *spec,
       out->version = pstrdup(importer->version);
     }
 
-    if (pljs_fetch_module(out, NULL, NULL, NULL)) {
+    if (pljs_fetch_module(out, NULL, NULL, NULL, NULL, NULL, NULL)) {
       return PLJS_RESOLVED;
     }
     pljs_module_id_free(out);
@@ -781,8 +833,10 @@ static pljs_resolve_result pljs_resolve_spec(const char *spec,
 
   // Otherwise a package: "<package>" or "<package>/<module>", where a scoped
   // package keeps its first slash ("@scope/pkg/module").
+  // Also support inline version/range ("<package>@<range>" or "<package>@<range>/<module>").
   char *pkg_name = pstrdup(spec);
   char *sub_path = NULL;
+  char *inline_range = NULL;
   char *slash = strchr(pkg_name + (pkg_name[0] == '@' ? 1 : 0), '/');
 
   if (slash && pkg_name[0] == '@') {
@@ -791,6 +845,18 @@ static pljs_resolve_result pljs_resolve_spec(const char *spec,
   if (slash) {
     *slash = '\0';
     sub_path = slash + 1;
+  }
+
+  char *at = strchr(pkg_name + (pkg_name[0] == '@' ? 1 : 0), '@');
+  if (at) {
+    *at = '\0';
+    inline_range = at + 1;
+  } else if (sub_path) {
+    char *sub_at = strrchr(sub_path, '@');
+    if (sub_at) {
+      *sub_at = '\0';
+      inline_range = sub_at + 1;
+    }
   }
 
   /*
@@ -802,7 +868,9 @@ static pljs_resolve_result pljs_resolve_spec(const char *spec,
   char *range = NULL;
   bool is_declared = false;
 
-  if (importer && importer->package) {
+  if (inline_range) {
+    range = pstrdup(inline_range);
+  } else if (importer && importer->package) {
     if (strcmp(importer->package, pkg_name) == 0) {
       is_declared = true;
     } else {
@@ -812,10 +880,14 @@ static pljs_resolve_result pljs_resolve_spec(const char *spec,
     }
   }
 
-  // A standalone module, by its whole path.
+  // A standalone module, by its whole path (or stripped of inline @version if
+  // the exact path is not found and no package matches).
   if (!is_declared) {
     out->path = pstrdup(spec);
-    if (pljs_fetch_module(out, NULL, NULL, NULL)) {
+    if (pljs_fetch_module(out, NULL, NULL, NULL, NULL, NULL, NULL)) {
+      if (range) {
+        pfree(range);
+      }
       pfree(pkg_name);
       return PLJS_RESOLVED;
     }
@@ -824,7 +896,8 @@ static pljs_resolve_result pljs_resolve_spec(const char *spec,
 
   char *version = NULL;
 
-  if (importer && importer->package && strcmp(importer->package, pkg_name) == 0) {
+  if (!inline_range && importer && importer->package &&
+      strcmp(importer->package, pkg_name) == 0) {
     version = pstrdup(importer->version);
   } else {
     version = pljs_resolve_package_version(pkg_name, range);
@@ -834,30 +907,64 @@ static pljs_resolve_result pljs_resolve_spec(const char *spec,
     pfree(range);
   }
 
-  if (version == NULL) {
-    pfree(pkg_name);
-    return PLJS_NOT_FOUND;
-  }
+  if (version != NULL) {
+    char *path = sub_path ? pstrdup(sub_path)
+                          : pljs_get_package_info(pkg_name, version, NULL, NULL);
 
-  char *path = sub_path ? pstrdup(sub_path)
-                        : pljs_get_package_info(pkg_name, version, NULL, NULL);
+    if (path != NULL) {
+      out->package = pkg_name;
+      out->version = version;
+      out->path = path;
 
-  if (path == NULL) {
-    pfree(pkg_name);
+      if (pljs_fetch_module(out, NULL, NULL, NULL, NULL, NULL, NULL)) {
+        return PLJS_RESOLVED;
+      }
+      pljs_module_id_free(out);
+      return PLJS_NOT_FOUND;
+    }
     pfree(version);
-    return PLJS_NOT_FOUND;
   }
 
-  out->package = pkg_name;
-  out->version = version;
-  out->path = path;
-
-  if (pljs_fetch_module(out, NULL, NULL, NULL)) {
-    return PLJS_RESOLVED;
+  // Fallback for standalone modules referenced with an inline @version suffix
+  // (e.g. 'pkg/sub/back.js@1.0.0' where standalone path is 'pkg/sub/back.js').
+  if (!is_declared && inline_range) {
+    const char *last_at = strrchr(spec, '@');
+    if (last_at && last_at > spec) {
+      out->path = pnstrdup(spec, last_at - spec);
+      if (pljs_fetch_module(out, NULL, NULL, NULL, NULL, NULL, NULL)) {
+        pfree(pkg_name);
+        return PLJS_RESOLVED;
+      }
+      pljs_module_id_free(out);
+    }
   }
-  pljs_module_id_free(out);
 
+  pfree(pkg_name);
   return PLJS_NOT_FOUND;
+}
+
+/**
+ * @brief Throws a JavaScript error with an attached PostgreSQL SQLSTATE.
+ */
+static JSValue pljs_throw_coded_module_error(JSContext *ctx, int sqlerrcode,
+                                             const char *msg,
+                                             bool is_ref_error) {
+  module_load_failed = true;
+  if (is_ref_error) {
+    JS_ThrowReferenceError(ctx, "%s", msg ? msg : "error");
+  } else {
+    JS_ThrowInternalError(ctx, "%s", msg ? msg : "error");
+  }
+  if (sqlerrcode != 0) {
+    JSValue ex = JS_GetException(ctx);
+    if (JS_IsObject(ex)) {
+      JS_DefinePropertyValueStr(ctx, ex, "sqlstate",
+                                JS_NewString(ctx, unpack_sql_state(sqlerrcode)),
+                                JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE);
+    }
+    return JS_Throw(ctx, ex);
+  }
+  return JS_EXCEPTION;
 }
 
 /**
@@ -868,11 +975,110 @@ static void pljs_throw_unresolved(JSContext *ctx, pljs_resolve_result result,
   module_load_failed = true;
 
   if (result == PLJS_ESCAPES_ROOT) {
-    JS_ThrowReferenceError(
-        ctx, "relative module specifier '%s' goes above the module root", spec);
+    char *msg = psprintf(
+        "relative module specifier '%s' goes above the module root", spec);
+    pljs_throw_coded_module_error(ctx, ERRCODE_INVALID_PARAMETER_VALUE, msg,
+                                  true);
+    pfree(msg);
   } else {
     JS_ThrowReferenceError(ctx, "could not load module '%s'", spec);
   }
+}
+
+/**
+ * @brief Checks module security columns (`is_trusted` and `requires`).
+ *
+ * Returns true if allowed, or false with a pending JavaScript exception
+ * carrying `sqlstate = "42501"` (`ERRCODE_INSUFFICIENT_PRIVILEGE`).
+ */
+static bool pljs_check_module_access(JSContext *ctx,
+                                     const pljs_module_id *importer,
+                                     const pljs_module_id *target) {
+  bool is_trusted = true;
+  pljs_fetch_module(target, NULL, NULL, NULL, NULL, NULL, &is_trusted);
+
+  const char *target_label =
+      target->package ? target->package : target->path;
+
+  if (!is_trusted && !superuser()) {
+    char *msg = psprintf("permission denied for untrusted pljs module \"%s\"",
+                         target_label);
+    pljs_throw_coded_module_error(ctx, ERRCODE_INSUFFICIENT_PRIVILEGE, msg,
+                                  false);
+    pfree(msg);
+    return false;
+  }
+
+  if (importer != NULL) {
+    ArrayType *req_arr = NULL;
+    pljs_fetch_module(importer, NULL, NULL, NULL, NULL, &req_arr, NULL);
+    if (req_arr != NULL) {
+      Datum *elems = NULL;
+      bool *nulls = NULL;
+      int nelems = 0;
+      deconstruct_array(req_arr, TEXTOID, -1, false, TYPALIGN_INT, &elems,
+                        &nulls, &nelems);
+
+      bool allowed = false;
+      for (int i = 0; i < nelems && !allowed; i++) {
+        if (nulls[i]) {
+          continue;
+        }
+        char *raw_entry = TextDatumGetCString(elems[i]);
+        const char *entry = pljs_strip_spec_prefix(raw_entry);
+
+        // Split optional @version from entry
+        const char *at =
+            strchr(entry + (entry[0] == '@' ? 1 : 0), '@');
+        char *e_name = at ? pnstrdup(entry, at - entry) : pstrdup(entry);
+        char *e_ver = at ? pstrdup(at + 1) : NULL;
+
+        if (target->package) {
+          char *pkg_sub = psprintf("%s/%s", target->package, target->path);
+          if ((strcmp(e_name, target->package) == 0 ||
+               strcmp(e_name, pkg_sub) == 0 ||
+               strcmp(e_name, target->path) == 0) &&
+              (e_ver == NULL || strcmp(e_ver, target->version) == 0)) {
+            allowed = true;
+          }
+          pfree(pkg_sub);
+        } else {
+          if (strcmp(e_name, target->path) == 0 ||
+              strcmp(entry, target->path) == 0) {
+            allowed = true;
+          }
+        }
+
+        pfree(e_name);
+        if (e_ver) {
+          pfree(e_ver);
+        }
+        pfree(raw_entry);
+      }
+
+      if (elems) {
+        pfree(elems);
+      }
+      if (nulls) {
+        pfree(nulls);
+      }
+      pfree(req_arr);
+
+      if (!allowed) {
+        const char *imp_label =
+            importer->package ? importer->package : importer->path;
+        char *msg = psprintf(
+            "pljs module \"%s\" is not listed in requires of \"%s\"",
+            target_label, imp_label);
+        pljs_throw_coded_module_error(ctx, ERRCODE_INSUFFICIENT_PRIVILEGE, msg,
+                                      false);
+        pfree(msg);
+        return false;
+      }
+    }
+  }
+
+  return true;
 }
 
 /*
@@ -929,13 +1135,24 @@ char *pljs_module_normalize(JSContext *ctx, const char *base_name,
   pljs_resolve_result result =
       pljs_resolve_spec(name, has_importer ? &importer : NULL, &id);
 
-  if (has_importer) {
-    pljs_module_id_free(&importer);
-  }
-
   if (result != PLJS_RESOLVED) {
+    if (has_importer) {
+      pljs_module_id_free(&importer);
+    }
     pljs_throw_unresolved(ctx, result, name);
     return NULL;
+  }
+
+  if (!pljs_check_module_access(ctx, has_importer ? &importer : NULL, &id)) {
+    if (has_importer) {
+      pljs_module_id_free(&importer);
+    }
+    pljs_module_id_free(&id);
+    return NULL;
+  }
+
+  if (has_importer) {
+    pljs_module_id_free(&importer);
   }
 
   canonical = pljs_module_id_format(&id);
@@ -1112,6 +1329,16 @@ static JSValue pljs_compile_sloppy_commonjs(JSContext *ctx, const char *name,
   return compiled;
 }
 
+typedef struct pljs_js_module_def_head {
+  int ref_count;
+  uint8_t gc_obj_type_and_mark;
+  uint8_t dummy1;
+  uint16_t dummy2;
+  void *gc_link_prev;
+  void *gc_link_next;
+  JSAtom module_name;
+} pljs_js_module_def_head;
+
 /**
  * @brief QuickJS module loader: compiles the stored module a canonical name
  * names.
@@ -1119,12 +1346,15 @@ static JSValue pljs_compile_sloppy_commonjs(JSContext *ctx, const char *name,
  * A CommonJS module becomes an ES module whose default export is its
  * `module.exports`, so the two kinds import each other.  The wrapper starts on
  * the source's first line, so errors still point into the stored source.
+ * Precompiled QuickJS bytecode (`bytecode BYTEA`) is deserialized directly via
+ * `JS_ReadObject`.
  */
 JSModuleDef *pljs_module_loader(JSContext *ctx, const char *name,
                                 void *opaque) {
   pljs_module_id id;
   uint8_t *source = NULL;
   size_t source_len = 0;
+  bytea *bytecode = NULL;
   bool sloppy = false;
   JSModuleDef *m = NULL;
 
@@ -1149,7 +1379,8 @@ JSModuleDef *pljs_module_loader(JSContext *ctx, const char *name,
   }
 
   if (!pljs_module_id_parse(name, &id) ||
-      !pljs_fetch_module(&id, &source, &source_len, &sloppy)) {
+      !pljs_fetch_module(&id, &source, &source_len, &bytecode, &sloppy, NULL,
+                         NULL)) {
     module_load_failed = true;
     JS_ThrowReferenceError(ctx, "could not load module '%s'", name);
     pljs_module_id_free(&id);
@@ -1157,6 +1388,47 @@ JSModuleDef *pljs_module_loader(JSContext *ctx, const char *name,
   }
 
   pljs_module_id_free(&id);
+
+  if (bytecode != NULL) {
+    const uint8_t *buf = (const uint8_t *)VARDATA_ANY(bytecode);
+    size_t buf_len = VARSIZE_ANY_EXHDR(bytecode);
+    JSValue func_val = JS_ReadObject(ctx, buf, buf_len, JS_READ_OBJ_BYTECODE);
+    pfree(bytecode);
+    if (source) {
+      pfree(source);
+    }
+
+    if (JS_IsException(func_val)) {
+      module_load_failed = true;
+      return NULL;
+    }
+
+    if (JS_VALUE_GET_TAG(func_val) != JS_TAG_MODULE) {
+      JS_FreeValue(ctx, func_val);
+      module_load_failed = true;
+      JS_ThrowTypeError(ctx, "bytecode for '%s' is not a compiled module",
+                        name);
+      return NULL;
+    }
+
+    pljs_js_module_def_head *mh =
+        (pljs_js_module_def_head *)JS_VALUE_GET_PTR(func_val);
+    JSAtom new_name = JS_NewAtom(ctx, name);
+    if (new_name != JS_ATOM_NULL) {
+      JS_FreeAtom(ctx, mh->module_name);
+      mh->module_name = new_name;
+    }
+
+    if (JS_ResolveModule(ctx, func_val) < 0) {
+      JS_FreeValue(ctx, func_val);
+      module_load_failed = true;
+      return NULL;
+    }
+
+    m = (JSModuleDef *)JS_VALUE_GET_PTR(func_val);
+    JS_FreeValue(ctx, func_val);
+    return m;
+  }
 
   bool commonjs = pljs_source_is_commonjs(ctx, (char *)source, source_len);
   JSValue compiled;
@@ -1337,6 +1609,10 @@ static JSValue pljs_module_load_once(JSContext *ctx, const char *spec,
 
   if (resolved != PLJS_RESOLVED) {
     pljs_throw_unresolved(ctx, resolved, spec);
+    goto done;
+  }
+
+  if (!pljs_check_module_access(ctx, has_importer ? &importer : NULL, &id)) {
     goto done;
   }
 
@@ -1533,6 +1809,67 @@ JSValue pljs_module_import(JSContext *ctx, const char *module_name) {
  */
 JSValue pljs_module_require(JSContext *ctx, const char *module_name) {
   return pljs_module_load(ctx, module_name, true);
+}
+
+/**
+ * @brief `pljs.compile_bytecode(source[, module_name])` compiles an ES module
+ * source string into QuickJS serialized bytecode (`Uint8Array` / `bytea`) that
+ * can be stored in `pljs.modules.bytecode`.
+ */
+JSValue pljs_compile_bytecode_js(JSContext *ctx, JSValueConst this_val,
+                                 int argc, JSValueConst *argv) {
+  if (argc < 1) {
+    return js_throw(
+        "pljs.compile_bytecode(source[, module_name]) requires source", ctx);
+  }
+
+  const char *src = JS_ToCString(ctx, argv[0]);
+  if (!src) {
+    return JS_EXCEPTION;
+  }
+
+  const char *mod_name = "<bytecode_module>";
+  if (argc >= 2 && JS_IsString(argv[1])) {
+    mod_name = JS_ToCString(ctx, argv[1]);
+  }
+
+  syntax_check_only = true;
+  JSValue obj = JS_Eval(ctx, src, strlen(src), mod_name,
+                        JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY);
+  syntax_check_only = false;
+
+  if (argc >= 2 && JS_IsString(argv[1])) {
+    JS_FreeCString(ctx, mod_name);
+  }
+  JS_FreeCString(ctx, src);
+
+  if (JS_IsException(obj)) {
+    return obj;
+  }
+
+  size_t out_len = 0;
+  uint8_t *out_buf =
+      JS_WriteObject(ctx, &out_len, obj, JS_WRITE_OBJ_BYTECODE);
+  JS_FreeValue(ctx, obj);
+
+  if (!out_buf) {
+    return JS_EXCEPTION;
+  }
+
+  JSValue ab = JS_NewArrayBufferCopy(ctx, out_buf, out_len);
+  js_free(ctx, out_buf);
+  if (JS_IsException(ab)) {
+    return ab;
+  }
+
+  JSValue global_obj = JS_GetGlobalObject(ctx);
+  JSValue u8_ctor = JS_GetPropertyStr(ctx, global_obj, "Uint8Array");
+  JSValue args[1] = {ab};
+  JSValue u8 = JS_CallConstructor(ctx, u8_ctor, 1, args);
+  JS_FreeValue(ctx, ab);
+  JS_FreeValue(ctx, u8_ctor);
+  JS_FreeValue(ctx, global_obj);
+  return u8;
 }
 
 /**
