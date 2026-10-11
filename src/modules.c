@@ -1393,6 +1393,9 @@ JSModuleDef *pljs_module_loader(JSContext *ctx, const char *name,
     const uint8_t *buf = (const uint8_t *)VARDATA_ANY(bytecode);
     size_t buf_len = VARSIZE_ANY_EXHDR(bytecode);
     JSValue func_val = JS_ReadObject(ctx, buf, buf_len, JS_READ_OBJ_BYTECODE);
+    bool has_source = (source != NULL && source_len > 0);
+    bool commonjs =
+        has_source && pljs_source_is_commonjs(ctx, (char *)source, source_len);
     pfree(bytecode);
     if (source) {
       pfree(source);
@@ -1427,6 +1430,17 @@ JSModuleDef *pljs_module_loader(JSContext *ctx, const char *name,
 
     m = (JSModuleDef *)JS_VALUE_GET_PTR(func_val);
     JS_FreeValue(ctx, func_val);
+
+    if (commonjs || !has_source) {
+      JSValue state = pljs_module_state(ctx);
+      JSValue kinds = JS_GetPropertyStr(ctx, state, "kinds");
+
+      JS_SetPropertyStr(ctx, kinds, name,
+                        commonjs ? JS_TRUE : JS_NewInt32(ctx, 2));
+      JS_FreeValue(ctx, kinds);
+      JS_FreeValue(ctx, state);
+    }
+
     return m;
   }
 
@@ -1665,7 +1679,34 @@ static JSValue pljs_module_load_once(JSContext *ctx, const char *spec,
         is_cjs = JS_GetPropertyStr(ctx, kinds_before, canonical);
       }
 
-      if (as_require && JS_ToBool(ctx, is_cjs)) {
+      bool unwrap_default = false;
+      if (as_require) {
+        if (JS_IsBool(is_cjs) && JS_ToBool(ctx, is_cjs)) {
+          unwrap_default = true;
+        } else if (JS_IsNumber(is_cjs) && JS_IsObject(ns)) {
+          JSPropertyEnum *ptab = NULL;
+          uint32_t plen = 0;
+          if (JS_GetOwnPropertyNames(ctx, &ptab, &plen, ns,
+                                     JS_GPN_STRING_MASK | JS_GPN_ENUM_ONLY) ==
+              0) {
+            if (plen == 1) {
+              const char *kname = JS_AtomToCString(ctx, ptab[0].atom);
+              if (kname && strcmp(kname, "default") == 0) {
+                unwrap_default = true;
+              }
+              if (kname) {
+                JS_FreeCString(ctx, kname);
+              }
+            }
+            for (uint32_t i = 0; i < plen; i++) {
+              JS_FreeAtom(ctx, ptab[i].atom);
+            }
+            js_free(ctx, ptab);
+          }
+        }
+      }
+
+      if (unwrap_default) {
         result = JS_GetPropertyStr(ctx, ns, "default");
         JS_FreeValue(ctx, ns);
       } else {
@@ -1812,9 +1853,9 @@ JSValue pljs_module_require(JSContext *ctx, const char *module_name) {
 }
 
 /**
- * @brief `pljs.compile_bytecode(source[, module_name])` compiles an ES module
- * source string into QuickJS serialized bytecode (`Uint8Array` / `bytea`) that
- * can be stored in `pljs.modules.bytecode`.
+ * @brief `pljs.compile_bytecode(source[, module_name])` compiles an ES or
+ * CommonJS module source string into QuickJS serialized bytecode
+ * (`Uint8Array` / `bytea`) that can be stored in `pljs.modules.bytecode`.
  */
 JSValue pljs_compile_bytecode_js(JSContext *ctx, JSValueConst this_val,
                                  int argc, JSValueConst *argv) {
@@ -1828,18 +1869,71 @@ JSValue pljs_compile_bytecode_js(JSContext *ctx, JSValueConst this_val,
     return JS_EXCEPTION;
   }
 
+  const char *raw_mod_name = NULL;
+  char *norm_mod_name = NULL;
   const char *mod_name = "<bytecode_module>";
   if (argc >= 2 && JS_IsString(argv[1])) {
-    mod_name = JS_ToCString(ctx, argv[1]);
+    raw_mod_name = JS_ToCString(ctx, argv[1]);
+    if (raw_mod_name && raw_mod_name[0] != '\0') {
+      if (strncmp(raw_mod_name, PLJS_PACKAGE_PREFIX,
+                  strlen(PLJS_PACKAGE_PREFIX)) == 0 ||
+          strncmp(raw_mod_name, PLJS_STANDALONE_PREFIX,
+                  strlen(PLJS_STANDALONE_PREFIX)) == 0) {
+        mod_name = raw_mod_name;
+      } else {
+        const char *clean = pljs_strip_spec_prefix(raw_mod_name);
+        if (strncmp(clean, "plv8-pkg:", 9) == 0) {
+          clean += 9;
+        } else if (strncmp(clean, "plv8:", 5) == 0) {
+          clean += 5;
+        }
+        const char *at = strchr(clean + (clean[0] == '@' ? 1 : 0), '@');
+        if (at != NULL) {
+          const char *slash = strchr(at, '/');
+          if (slash != NULL) {
+            norm_mod_name = psprintf(PLJS_PACKAGE_PREFIX "%s", clean);
+          } else {
+            norm_mod_name = psprintf(PLJS_PACKAGE_PREFIX "%s/index.js", clean);
+          }
+        } else {
+          norm_mod_name = psprintf(PLJS_STANDALONE_PREFIX "%s", clean);
+        }
+        mod_name = norm_mod_name;
+      }
+    }
   }
 
+  size_t src_len = strlen(src);
+  bool commonjs = pljs_source_is_commonjs(ctx, src, src_len);
+  JSValue obj;
+
   syntax_check_only = true;
-  JSValue obj = JS_Eval(ctx, src, strlen(src), mod_name,
-                        JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY);
+  if (commonjs) {
+    StringInfoData wrapped;
+
+    initStringInfo(&wrapped);
+    appendStringInfoString(
+        &wrapped, "const module = { exports: {} }; (function (exports, module, "
+                  "require) {");
+    appendBinaryStringInfo(&wrapped, src, (int)src_len);
+    appendStringInfoString(&wrapped,
+                           "\n}).call(module.exports, module.exports, module, "
+                           "pljs.require);\nexport default module.exports;\n");
+
+    obj = JS_Eval(ctx, wrapped.data, wrapped.len, mod_name,
+                  JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY);
+    pfree(wrapped.data);
+  } else {
+    obj = JS_Eval(ctx, src, src_len, mod_name,
+                  JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY);
+  }
   syntax_check_only = false;
 
-  if (argc >= 2 && JS_IsString(argv[1])) {
-    JS_FreeCString(ctx, mod_name);
+  if (norm_mod_name) {
+    pfree(norm_mod_name);
+  }
+  if (raw_mod_name) {
+    JS_FreeCString(ctx, raw_mod_name);
   }
   JS_FreeCString(ctx, src);
 

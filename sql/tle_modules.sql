@@ -42,7 +42,7 @@ $$;
 
 SELECT test_cjs_require('hello tle');
 
--- 5. Test QuickJS precompiled bytecode module (pljs.compile_bytecode + bytecode BYTEA column)
+-- 5. Test QuickJS precompiled bytecode module (pljs.compile_bytecode + bytecode BYTEA column, ESM and CommonJS)
 DO LANGUAGE pljs $$
   const bc = pljs.compile_bytecode(
     'export function fastAdd(x, y) { return x + y + 100; }',
@@ -52,11 +52,20 @@ DO LANGUAGE pljs $$
     'INSERT INTO pljs.modules (path, package_name, package_version, bytecode) VALUES ($1, $2, $3, $4)',
     ['index.js', 'fast-mod', '1.0.0', bc]
   );
+  const cjsBc = pljs.compile_bytecode(
+    'exports.fastMul = function(x, y) { return x * y; };',
+    'tle:fast-cjs'
+  );
+  pljs.execute(
+    'INSERT INTO pljs.modules (path, bytecode) VALUES ($1, $2)',
+    ['fast-cjs', cjsBc]
+  );
 $$;
 
 CREATE OR REPLACE FUNCTION test_bytecode_import(x int, y int) RETURNS int LANGUAGE pljs AS $$
   import { fastAdd } from 'fast-mod@1.0.0';
-  return fastAdd(x, y);
+  const cjs = require('fast-cjs');
+  return fastAdd(x, y) + cjs.fastMul(x, 2);
 $$;
 
 SELECT test_bytecode_import(10, 20);
