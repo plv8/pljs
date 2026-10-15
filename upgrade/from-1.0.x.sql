@@ -17,6 +17,7 @@ REVOKE ALL ON FUNCTION pljs_info() FROM PUBLIC;
 REVOKE ALL ON FUNCTION pljs_reset() FROM PUBLIC;
 
 CREATE SCHEMA pljs;
+GRANT USAGE ON SCHEMA pljs TO PUBLIC;
 
 CREATE TABLE pljs.packages (
   name TEXT NOT NULL,
@@ -44,6 +45,9 @@ CREATE TABLE pljs.modules (
   is_trusted BOOLEAN NOT NULL DEFAULT true,
   FOREIGN KEY (package_name, package_version) REFERENCES pljs.packages (name, version)
 );
+
+GRANT SELECT ON pljs.packages TO PUBLIC;
+GRANT SELECT ON pljs.modules TO PUBLIC;
 
 -- What is installed in these tables is the user's, not the extension's, so a
 -- dump has to include it: without this, pg_dump skips the tables' contents and

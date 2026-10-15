@@ -227,6 +227,86 @@ $$;
 
 SELECT test_pljs_native_static_import(6, 7);
 
+-- 10. Table ACLs, Row-Level Security (RLS), and non-superuser bytecode/untrusted restrictions
+GRANT SELECT, INSERT ON pljs.modules TO pljs_unpriv_tle_user;
+SET ROLE pljs_unpriv_tle_user;
+DO $$
+BEGIN
+  BEGIN
+    EXECUTE $q$DO LANGUAGE pljs $js$ pljs.compile_bytecode('export const x = 1;'); $js$ $q$;
+    RAISE EXCEPTION 'Expected compile_bytecode privilege rejection';
+  EXCEPTION WHEN insufficient_privilege THEN
+    RAISE NOTICE 'Caught expected compile_bytecode privilege rejection';
+  END;
+  BEGIN
+    INSERT INTO pljs.modules (path, bytecode) VALUES ('unpriv_bc', E'\\x0500');
+    RAISE EXCEPTION 'Expected bytecode INSERT privilege rejection';
+  EXCEPTION WHEN insufficient_privilege THEN
+    RAISE NOTICE 'Caught expected bytecode INSERT privilege rejection';
+  END;
+  BEGIN
+    INSERT INTO pljs.modules (path, source, is_trusted) VALUES ('unpriv_untrusted', 'export const x = 1;', false);
+    RAISE EXCEPTION 'Expected is_trusted=false INSERT privilege rejection';
+  EXCEPTION WHEN insufficient_privilege THEN
+    RAISE NOTICE 'Caught expected is_trusted=false INSERT privilege rejection';
+  END;
+END;
+$$;
+RESET ROLE;
+REVOKE INSERT ON pljs.modules FROM pljs_unpriv_tle_user;
+
+-- Revoking SELECT on pljs.modules from PUBLIC and unprivileged role blocks module loading
+REVOKE SELECT ON pljs.modules FROM PUBLIC, pljs_unpriv_tle_user;
+GRANT EXECUTE ON FUNCTION test_pljs_native_static_import(int, int) TO pljs_unpriv_tle_user;
+SET ROLE pljs_unpriv_tle_user;
+DO $$
+BEGIN
+  BEGIN
+    PERFORM test_pljs_native_static_import(2, 3);
+    RAISE EXCEPTION 'Expected table ACL rejection';
+  EXCEPTION WHEN insufficient_privilege THEN
+    RAISE NOTICE 'Caught expected table ACL rejection on pljs.modules';
+  END;
+END;
+$$;
+RESET ROLE;
+GRANT SELECT ON pljs.modules TO PUBLIC;
+
+-- Row-Level Security (RLS) policy on pljs.modules filters visible modules for non-superusers
+INSERT INTO pljs.modules (path, source) VALUES
+  ('rls_hidden_mod', 'export function hiddenVal() { return 99; }');
+ALTER TABLE pljs.modules ENABLE ROW LEVEL SECURITY;
+CREATE POLICY pljs_modules_rls_pol ON pljs.modules
+  FOR SELECT USING (path <> 'rls_hidden_mod');
+
+CREATE OR REPLACE FUNCTION test_rls_hidden() RETURNS int LANGUAGE pljs AS $$
+  import { hiddenVal } from 'rls_hidden_mod';
+  return hiddenVal();
+$$;
+GRANT EXECUTE ON FUNCTION test_rls_hidden() TO pljs_unpriv_tle_user;
+
+-- Superuser bypasses RLS and sees rls_hidden_mod
+SELECT test_rls_hidden();
+
+-- Non-superuser is subject to RLS: rls_hidden_mod is filtered out, while pljs_native_esm is allowed
+SET ROLE pljs_unpriv_tle_user;
+SELECT test_pljs_native_static_import(6, 7);
+DO $$
+BEGIN
+  BEGIN
+    PERFORM test_rls_hidden();
+    RAISE EXCEPTION 'Expected RLS to hide rls_hidden_mod';
+  EXCEPTION WHEN OTHERS THEN
+    RAISE NOTICE 'Caught expected RLS hidden module error';
+  END;
+END;
+$$;
+RESET ROLE;
+
+DROP POLICY pljs_modules_rls_pol ON pljs.modules;
+ALTER TABLE pljs.modules DISABLE ROW LEVEL SECURITY;
+DROP FUNCTION test_rls_hidden();
+
 DROP FUNCTION test_pljs_native_static_import(int, int);
 DROP FUNCTION test_esm_singleton();
 DROP FUNCTION test_untrusted_tle();

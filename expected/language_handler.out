@@ -562,6 +562,22 @@ SELECT test_pl(21) AS test_pl_after_rollback;
                     210
 (1 row)
 
+-- 9i. Custom language function with static ES module import does not poison the
+-- user's persistent JSContext during validator syntax checking
+INSERT INTO pljs.modules (path, source) VALUES
+  ('custom_lang_mod', 'export function clm_triple(x) { return x * 3; }');
+CREATE FUNCTION test_custom_lang_import(x int) RETURNS int AS $$
+  import { clm_triple } from 'custom_lang_mod';
+  RETURN clm_triple(x);
+$$ LANGUAGE pseudolang;
+SELECT test_custom_lang_import(14) AS custom_lang_import_result;
+ custom_lang_import_result 
+---------------------------
+                        42
+(1 row)
+
+DROP FUNCTION test_custom_lang_import(int);
+DELETE FROM pljs.modules WHERE path = 'custom_lang_mod';
 -- Cleanup
 DROP FUNCTION test_other_lang(int);
 DROP LANGUAGE other_lang;

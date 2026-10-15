@@ -2145,20 +2145,18 @@ Datum pljs_call_validator(PG_FUNCTION_ARGS) {
 
   bool is_module = pljs_build_function_source(&src, &context, is_trigger);
 
-  bool free_temp_ctx = false;
-  if (lang_is_pljs) {
-    ctx = JS_NewContext(rt);
-    if (ctx == NULL) {
-      pfree(src.data);
-      elog(ERROR, "could not create a JavaScript context");
-    }
-    context.ctx = ctx;
-    free_temp_ctx = true;
+  ctx = JS_NewContext(rt);
+  if (ctx == NULL) {
+    pfree(src.data);
+    elog(ERROR, "could not create a JavaScript context");
   }
+  context.ctx = ctx;
 
   /*
    * Only the syntax is checked.  A function's imports are not loaded here, so
-   * a function can be created before the modules it uses are.
+   * a function can be created before the modules it uses are.  Always use a
+   * temporary JSContext so syntax_check_only stub modules are never registered
+   * in the user's persistent context.
    */
   JSValue val =
       is_module
@@ -2180,18 +2178,14 @@ Datum pljs_call_validator(PG_FUNCTION_ARGS) {
      * references into it.
      */
     JS_FreeValue(ctx, val);
-    if (free_temp_ctx) {
-      JS_FreeContext(ctx);
-    }
+    JS_FreeContext(ctx);
 
     pljs_ereport_js_error(message, pg_detail, detail, sqlstate,
                           "invalid pljs function body");
   }
 
   JS_FreeValue(ctx, val);
-  if (free_temp_ctx) {
-    JS_FreeContext(ctx);
-  }
+  JS_FreeContext(ctx);
 
   /*
    * The function is being created or replaced, so drop the compiled copy cached

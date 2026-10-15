@@ -3,13 +3,17 @@
 #include <ctype.h>
 
 #include "access/genam.h"
+#include "access/htup_details.h"
 #include "access/table.h"
+#include "access/transam.h"
 #include "access/xact.h"
 #include "catalog/namespace.h"
 #include "catalog/pg_collation_d.h"
+#include "catalog/pg_namespace_d.h"
 #include "catalog/pg_type_d.h"
 #include "commands/trigger.h"
 #include "miscadmin.h"
+#include "utils/acl.h"
 #include "utils/array.h"
 #include "utils/builtins.h"
 #include "utils/fmgroids.h"
@@ -17,6 +21,7 @@
 #include "utils/jsonb.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
+#include "utils/rls.h"
 #include "utils/snapmgr.h"
 
 #include "pljs.h"
@@ -162,13 +167,70 @@ void pljs_modules_init(void) {
  * pljs.packages.  Invalidating the table's relcache entry reaches every
  * backend, at commit, and this one now -- and again if the transaction rolls
  * back, which is what puts a rolled-back change's modules back.
+ *
+ * Also prevents non-superusers from writing precompiled QuickJS bytecode or
+ * untrusted modules (`is_trusted = false`) in pljs.modules.
  */
 Datum pljs_modules_changed(PG_FUNCTION_ARGS) {
   if (!CALLED_AS_TRIGGER(fcinfo)) {
     elog(ERROR, "pljs_modules_changed: not called by trigger manager");
   }
 
-  CacheInvalidateRelcache(((TriggerData *)fcinfo->context)->tg_relation);
+  TriggerData *trigdata = (TriggerData *)fcinfo->context;
+  Relation rel = trigdata->tg_relation;
+
+  if (!superuser() &&
+      (TRIGGER_FIRED_BY_INSERT(trigdata->tg_event) ||
+       TRIGGER_FIRED_BY_UPDATE(trigdata->tg_event)) &&
+      strcmp(RelationGetRelationName(rel), "modules") == 0 &&
+      RelationGetDescr(rel)->natts >= Amodule_bytecode) {
+    Snapshot snapshot = SnapshotSelf;
+    SysScanDesc scan =
+        systable_beginscan(rel, InvalidOid, false, snapshot, 0, NULL);
+    HeapTuple tuple;
+    bool forbidden_bytecode = false;
+    bool forbidden_untrusted = false;
+
+    while (HeapTupleIsValid(tuple = systable_getnext(scan))) {
+      CHECK_FOR_INTERRUPTS();
+      if (!TransactionIdIsCurrentTransactionId(
+              HeapTupleHeaderGetRawXmin(tuple->t_data))) {
+        continue;
+      }
+
+      Datum datum_array[Amodule_length];
+      bool is_null_array[Amodule_length];
+
+      memset(is_null_array, true, sizeof(is_null_array));
+      heap_deform_tuple(tuple, RelationGetDescr(rel), datum_array,
+                        is_null_array);
+
+      if (!is_null_array[Amodule_bytecode - 1]) {
+        forbidden_bytecode = true;
+        break;
+      }
+      if (!is_null_array[Amodule_is_trusted - 1] &&
+          !DatumGetBool(datum_array[Amodule_is_trusted - 1])) {
+        forbidden_untrusted = true;
+        break;
+      }
+    }
+
+    systable_endscan(scan);
+
+    if (forbidden_bytecode) {
+      ereport(ERROR,
+              (errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+               errmsg("must be superuser to write precompiled bytecode in pljs.modules")));
+    }
+    if (forbidden_untrusted) {
+      ereport(ERROR,
+              (errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+               errmsg("must be superuser to write untrusted modules in pljs.modules")));
+    }
+  }
+
+  CacheInvalidateRelcache(rel);
 
   return PointerGetDatum(NULL);
 }
@@ -312,6 +374,331 @@ static void pljs_module_id_free(pljs_module_id *id) {
   memset(id, 0, sizeof(*id));
 }
 
+typedef enum pljs_acl_failure {
+  PLJS_ACL_OK = 0,
+  PLJS_ACL_DENIED_SCHEMA,
+  PLJS_ACL_DENIED_MODULES,
+  PLJS_ACL_DENIED_PACKAGES,
+  PLJS_ACL_ERROR_RLS,
+} pljs_acl_failure;
+
+static pljs_acl_failure last_acl_failure = PLJS_ACL_OK;
+static char *last_acl_error_msg = NULL;
+
+static void pljs_clear_acl_failure(void) {
+  last_acl_failure = PLJS_ACL_OK;
+  if (last_acl_error_msg) {
+    free(last_acl_error_msg);
+    last_acl_error_msg = NULL;
+  }
+}
+
+static void pljs_record_acl_failure(pljs_acl_failure kind, const char *msg) {
+  if (last_acl_failure == PLJS_ACL_OK) {
+    last_acl_failure = kind;
+    if (msg) {
+      last_acl_error_msg = strdup(msg);
+    }
+  }
+}
+
+/**
+ * @brief Checks USAGE on schema pljs and SELECT on the given module/package
+ * table for the current user without throwing a PostgreSQL error over QuickJS.
+ */
+static bool pljs_check_table_select_acl(Oid relid, bool is_packages) {
+  Oid userid = GetUserId();
+  Oid nspid = get_rel_namespace(relid);
+
+  if (OidIsValid(nspid) &&
+      object_aclcheck(NamespaceRelationId, nspid, userid, ACL_USAGE) !=
+          ACLCHECK_OK) {
+    pljs_record_acl_failure(PLJS_ACL_DENIED_SCHEMA,
+                            "permission denied for schema pljs");
+    return false;
+  }
+
+  if (pg_class_aclcheck(relid, userid, ACL_SELECT) != ACLCHECK_OK) {
+    pljs_record_acl_failure(
+        is_packages ? PLJS_ACL_DENIED_PACKAGES : PLJS_ACL_DENIED_MODULES,
+        is_packages ? "permission denied for table packages"
+                    : "permission denied for table modules");
+    return false;
+  }
+
+  return true;
+}
+
+/**
+ * @brief Evaluates Row-Level Security (RLS) policies via SPI inside an
+ * internal subtransaction when RLS is enabled on pljs.modules.
+ */
+static bool pljs_fetch_module_rls(const pljs_module_id *id, uint8_t **source,
+                                  size_t *source_len, bytea **bytecode,
+                                  bool *sloppy, ArrayType **requires_out,
+                                  bool *is_trusted_out, bool has_tle_cols) {
+  MemoryContext caller_ctx = CurrentMemoryContext;
+  pljs_subxact sx;
+  bool volatile found = false;
+  bool volatile spi_connected = false;
+
+  pljs_subxact_init(&sx);
+
+  PG_TRY();
+  {
+    pljs_subxact_begin(&sx, false);
+    if (SPI_connect() != SPI_OK_CONNECT) {
+      elog(ERROR, "SPI_connect failed during pljs.modules RLS lookup");
+    }
+    spi_connected = true;
+
+    const char *cols =
+        has_tle_cols ? "source, sloppy, bytecode, requires, is_trusted"
+                     : "source, sloppy";
+    char *query;
+    Oid argtypes[3];
+    Datum values[3];
+    int nargs;
+
+    if (id->package) {
+      query = psprintf("SELECT %s FROM pljs.modules "
+                       "WHERE package_name = $1 AND package_version = $2 "
+                       "AND path = $3 LIMIT 1",
+                       cols);
+      argtypes[0] = TEXTOID;
+      argtypes[1] = TEXTOID;
+      argtypes[2] = TEXTOID;
+      values[0] = CStringGetTextDatum(id->package);
+      values[1] = CStringGetTextDatum(id->version);
+      values[2] = CStringGetTextDatum(id->path);
+      nargs = 3;
+    } else {
+      query = psprintf("SELECT %s FROM pljs.modules "
+                       "WHERE package_name IS NULL AND path = $1 LIMIT 1",
+                       cols);
+      argtypes[0] = TEXTOID;
+      values[0] = CStringGetTextDatum(id->path);
+      nargs = 1;
+    }
+
+    int rc = SPI_execute_with_args(query, nargs, argtypes, values, NULL, true, 1);
+    if (rc != SPI_OK_SELECT) {
+      elog(ERROR, "failed to query pljs.modules under RLS");
+    }
+
+    if (SPI_processed > 0 && SPI_tuptable != NULL) {
+      HeapTuple tup = SPI_tuptable->vals[0];
+      TupleDesc tupdesc = SPI_tuptable->tupdesc;
+      bool src_null = true, bc_null = true, sl_null = true;
+      bool req_null = true, tr_null = true;
+      Datum src_d = SPI_getbinval(tup, tupdesc, 1, &src_null);
+      Datum sl_d = SPI_getbinval(tup, tupdesc, 2, &sl_null);
+      Datum bc_d = has_tle_cols ? SPI_getbinval(tup, tupdesc, 3, &bc_null) : 0;
+      Datum req_d = has_tle_cols ? SPI_getbinval(tup, tupdesc, 4, &req_null) : 0;
+      Datum tr_d = has_tle_cols ? SPI_getbinval(tup, tupdesc, 5, &tr_null) : 0;
+
+      if (!src_null || !bc_null) {
+        MemoryContext old = MemoryContextSwitchTo(caller_ctx);
+        if (source && !src_null) {
+          *source = pljs_module_source(src_d, source_len);
+        }
+        if (bytecode && !bc_null) {
+          *bytecode = DatumGetByteaPCopy(bc_d);
+        }
+        if (sloppy && !sl_null) {
+          *sloppy = DatumGetBool(sl_d);
+        }
+        if (requires_out && !req_null) {
+          *requires_out = DatumGetArrayTypePCopy(req_d);
+        }
+        if (is_trusted_out && !tr_null) {
+          *is_trusted_out = DatumGetBool(tr_d);
+        }
+        MemoryContextSwitchTo(old);
+        found = true;
+      }
+    }
+
+    spi_connected = false;
+    SPI_finish();
+  }
+  PG_CATCH();
+  {
+    ErrorData *edata = pljs_subxact_abort(&sx);
+    pljs_record_acl_failure(PLJS_ACL_ERROR_RLS,
+                            edata->message ? edata->message
+                                           : "RLS check failed on pljs.modules");
+    FreeErrorData(edata);
+    return false;
+  }
+  PG_END_TRY();
+
+  ErrorData *commit_err = pljs_subxact_commit(&sx);
+  if (commit_err != NULL) {
+    pljs_record_acl_failure(PLJS_ACL_ERROR_RLS, commit_err->message);
+    FreeErrorData(commit_err);
+    return false;
+  }
+
+  return found;
+}
+
+/**
+ * @brief Evaluates Row-Level Security (RLS) policies via SPI when resolving
+ * package versions from pljs.packages.
+ */
+static char *pljs_resolve_package_version_rls(const char *pkg_name,
+                                              const semver_range *range) {
+  MemoryContext caller_ctx = CurrentMemoryContext;
+  pljs_subxact sx;
+  char *volatile best_version = NULL;
+
+  pljs_subxact_init(&sx);
+
+  PG_TRY();
+  {
+    pljs_subxact_begin(&sx, false);
+    if (SPI_connect() != SPI_OK_CONNECT) {
+      elog(ERROR, "SPI_connect failed during pljs.packages RLS lookup");
+    }
+
+    Oid argtypes[1] = {TEXTOID};
+    Datum values[1] = {CStringGetTextDatum(pkg_name)};
+    int rc = SPI_execute_with_args(
+        "SELECT version FROM pljs.packages WHERE name = $1", 1, argtypes,
+        values, NULL, true, 0);
+    if (rc != SPI_OK_SELECT) {
+      elog(ERROR, "failed to query pljs.packages under RLS");
+    }
+
+    semver best_semver = {0, 0, 0};
+    bool found = false;
+
+    for (uint64 i = 0; i < SPI_processed; i++) {
+      HeapTuple tup = SPI_tuptable->vals[i];
+      TupleDesc tupdesc = SPI_tuptable->tupdesc;
+      bool v_null = true;
+      Datum v_d = SPI_getbinval(tup, tupdesc, 1, &v_null);
+      if (v_null) {
+        continue;
+      }
+      char *ver_str = TextDatumGetCString(v_d);
+      semver ver;
+      if (!semver_parse(ver_str, &ver)) {
+        pfree(ver_str);
+        continue;
+      }
+      bool matches = range ? semver_satisfies(&ver, range) : true;
+      if (matches && (!found || semver_compare(&ver, &best_semver) > 0)) {
+        MemoryContext old = MemoryContextSwitchTo(caller_ctx);
+        if (best_version) {
+          pfree(best_version);
+        }
+        best_version = pstrdup(ver_str);
+        MemoryContextSwitchTo(old);
+        best_semver = ver;
+        found = true;
+      }
+      pfree(ver_str);
+    }
+
+    SPI_finish();
+  }
+  PG_CATCH();
+  {
+    ErrorData *edata = pljs_subxact_abort(&sx);
+    pljs_record_acl_failure(PLJS_ACL_ERROR_RLS,
+                            edata->message ? edata->message
+                                           : "RLS check failed on pljs.packages");
+    FreeErrorData(edata);
+    return NULL;
+  }
+  PG_END_TRY();
+
+  ErrorData *commit_err = pljs_subxact_commit(&sx);
+  if (commit_err != NULL) {
+    pljs_record_acl_failure(PLJS_ACL_ERROR_RLS, commit_err->message);
+    FreeErrorData(commit_err);
+    return NULL;
+  }
+
+  return best_version;
+}
+
+/**
+ * @brief Evaluates Row-Level Security (RLS) policies via SPI when looking up
+ * package info in pljs.packages.
+ */
+static char *pljs_get_package_info_rls(const char *pkg_name,
+                                       const char *pkg_version,
+                                       Datum *deps_out, bool *deps_is_null) {
+  MemoryContext caller_ctx = CurrentMemoryContext;
+  pljs_subxact sx;
+  char *volatile entry_point = NULL;
+
+  pljs_subxact_init(&sx);
+
+  PG_TRY();
+  {
+    pljs_subxact_begin(&sx, false);
+    if (SPI_connect() != SPI_OK_CONNECT) {
+      elog(ERROR, "SPI_connect failed during pljs.packages RLS lookup");
+    }
+
+    Oid argtypes[2] = {TEXTOID, TEXTOID};
+    Datum values[2] = {CStringGetTextDatum(pkg_name),
+                       CStringGetTextDatum(pkg_version)};
+    int rc = SPI_execute_with_args(
+        "SELECT entry_point, dependencies FROM pljs.packages "
+        "WHERE name = $1 AND version = $2 LIMIT 1",
+        2, argtypes, values, NULL, true, 1);
+    if (rc != SPI_OK_SELECT) {
+      elog(ERROR, "failed to query pljs.packages under RLS");
+    }
+
+    if (SPI_processed > 0 && SPI_tuptable != NULL) {
+      HeapTuple tup = SPI_tuptable->vals[0];
+      TupleDesc tupdesc = SPI_tuptable->tupdesc;
+      bool ep_null = true, dep_null = true;
+      Datum ep_d = SPI_getbinval(tup, tupdesc, 1, &ep_null);
+      Datum dep_d = SPI_getbinval(tup, tupdesc, 2, &dep_null);
+
+      MemoryContext old = MemoryContextSwitchTo(caller_ctx);
+      if (!ep_null) {
+        entry_point = TextDatumGetCString(ep_d);
+      }
+      if (deps_out && deps_is_null) {
+        *deps_is_null = dep_null;
+        if (!dep_null) {
+          *deps_out = PointerGetDatum(PG_DETOAST_DATUM_COPY(dep_d));
+        }
+      }
+      MemoryContextSwitchTo(old);
+    }
+
+    SPI_finish();
+  }
+  PG_CATCH();
+  {
+    ErrorData *edata = pljs_subxact_abort(&sx);
+    pljs_record_acl_failure(PLJS_ACL_ERROR_RLS,
+                            edata->message ? edata->message
+                                           : "RLS check failed on pljs.packages");
+    FreeErrorData(edata);
+    return NULL;
+  }
+  PG_END_TRY();
+
+  ErrorData *commit_err = pljs_subxact_commit(&sx);
+  if (commit_err != NULL) {
+    pljs_record_acl_failure(PLJS_ACL_ERROR_RLS, commit_err->message);
+    FreeErrorData(commit_err);
+    return NULL;
+  }
+
+  return entry_point;
+}
+
 /**
  * @brief Looks a stored module up, and optionally reads its source, bytecode,
  * sloppy flag, requires allowlist, and is_trusted flag.
@@ -353,6 +740,18 @@ static bool pljs_fetch_module(const pljs_module_id *id, uint8_t **source,
   }
   if (is_trusted_out) {
     *is_trusted_out = true;
+  }
+
+  if (!pljs_check_table_select_acl(modules_relid, false)) {
+    return false;
+  }
+
+  if (check_enable_rls(modules_relid, InvalidOid, true) == RLS_ENABLED) {
+    Relation table = table_open(modules_relid, AccessShareLock);
+    bool has_tle_cols = (RelationGetDescr(table)->natts >= Amodule_is_trusted);
+    table_close(table, AccessShareLock);
+    return pljs_fetch_module_rls(id, source, source_len, bytecode, sloppy,
+                                 requires_out, is_trusted_out, has_tle_cols);
   }
 
   if (id->package) {
@@ -448,6 +847,15 @@ static char *pljs_resolve_package_version(const char *pkg_name,
     }
   }
 
+  if (!pljs_check_table_select_acl(packages_relid, true)) {
+    return NULL;
+  }
+
+  if (check_enable_rls(packages_relid, InvalidOid, true) == RLS_ENABLED) {
+    return pljs_resolve_package_version_rls(pkg_name,
+                                            range_str ? &range : NULL);
+  }
+
   ScanKeyData scankey[1];
   pljs_text_key(&scankey[0], Apackage_name, pkg_name);
 
@@ -519,6 +927,15 @@ static char *pljs_get_package_info(const char *pkg_name, const char *pkg_version
   // Defined even when the package is not found, so callers can read them.
   if (deps_is_null) {
     *deps_is_null = true;
+  }
+
+  if (!pljs_check_table_select_acl(packages_relid, true)) {
+    return NULL;
+  }
+
+  if (check_enable_rls(packages_relid, InvalidOid, true) == RLS_ENABLED) {
+    return pljs_get_package_info_rls(pkg_name, pkg_version, deps_out,
+                                     deps_is_null);
   }
 
   ScanKeyData scankey[2];
@@ -967,12 +1384,30 @@ static JSValue pljs_throw_coded_module_error(JSContext *ctx, int sqlerrcode,
   return JS_EXCEPTION;
 }
 
+static bool pljs_throw_acl_failure_if_any(JSContext *ctx) {
+  if (last_acl_failure == PLJS_ACL_OK) {
+    return false;
+  }
+
+  char *msg = last_acl_error_msg ? pstrdup(last_acl_error_msg)
+                                 : pstrdup("permission denied");
+  pljs_clear_acl_failure();
+  pljs_throw_coded_module_error(ctx, ERRCODE_INSUFFICIENT_PRIVILEGE, msg,
+                                false);
+  pfree(msg);
+  return true;
+}
+
 /**
  * @brief Throws the error for a specifier that could not be resolved.
  */
 static void pljs_throw_unresolved(JSContext *ctx, pljs_resolve_result result,
                                   const char *spec) {
   module_load_failed = true;
+
+  if (pljs_throw_acl_failure_if_any(ctx)) {
+    return;
+  }
 
   if (result == PLJS_ESCAPES_ROOT) {
     char *msg = psprintf(
@@ -1130,14 +1565,19 @@ char *pljs_module_normalize(JSContext *ctx, const char *base_name,
     return NULL;
   }
 
+  pljs_clear_acl_failure();
+
   has_importer = pljs_module_id_parse(base_name, &importer);
 
   pljs_resolve_result result =
       pljs_resolve_spec(name, has_importer ? &importer : NULL, &id);
 
-  if (result != PLJS_RESOLVED) {
+  if (result != PLJS_RESOLVED || last_acl_failure != PLJS_ACL_OK) {
     if (has_importer) {
       pljs_module_id_free(&importer);
+    }
+    if (result == PLJS_RESOLVED) {
+      pljs_module_id_free(&id);
     }
     pljs_throw_unresolved(ctx, result, name);
     return NULL;
@@ -1148,6 +1588,7 @@ char *pljs_module_normalize(JSContext *ctx, const char *base_name,
       pljs_module_id_free(&importer);
     }
     pljs_module_id_free(&id);
+    pljs_throw_acl_failure_if_any(ctx);
     return NULL;
   }
 
@@ -1339,6 +1780,10 @@ typedef struct pljs_js_module_def_head {
   JSAtom module_name;
 } pljs_js_module_def_head;
 
+StaticAssertDecl(offsetof(pljs_js_module_def_head, module_name) ==
+                     sizeof(int) + sizeof(uint32_t) + 2 * sizeof(void *),
+                 "pljs_js_module_def_head layout must match JSModuleDef");
+
 /**
  * @brief QuickJS module loader: compiles the stored module a canonical name
  * names.
@@ -1378,11 +1823,15 @@ JSModuleDef *pljs_module_loader(JSContext *ctx, const char *name,
     return NULL;
   }
 
+  pljs_clear_acl_failure();
+
   if (!pljs_module_id_parse(name, &id) ||
       !pljs_fetch_module(&id, &source, &source_len, &bytecode, &sloppy, NULL,
                          NULL)) {
     module_load_failed = true;
-    JS_ThrowReferenceError(ctx, "could not load module '%s'", name);
+    if (!pljs_throw_acl_failure_if_any(ctx)) {
+      JS_ThrowReferenceError(ctx, "could not load module '%s'", name);
+    }
     pljs_module_id_free(&id);
     return NULL;
   }
@@ -1390,8 +1839,34 @@ JSModuleDef *pljs_module_loader(JSContext *ctx, const char *name,
   pljs_module_id_free(&id);
 
   if (bytecode != NULL) {
+    Relation table = table_open(modules_relid, AccessShareLock);
+    Oid table_owner = table->rd_rel->relowner;
+    table_close(table, AccessShareLock);
+
+    if (!superuser_arg(table_owner)) {
+      pfree(bytecode);
+      if (source) {
+        pfree(source);
+      }
+      pljs_throw_coded_module_error(
+          ctx, ERRCODE_INSUFFICIENT_PRIVILEGE,
+          "pljs.modules must be owned by a superuser to load bytecode", false);
+      return NULL;
+    }
+
     const uint8_t *buf = (const uint8_t *)VARDATA_ANY(bytecode);
     size_t buf_len = VARSIZE_ANY_EXHDR(bytecode);
+    if (buf_len < 2 || buf[0] != 5) {
+      pfree(bytecode);
+      if (source) {
+        pfree(source);
+      }
+      module_load_failed = true;
+      JS_ThrowSyntaxError(ctx, "invalid QuickJS bytecode header for '%s'",
+                          name);
+      return NULL;
+    }
+
     JSValue func_val = JS_ReadObject(ctx, buf, buf_len, JS_READ_OBJ_BYTECODE);
     bool has_source = (source != NULL && source_len > 0);
     bool commonjs =
@@ -1618,15 +2093,21 @@ static JSValue pljs_module_load_once(JSContext *ctx, const char *spec,
     goto done;
   }
 
+  pljs_clear_acl_failure();
+
   pljs_resolve_result resolved =
       pljs_resolve_spec(spec, has_importer ? &importer : NULL, &id);
 
-  if (resolved != PLJS_RESOLVED) {
+  if (resolved != PLJS_RESOLVED || last_acl_failure != PLJS_ACL_OK) {
+    if (resolved == PLJS_RESOLVED) {
+      pljs_module_id_free(&id);
+    }
     pljs_throw_unresolved(ctx, resolved, spec);
     goto done;
   }
 
   if (!pljs_check_module_access(ctx, has_importer ? &importer : NULL, &id)) {
+    pljs_throw_acl_failure_if_any(ctx);
     goto done;
   }
 
@@ -1859,6 +2340,12 @@ JSValue pljs_module_require(JSContext *ctx, const char *module_name) {
  */
 JSValue pljs_compile_bytecode_js(JSContext *ctx, JSValueConst this_val,
                                  int argc, JSValueConst *argv) {
+  if (!superuser()) {
+    return pljs_throw_coded_module_error(
+        ctx, ERRCODE_INSUFFICIENT_PRIVILEGE,
+        "must be superuser to compile pljs bytecode", false);
+  }
+
   if (argc < 1) {
     return js_throw(
         "pljs.compile_bytecode(source[, module_name]) requires source", ctx);
@@ -1903,8 +2390,20 @@ JSValue pljs_compile_bytecode_js(JSContext *ctx, JSValueConst this_val,
     }
   }
 
+  JSContext *comp_ctx = JS_NewContext(JS_GetRuntime(ctx));
+  if (comp_ctx == NULL) {
+    if (norm_mod_name) {
+      pfree(norm_mod_name);
+    }
+    if (raw_mod_name) {
+      JS_FreeCString(ctx, raw_mod_name);
+    }
+    JS_FreeCString(ctx, src);
+    return JS_ThrowInternalError(ctx, "could not create a JavaScript context");
+  }
+
   size_t src_len = strlen(src);
-  bool commonjs = pljs_source_is_commonjs(ctx, src, src_len);
+  bool commonjs = pljs_source_is_commonjs(comp_ctx, src, src_len);
   JSValue obj;
 
   syntax_check_only = true;
@@ -1920,11 +2419,11 @@ JSValue pljs_compile_bytecode_js(JSContext *ctx, JSValueConst this_val,
                            "\n}).call(module.exports, module.exports, module, "
                            "pljs.require);\nexport default module.exports;\n");
 
-    obj = JS_Eval(ctx, wrapped.data, wrapped.len, mod_name,
+    obj = JS_Eval(comp_ctx, wrapped.data, wrapped.len, mod_name,
                   JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY);
     pfree(wrapped.data);
   } else {
-    obj = JS_Eval(ctx, src, src_len, mod_name,
+    obj = JS_Eval(comp_ctx, src, src_len, mod_name,
                   JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY);
   }
   syntax_check_only = false;
@@ -1938,20 +2437,34 @@ JSValue pljs_compile_bytecode_js(JSContext *ctx, JSValueConst this_val,
   JS_FreeCString(ctx, src);
 
   if (JS_IsException(obj)) {
-    return obj;
+    JSValue exc = JS_GetException(comp_ctx);
+    const char *err_str = JS_ToCString(comp_ctx, exc);
+    char *saved_err = pstrdup(err_str ? err_str : "bytecode compilation error");
+    if (err_str) {
+      JS_FreeCString(comp_ctx, err_str);
+    }
+    JS_FreeValue(comp_ctx, exc);
+    JS_FreeContext(comp_ctx);
+    JS_ThrowSyntaxError(ctx, "%s", saved_err);
+    pfree(saved_err);
+    return JS_EXCEPTION;
   }
 
   size_t out_len = 0;
   uint8_t *out_buf =
-      JS_WriteObject(ctx, &out_len, obj, JS_WRITE_OBJ_BYTECODE);
-  JS_FreeValue(ctx, obj);
+      JS_WriteObject(comp_ctx, &out_len, obj, JS_WRITE_OBJ_BYTECODE);
+  JS_FreeValue(comp_ctx, obj);
 
   if (!out_buf) {
-    return JS_EXCEPTION;
+    JSValue exc = JS_GetException(comp_ctx);
+    JS_FreeValue(comp_ctx, exc);
+    JS_FreeContext(comp_ctx);
+    return JS_ThrowInternalError(ctx, "failed to serialize module bytecode");
   }
 
   JSValue ab = JS_NewArrayBufferCopy(ctx, out_buf, out_len);
-  js_free(ctx, out_buf);
+  js_free(comp_ctx, out_buf);
+  JS_FreeContext(comp_ctx);
   if (JS_IsException(ab)) {
     return ab;
   }
