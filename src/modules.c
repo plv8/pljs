@@ -517,7 +517,6 @@ static bool pljs_fetch_module_rls(const pljs_module_id *id, uint8_t **source,
       }
     }
 
-    spi_connected = false;
     SPI_finish();
   }
   PG_CATCH();
