@@ -1542,6 +1542,10 @@ static bool pljs_running_module(JSContext *ctx, int level,
   return ok;
 }
 
+// Active canonical module name during JS_ResolveModule of a bytecode module,
+// used when bytecode was compiled with 1-arg pljs.compile_bytecode(source).
+static const char *resolving_bytecode_module_name = NULL;
+
 /**
  * @brief QuickJS module normalizer: the canonical name of what a module's
  * `import` asked for.
@@ -1565,6 +1569,10 @@ char *pljs_module_normalize(JSContext *ctx, const char *base_name,
   pljs_clear_acl_failure();
 
   has_importer = pljs_module_id_parse(base_name, &importer);
+  if (!has_importer && resolving_bytecode_module_name != NULL) {
+    has_importer =
+        pljs_module_id_parse(resolving_bytecode_module_name, &importer);
+  }
 
   pljs_resolve_result result =
       pljs_resolve_spec(name, has_importer ? &importer : NULL, &id);
@@ -1767,20 +1775,6 @@ static JSValue pljs_compile_sloppy_commonjs(JSContext *ctx, const char *name,
   return compiled;
 }
 
-typedef struct pljs_js_module_def_head {
-  int ref_count;
-  uint8_t gc_obj_type_and_mark;
-  uint8_t dummy1;
-  uint16_t dummy2;
-  void *gc_link_prev;
-  void *gc_link_next;
-  JSAtom module_name;
-} pljs_js_module_def_head;
-
-StaticAssertDecl(offsetof(pljs_js_module_def_head, module_name) ==
-                     sizeof(int) + sizeof(uint32_t) + 2 * sizeof(void *),
-                 "pljs_js_module_def_head layout must match JSModuleDef");
-
 /**
  * @brief QuickJS module loader: compiles the stored module a canonical name
  * names.
@@ -1886,15 +1880,11 @@ JSModuleDef *pljs_module_loader(JSContext *ctx, const char *name,
       return NULL;
     }
 
-    pljs_js_module_def_head *mh =
-        (pljs_js_module_def_head *)JS_VALUE_GET_PTR(func_val);
-    JSAtom new_name = JS_NewAtom(ctx, name);
-    if (new_name != JS_ATOM_NULL) {
-      JS_FreeAtom(ctx, mh->module_name);
-      mh->module_name = new_name;
-    }
-
-    if (JS_ResolveModule(ctx, func_val) < 0) {
+    const char *prev_resolving = resolving_bytecode_module_name;
+    resolving_bytecode_module_name = name;
+    int resolve_rc = JS_ResolveModule(ctx, func_val);
+    resolving_bytecode_module_name = prev_resolving;
+    if (resolve_rc < 0) {
       JS_FreeValue(ctx, func_val);
       module_load_failed = true;
       return NULL;
@@ -2289,6 +2279,7 @@ static JSValue pljs_module_load(JSContext *ctx, const char *spec,
   {
     module_depth = saved_depth;
     syntax_check_only = false;
+    resolving_bytecode_module_name = NULL;
 
     JSValue state = pljs_module_state(ctx);
 
