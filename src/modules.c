@@ -440,7 +440,6 @@ static bool pljs_fetch_module_rls(const pljs_module_id *id, uint8_t **source,
   MemoryContext caller_ctx = CurrentMemoryContext;
   pljs_subxact sx;
   bool volatile found = false;
-  bool volatile spi_connected = false;
 
   pljs_subxact_init(&sx);
 
@@ -450,7 +449,6 @@ static bool pljs_fetch_module_rls(const pljs_module_id *id, uint8_t **source,
     if (SPI_connect() != SPI_OK_CONNECT) {
       elog(ERROR, "SPI_connect failed during pljs.modules RLS lookup");
     }
-    spi_connected = true;
 
     const char *cols =
         has_tle_cols ? "source, sloppy, bytecode, requires, is_trusted"
@@ -1856,7 +1854,7 @@ JSModuleDef *pljs_module_loader(JSContext *ctx, const char *name,
 
     const uint8_t *buf = (const uint8_t *)VARDATA_ANY(bytecode);
     size_t buf_len = VARSIZE_ANY_EXHDR(bytecode);
-    if (buf_len < 2 || buf[0] != 5) {
+    if (buf_len < 2 || buf[0] == 0) {
       pfree(bytecode);
       if (source) {
         pfree(source);

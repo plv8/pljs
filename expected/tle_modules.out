@@ -116,7 +116,7 @@ INSERT INTO pljs.modules (path, source, requires, is_trusted) VALUES
 CREATE OR REPLACE FUNCTION test_rel_and_semi(x int) RETURNS int LANGUAGE pljs AS $$
   /* comment with ; before import */
   import {
-    "fromSub" as fromSub
+    fromSub as fromSub
   } from 'tle:pkg/sub/back.js'
   import { val } from "tle:semi;mod";
   return fromSub(x) + val();
