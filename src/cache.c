@@ -30,6 +30,15 @@ HTAB *pljs_context_HashTable = NULL;
  */
 MemoryContext cache_memory_context = NULL;
 
+static uint64 pljs_context_lru_clock = 0;
+
+static void pljs_make_context_key(pljs_context_key *key, Oid user_id,
+                                  Oid owner_id) {
+  memset(key, 0, sizeof(pljs_context_key));
+  key->user_id = user_id;
+  key->owner_id = OidIsValid(owner_id) ? owner_id : user_id;
+}
+
 /**
  * @brief Initialize the PLJS cache subsystem.
  *
@@ -48,8 +57,8 @@ void pljs_cache_init(void) {
   // Initialize context cache.
   HASHCTL context_ctl = {0};
 
-  // Key size for contexts, we're storing by user_id, which is an Oid.
-  context_ctl.keysize = sizeof(Oid);
+  // Key size for contexts: composite (user_id, owner_id).
+  context_ctl.keysize = sizeof(pljs_context_key);
 
   context_ctl.entrysize = sizeof(pljs_context_cache_value);
   context_ctl.hcxt = cache_memory_context;
@@ -70,10 +79,10 @@ void pljs_cache_init(void) {
  * function hash table and drops the cache's #JSContext reference via
  * #JS_FreeContext.  Any remaining internal realm cycles (e.g. from
  * global functions or loaded ES modules) are collected by QuickJS's
- * cycle collector during #JS_FreeRuntime.
+ * cycle collector during #JS_FreeRuntime or #JS_RunGC.
  *
  * This function is called by #pljs_cache_free_all during extension
- * reset.
+ * reset and by #pljs_cache_evict_excess during LRU eviction.
  *
  * @param cache_entry  Pointer to the #pljs_context_cache_value to tear down.
  *                     The @c ctx field must be non-NULL.
@@ -90,6 +99,10 @@ static void pljs_cleanup_context(pljs_context_cache_value *cache_entry) {
     while ((fn_entry = hash_seq_search(&fn_status)) != NULL) {
       JS_FreeValue(ctx, fn_entry->fn);
       fn_entry->fn = JS_UNDEFINED;
+      if (fn_entry->prosrc != NULL) {
+        pfree(fn_entry->prosrc);
+        fn_entry->prosrc = NULL;
+      }
     }
   }
 
@@ -252,34 +265,91 @@ void pljs_cache_free_all(void) {
 }
 
 /**
- * @brief Add a new JavaScript context to the cache for a user.
+ * @brief Evict least-recently-used inactive contexts until at most
+ * @p max_contexts remain in the cache.
  *
- * Creates a #pljs_context_cache_value entry keyed by @p user_id,
+ * Contexts that are currently active on the call stack (checked via
+ * #pljs_context_is_active) are never evicted.
+ */
+void pljs_cache_evict_excess(int max_contexts) {
+  if (pljs_context_HashTable == NULL || max_contexts < 0) {
+    return;
+  }
+
+  while (hash_get_num_entries(pljs_context_HashTable) > max_contexts) {
+    HASH_SEQ_STATUS status;
+    pljs_context_cache_value *entry;
+    pljs_context_cache_value *victim = NULL;
+
+    hash_seq_init(&status, pljs_context_HashTable);
+    while ((entry = (pljs_context_cache_value *)hash_seq_search(&status)) !=
+           NULL) {
+      if (entry->ctx == NULL || pljs_context_is_active(entry->ctx)) {
+        continue;
+      }
+      if (victim == NULL || entry->lru_tick < victim->lru_tick) {
+        victim = entry;
+      }
+    }
+
+    if (victim == NULL) {
+      break;
+    }
+
+    pljs_context_key victim_key = victim->key;
+    pljs_cleanup_context(victim);
+    victim->ctx = NULL;
+    pljs_cache_context_remove(victim_key.user_id, victim_key.owner_id);
+
+    if (rt != NULL) {
+      JS_RunGC(rt);
+    }
+  }
+}
+
+long pljs_cache_context_count(void) {
+  if (pljs_context_HashTable == NULL) {
+    return 0;
+  }
+  return hash_get_num_entries(pljs_context_HashTable);
+}
+
+/**
+ * @brief Add a new JavaScript context to the cache for a (user_id, owner_id)
+ * pair.
+ *
+ * Creates a #pljs_context_cache_value entry keyed by (@p user_id, @p owner_id),
  * stores the given #JSContext in it, and sets up a child
  * #MemoryContext and hash table for caching compiled functions
  * belonging to this context.
  *
- * Each user may have at most one cached context.  Attempting to add
- * a context for a user that already has one raises an ERROR.
- *
- * @param user_id  The PostgreSQL role OID to associate with this context.
- * @param ctx      The #JSContext to cache.  Ownership is transferred to
- *                 the cache; the caller must not free it directly.
+ * @param user_id   The effective PostgreSQL role OID executing the code.
+ * @param owner_id  The PostgreSQL role OID that owns the function (proowner).
+ * @param ctx       The #JSContext to cache.  Ownership is transferred to
+ *                  the cache; the caller must not free it directly.
  */
-void pljs_cache_context_add(Oid user_id, JSContext *ctx) {
+void pljs_cache_context_add(Oid user_id, Oid owner_id, JSContext *ctx) {
+  pljs_context_key key;
   pljs_context_cache_value *hvalue;
   MemoryContext function_memory_context;
   HTAB *function_hash_table;
   HASHCTL function_ctl = {0};
   bool found;
 
+  pljs_make_context_key(&key, user_id, owner_id);
+
   // If it found that means we're trying to create a context that
-  // already exists for a `user_id`.  This should never happen.
-  if (hash_search(pljs_context_HashTable, (void *)&user_id, HASH_FIND, NULL) !=
+  // already exists for `(user_id, owner_id)`.  This should never happen.
+  if (hash_search(pljs_context_HashTable, (void *)&key, HASH_FIND, NULL) !=
       NULL) {
-    ereport(
-        ERROR, errcode(ERRCODE_INTERNAL_ERROR),
-        errmsg("a context cache entry already exists for user_id %d", user_id));
+    ereport(ERROR, errcode(ERRCODE_INTERNAL_ERROR),
+            errmsg("a context cache entry already exists for user_id %u, "
+                   "owner_id %u",
+                   key.user_id, key.owner_id));
+  }
+
+  if (configuration.max_cached_contexts > 0) {
+    pljs_cache_evict_excess(configuration.max_cached_contexts - 1);
   }
 
   /*
@@ -306,33 +376,34 @@ void pljs_cache_context_add(Oid user_id, JSContext *ctx) {
                   &function_ctl, HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
 
   hvalue = (pljs_context_cache_value *)hash_search(
-      pljs_context_HashTable, (void *)&user_id, HASH_ENTER, &found);
+      pljs_context_HashTable, (void *)&key, HASH_ENTER, &found);
 
+  hvalue->key = key;
   hvalue->ctx = ctx;
-  hvalue->user_id = user_id;
   hvalue->function_memory_context = function_memory_context;
   hvalue->function_hash_table = function_hash_table;
+  hvalue->lru_tick = ++pljs_context_lru_clock;
 }
 
 /**
- * @brief Remove a cached JavaScript context for a user.
+ * @brief Remove a cached JavaScript context for a (user_id, owner_id) pair.
  *
- * Removes the #pljs_context_cache_value for @p user_id from the
+ * Removes the #pljs_context_cache_value for (@p user_id, @p owner_id) from the
  * context hash table and destroys its function hash table (which
  * also frees the child #MemoryContext holding function cache data).
  *
  * @note This does @b not free the #JSContext itself.  The caller is
  *       responsible for calling #JS_FreeContext if the context should
  *       be released.
- *
- * @param user_id  The PostgreSQL role OID whose cache entry to remove.
- *                 If no entry exists for this user, the call is a no-op.
  */
-void pljs_cache_context_remove(Oid user_id) {
+void pljs_cache_context_remove(Oid user_id, Oid owner_id) {
+  pljs_context_key key;
   bool found;
 
+  pljs_make_context_key(&key, user_id, owner_id);
+
   pljs_context_cache_value *hvalue = (pljs_context_cache_value *)hash_search(
-      pljs_context_HashTable, (void *)&user_id, HASH_REMOVE, &found);
+      pljs_context_HashTable, (void *)&key, HASH_REMOVE, &found);
 
   if (hvalue) {
     // Destroys the cache and its #MemoryContext in the process.
@@ -341,56 +412,66 @@ void pljs_cache_context_remove(Oid user_id) {
 }
 
 /**
- * @brief Look up the cached JavaScript context for a user.
- *
- * Searches the context hash table for an entry matching @p user_id.
- *
- * @param user_id  The PostgreSQL role OID to look up.
- * @return Pointer to the #pljs_context_cache_value if found, or
- *         @c NULL if no context has been cached for this user.
+ * @brief Look up the cached JavaScript context for a (user_id, owner_id) pair.
  */
-pljs_context_cache_value *pljs_cache_context_find(Oid user_id) {
+pljs_context_cache_value *pljs_cache_context_find(Oid user_id, Oid owner_id) {
+  pljs_context_key key;
+
+  pljs_make_context_key(&key, user_id, owner_id);
+
   pljs_context_cache_value *value = (pljs_context_cache_value *)hash_search(
-      pljs_context_HashTable, (void *)&user_id, HASH_FIND, NULL);
+      pljs_context_HashTable, (void *)&key, HASH_FIND, NULL);
+
+  if (value != NULL) {
+    value->lru_tick = ++pljs_context_lru_clock;
+  }
 
   return value;
 }
 
 /**
+ * @brief Look up a cached context entry by its #JSContext pointer.
+ */
+pljs_context_cache_value *pljs_cache_context_find_by_ctx(JSContext *ctx) {
+  HASH_SEQ_STATUS status;
+  pljs_context_cache_value *entry;
+
+  if (pljs_context_HashTable == NULL || ctx == NULL) {
+    return NULL;
+  }
+
+  hash_seq_init(&status, pljs_context_HashTable);
+  while ((entry = (pljs_context_cache_value *)hash_seq_search(&status)) !=
+         NULL) {
+    if (entry->ctx == ctx) {
+      hash_seq_term(&status);
+      entry->lru_tick = ++pljs_context_lru_clock;
+      return entry;
+    }
+  }
+
+  return NULL;
+}
+
+/**
  * @brief Cache a compiled JavaScript function.
- *
- * Creates a new #pljs_function_cache_value inside the function hash
- * table of the user's cached context, then copies the function
- * metadata and compiled #JSValue from @p context into it.  The
- * user is identified by @c context->function->user_id and the
- * function by @c context->function->fn_oid.
- *
- * The context cache entry for the user must already exist (created
- * via #pljs_cache_context_add).  If no context entry is found, or
- * if a function entry for this OID already exists, an ERROR is raised.
- *
- * Memory for the cache entry is allocated in the function
- * #MemoryContext owned by the user's context cache entry, so it
- * survives until the context is removed or the cache is reset.
- *
- * @param context  Pointer to a fully populated #pljs_context whose
- *                 @c function and @c js_function fields will be
- *                 copied into the cache.
  */
 void pljs_cache_function_add(pljs_context *context) {
   bool found;
-
   pljs_context_cache_value *ctx_hvalue =
-      (pljs_context_cache_value *)hash_search(pljs_context_HashTable,
-                                              &context->function->user_id,
-                                              HASH_FIND, &found);
+      pljs_cache_context_find_by_ctx(context->ctx);
 
-  // If we are unable to find a context for the `user_id`, then that
+  if (ctx_hvalue == NULL) {
+    ctx_hvalue = pljs_cache_context_find(context->function->user_id,
+                                         context->function->owner_id);
+  }
+
+  // If we are unable to find a context, then that
   // is probably a bad sign and we should error out.
-  if (!found) {
+  if (ctx_hvalue == NULL) {
     ereport(ERROR, errcode(ERRCODE_INTERNAL_ERROR),
-            errmsg("unable to find context for user %d",
-                   context->function->user_id));
+            errmsg("unable to find context for user %u, owner %u",
+                   context->function->user_id, context->function->owner_id));
   }
 
   // Ask the cache to create e new entry.
@@ -515,29 +596,13 @@ static bool pljs_cache_handlers_valid(pljs_function_cache_value *value,
   return true;
 }
 
-/**
- * @brief Look up a cached compiled function by user and function OID.
- *
- * Performs a two-level lookup: first finds the user's context cache
- * entry, then searches that entry's function hash table for @p fn_oid.
- *
- * @param user_id  The PostgreSQL role OID that owns the context.
- * @param fn_oid   The OID of the function to look up.
- * @return Pointer to the #pljs_function_cache_value if found, or
- *         @c NULL if the user has no cached context or the function
- *         is not in the cache.
- */
-pljs_function_cache_value *pljs_cache_function_find(Oid user_id, Oid fn_oid,
-                                                    HeapTuple proctuple) {
+static pljs_function_cache_value *
+pljs_cache_function_find_in_context(pljs_context_cache_value *ctx_hvalue,
+                                    Oid fn_oid, HeapTuple proctuple) {
   bool found;
 
-  // Search for the context.
-  pljs_context_cache_value *ctx_hvalue =
-      (pljs_context_cache_value *)hash_search(pljs_context_HashTable, &user_id,
-                                              HASH_FIND, &found);
-
-  // If the context does not exists in the cache, that's probably ok.
-  if (!found) {
+  // If the context does not exist in the cache, that's ok.
+  if (ctx_hvalue == NULL || ctx_hvalue->function_hash_table == NULL) {
     return NULL;
   }
 
@@ -608,6 +673,29 @@ pljs_function_cache_value *pljs_cache_function_find(Oid user_id, Oid fn_oid,
 }
 
 /**
+ * @brief Look up a cached compiled function by (user_id, owner_id) and
+ * function OID.
+ */
+pljs_function_cache_value *pljs_cache_function_find(Oid user_id, Oid owner_id,
+                                                    Oid fn_oid,
+                                                    HeapTuple proctuple) {
+  pljs_context_cache_value *ctx_hvalue =
+      pljs_cache_context_find(user_id, owner_id);
+
+  return pljs_cache_function_find_in_context(ctx_hvalue, fn_oid, proctuple);
+}
+
+/**
+ * @brief Look up a cached compiled function inside the specific #JSContext.
+ */
+pljs_function_cache_value *pljs_cache_function_find_by_ctx(
+    JSContext *ctx, Oid fn_oid, HeapTuple proctuple) {
+  pljs_context_cache_value *ctx_hvalue = pljs_cache_context_find_by_ctx(ctx);
+
+  return pljs_cache_function_find_in_context(ctx_hvalue, fn_oid, proctuple);
+}
+
+/**
  * @brief Restore a #pljs_context from a cached function entry.
  *
  * Populates @p context with the #JSContext, compiled #JSValue function,
@@ -631,6 +719,7 @@ void pljs_function_cache_to_context(pljs_context *context,
 
   context->function->fn_oid = function_entry->fn_oid;
   context->function->user_id = function_entry->user_id;
+  context->function->owner_id = function_entry->owner_id;
   context->function->trigger = function_entry->trigger;
   context->function->is_srf = function_entry->is_srf;
   context->function->module_generation = function_entry->module_generation;
@@ -682,6 +771,7 @@ void pljs_context_to_function_cache(pljs_function_cache_value *function_entry,
 
   function_entry->fn_oid = context->function->fn_oid;
   function_entry->user_id = context->function->user_id;
+  function_entry->owner_id = context->function->owner_id;
   function_entry->trigger = context->function->trigger;
   function_entry->is_srf = context->function->is_srf;
 

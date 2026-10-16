@@ -87,6 +87,11 @@ CREATE OR REPLACE FUNCTION pljs_modules_changed() RETURNS trigger
  AS 'MODULE_PATHNAME', 'pljs_modules_changed'
  LANGUAGE C;
 
+CREATE TRIGGER pljs_modules_guard
+  BEFORE INSERT OR UPDATE ON pljs.modules
+  FOR EACH ROW EXECUTE FUNCTION pljs_modules_changed();
+ALTER TABLE pljs.modules ENABLE ALWAYS TRIGGER pljs_modules_guard;
+
 CREATE TRIGGER pljs_modules_changed
   AFTER INSERT OR UPDATE OR DELETE OR TRUNCATE ON pljs.modules
   FOR EACH STATEMENT EXECUTE FUNCTION pljs_modules_changed();

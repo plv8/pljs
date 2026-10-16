@@ -3796,10 +3796,12 @@ Datum pljs_info(PG_FUNCTION_ARGS) {
   appendStringInfo(
       &buf,
       "{\"version\":\"%s\",\"memory_limit_mb\":%zu,"
+      "\"max_cached_contexts\":%d,\"cached_contexts\":%ld,"
       "\"hooks_enabled\":%s,\"hooks_max_depth\":%d,"
       "\"malloc_count\":%zu,\"malloc_size\":%zu,\"malloc_limit\":%zu,"
       "\"stack_size\":%zu,\"stack_limit\":%zu}",
       PLJS_VERSION, configuration.memory_limit,
+      configuration.max_cached_contexts, pljs_cache_context_count(),
       configuration.hooks_enabled ? "true" : "false",
       configuration.hooks_max_depth, malloc_count, malloc_size, malloc_limit,
       stack_size, stack_limit);

@@ -93,6 +93,7 @@ typedef struct pljs_configuration {
   bool hooks_enabled;
   int hooks_max_depth;
   int max_module_depth;
+  int max_cached_contexts;
 
   // Hook function name GUCs.
   char *hook_executor_start;
@@ -117,12 +118,19 @@ extern pljs_configuration configuration;
 // quickjs runtime.
 extern JSRuntime *rt;
 
-// Cpntext cache value definition.
-typedef struct pljs_context_cache_value {
+// Composite key for JSContext cache: effective executing user + function owner.
+typedef struct pljs_context_key {
   Oid user_id;
+  Oid owner_id;
+} pljs_context_key;
+
+// Context cache value definition.
+typedef struct pljs_context_cache_value {
+  pljs_context_key key;
   JSContext *ctx;
   MemoryContext function_memory_context;
   HTAB *function_hash_table;
+  uint64 lru_tick;
 } pljs_context_cache_value;
 
 // Function cache value defition.
@@ -132,6 +140,7 @@ typedef struct pljs_function_cache_value {
   JSContext *ctx;
   bool trigger;
   Oid user_id;
+  Oid owner_id;
   int nargs;
   bool is_srf;
   char proname[NAMEDATALEN];
@@ -221,7 +230,8 @@ typedef struct pljs_func {
 
   TransactionId fn_xmin;
   ItemPointerData fn_tid;
-  Oid user_id; // the user id
+  Oid user_id;  // the effective executing user id
+  Oid owner_id; // the function owner id (proowner)
 
   // The module generation it was compiled against, if it imports modules, or
   // 0; see pljs_modules_generation().
@@ -256,6 +266,8 @@ typedef struct pljs_storage {
   WindowObject window_object;
   MemoryContext execution_memory_context;
   ErrorData *fatal_error; // ends the call; see pljs_throw_fatal_error()
+  JSContext *ctx;
+  struct pljs_storage *previous;
 } pljs_storage;
 
 typedef struct pljs_window_storage {
@@ -331,6 +343,7 @@ void pljs_put_domain_row(pljs_return_state *state, JSValueConst row,
                          JSContext *ctx, const char *caller);
 bool pljs_has_permission_to_execute(const char *signature);
 pljs_storage *pljs_current_storage(void);
+bool pljs_context_is_active(JSContext *ctx);
 
 // Whether a function's result is being converted, anywhere up the stack
 extern bool pljs_converting_result;
@@ -338,13 +351,20 @@ extern bool pljs_converting_result;
 // cache.c
 
 // Contexts
-void pljs_cache_context_add(Oid, JSContext *);
-void pljs_cache_context_remove(Oid);
-pljs_context_cache_value *pljs_cache_context_find(Oid user_id);
+void pljs_cache_context_add(Oid user_id, Oid owner_id, JSContext *ctx);
+void pljs_cache_context_remove(Oid user_id, Oid owner_id);
+pljs_context_cache_value *pljs_cache_context_find(Oid user_id, Oid owner_id);
+pljs_context_cache_value *pljs_cache_context_find_by_ctx(JSContext *ctx);
+void pljs_cache_evict_excess(int max_contexts);
+long pljs_cache_context_count(void);
 
 // Functions
-pljs_function_cache_value *pljs_cache_function_find(Oid user_id, Oid fn_oid,
+pljs_function_cache_value *pljs_cache_function_find(Oid user_id, Oid owner_id,
+                                                    Oid fn_oid,
                                                     HeapTuple proctuple);
+pljs_function_cache_value *pljs_cache_function_find_by_ctx(JSContext *ctx,
+                                                           Oid fn_oid,
+                                                           HeapTuple proctuple);
 void pljs_cache_function_add(pljs_context *context);
 void pljs_cache_function_remove(Oid fn_oid);
 
@@ -463,7 +483,7 @@ JSValue pljs_querydesc_run_to_jsvalue(JSContext *ctx, QueryDesc *queryDesc,
 JSValue pljs_querydesc_to_jsvalue(JSContext *ctx, QueryDesc *queryDesc);
 // Shared utilities (pljs.c)
 extern PGDLLEXPORT char *pljs_dump_error(JSContext *ctx);
-JSContext *pljs_create_context(void);
+JSContext *pljs_create_context(Oid user_id, Oid owner_id);
 bool pljs_hook_call(JSContext *ctx, JSValueConst func, int argc,
                     JSValueConst *argv, bool own_spi, JSValue *result,
                     char **error);

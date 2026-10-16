@@ -250,10 +250,16 @@ BEGIN
   EXCEPTION WHEN insufficient_privilege THEN
     RAISE NOTICE 'Caught expected is_trusted=false INSERT privilege rejection';
   END;
+  BEGIN
+    UPDATE pljs.modules SET is_trusted = false WHERE path = 'pljs_native_esm';
+    RAISE EXCEPTION 'Expected is_trusted=false UPDATE privilege rejection';
+  EXCEPTION WHEN insufficient_privilege THEN
+    RAISE NOTICE 'Caught expected is_trusted=false UPDATE privilege rejection';
+  END;
 END;
 $$;
 RESET ROLE;
-REVOKE INSERT ON pljs.modules FROM pljs_unpriv_tle_user;
+REVOKE INSERT, UPDATE ON pljs.modules FROM pljs_unpriv_tle_user;
 
 -- Revoking SELECT on pljs.modules from PUBLIC and unprivileged role blocks module loading
 REVOKE SELECT ON pljs.modules FROM PUBLIC, pljs_unpriv_tle_user;

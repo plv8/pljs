@@ -321,8 +321,7 @@ SELECT test_pl(21) AS test_pl_after_cross_backend_replace;
 SELECT test_chained(15) AS test_chained_after_cross_backend_replace;
 
 -- 9f. Re-entrant handler replacement from inside a running custom-language
--- function (including overloaded functions sharing proname so globalThis[proname]
--- does not keep the first overload alive) and from inside a handler during
+-- function (including overloaded functions) and from inside a handler during
 -- transpilation
 CREATE FUNCTION reentrant_handler() RETURNS language_handler AS $$
   if (globalThis.replace_during_transpile) {
@@ -338,10 +337,7 @@ $$ LANGUAGE pljs;
 
 CREATE LANGUAGE reentrant_lang HANDLER reentrant_handler;
 
--- Two overloaded functions with the same proname ('reentrant_fn'):
--- compiling the 3-arg overload overwrites globalThis.reentrant_fn, leaving
--- the cache entry as the sole owner of the 2-arg overload's JSObject until
--- pljs_call_handler pins it across execution.
+-- Two overloaded functions with the same proname ('reentrant_fn')
 CREATE FUNCTION reentrant_fn(x int, do_replace bool) RETURNS int AS $$
   if (do_replace) {
     pljs.execute(
@@ -350,7 +346,7 @@ CREATE FUNCTION reentrant_fn(x int, do_replace bool) RETURNS int AS $$
       "$h$ LANGUAGE pljs"
     );
   }
-  var suffix = "constant_pool_survived_" + x;
+  var suffix = "reentrant_str_value_ok_" + x;
   RET_RE (x + suffix.length);
 $$ LANGUAGE reentrant_lang;
 
@@ -358,13 +354,11 @@ CREATE FUNCTION reentrant_fn(a int, b int, c int) RETURNS int AS $$
   RET_RE (a + b + c);
 $$ LANGUAGE reentrant_lang;
 
--- Populate both overloads in the cache so globalThis.reentrant_fn points to the 3-arg overload
+-- Populate both overloads in the cache
 SELECT reentrant_fn(5, false) AS reentrant_fn_initial;
 SELECT reentrant_fn(1, 2, 3) AS reentrant_fn_3arg_initial;
 
--- Call the 2-arg overload with do_replace = true: it replaces reentrant_handler
--- mid-execution (which evicts both overloads from the cache) and then accesses
--- its constant pool after pljs.execute() returns
+-- Call the 2-arg overload with do_replace = true
 SELECT reentrant_fn(5, true) AS reentrant_fn_during_self_evict;
 
 -- Next call to both overloads re-transpiles using the new handler (200 + ...)
@@ -442,8 +436,7 @@ ROLLBACK;
 
 SELECT test_pl(21) AS test_pl_after_rollback;
 
--- 9i. Custom language function with static ES module import does not poison the
--- user's persistent JSContext during validator syntax checking
+-- 9i. Custom language function with static ES module import
 INSERT INTO pljs.modules (path, source) VALUES
   ('custom_lang_mod', 'export function clm_triple(x) { return x * 3; }');
 

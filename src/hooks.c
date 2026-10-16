@@ -1,9 +1,11 @@
 #include "postgres.h"
 
 #include "catalog/objectaccess.h"
+#include "catalog/pg_proc.h"
 #include "miscadmin.h"
 #include "executor/executor.h"
 #include "executor/spi.h"
+#include "access/htup_details.h"
 #include "access/sdir.h"
 #include "nodes/pathnodes.h"
 #include "optimizer/pathnode.h"
@@ -12,6 +14,7 @@
 #include "optimizer/planner.h"
 #include "utils/builtins.h"
 #include "utils/elog.h"
+#include "utils/syscache.h"
 
 #include "pljs.h"
 
@@ -356,14 +359,14 @@ static JSValue pljs_object_access_str_to_jsvalue(JSContext *ctx,
  */
 
 /**
- * @brief Get or create a JSContext for the current user.
+ * @brief Get or create a JSContext for the current user and function owner.
  */
-static JSContext *pljs_get_or_create_context(void) {
-  pljs_context_cache_value *entry = pljs_cache_context_find(GetUserId());
+static JSContext *pljs_get_or_create_context(Oid user_id, Oid owner_id) {
+  pljs_context_cache_value *entry = pljs_cache_context_find(user_id, owner_id);
   if (entry)
     return entry->ctx;
 
-  return pljs_create_context();
+  return pljs_create_context(user_id, owner_id);
 }
 
 /**
@@ -376,10 +379,9 @@ static JSValue pljs_resolve_hook_function(const char *funcname,
                                           JSContext **out_ctx) {
   JSContext *ctx;
   Oid funcoid;
+  Oid user_id = GetUserId();
+  Oid owner_id = user_id;
   JSValue func;
-
-  ctx = pljs_get_or_create_context();
-  *out_ctx = ctx;
 
   if (strchr(funcname, '(') == NULL) {
     funcoid = DatumGetObjectId(
@@ -388,6 +390,16 @@ static JSValue pljs_resolve_hook_function(const char *funcname,
     funcoid = DatumGetObjectId(
         DirectFunctionCall1(regprocedurein, CStringGetDatum(funcname)));
   }
+
+  HeapTuple proctuple =
+      SearchSysCache(PROCOID, ObjectIdGetDatum(funcoid), 0, 0, 0);
+  if (HeapTupleIsValid(proctuple)) {
+    owner_id = ((Form_pg_proc)GETSTRUCT(proctuple))->proowner;
+    ReleaseSysCache(proctuple);
+  }
+
+  ctx = pljs_get_or_create_context(user_id, owner_id);
+  *out_ctx = ctx;
 
   func = pljs_find_js_function(funcoid, ctx);
   return func;

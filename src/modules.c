@@ -178,56 +178,44 @@ Datum pljs_modules_changed(PG_FUNCTION_ARGS) {
 
   TriggerData *trigdata = (TriggerData *)fcinfo->context;
   Relation rel = trigdata->tg_relation;
+  TriggerEvent event = trigdata->tg_event;
 
-  if (!superuser() &&
-      (TRIGGER_FIRED_BY_INSERT(trigdata->tg_event) ||
-       TRIGGER_FIRED_BY_UPDATE(trigdata->tg_event)) &&
-      strcmp(RelationGetRelationName(rel), "modules") == 0 &&
-      RelationGetDescr(rel)->natts >= Amodule_bytecode) {
-    Snapshot snapshot = SnapshotSelf;
-    SysScanDesc scan =
-        systable_beginscan(rel, InvalidOid, false, snapshot, 0, NULL);
-    HeapTuple tuple;
-    bool forbidden_bytecode = false;
-    bool forbidden_untrusted = false;
+  if (TRIGGER_FIRED_FOR_ROW(event)) {
+    HeapTuple newtuple = TRIGGER_FIRED_BY_UPDATE(event) ? trigdata->tg_newtuple
+                                                        : trigdata->tg_trigtuple;
 
-    while (HeapTupleIsValid(tuple = systable_getnext(scan))) {
-      CHECK_FOR_INTERRUPTS();
-      if (!TransactionIdIsCurrentTransactionId(
-              HeapTupleHeaderGetRawXmin(tuple->t_data))) {
-        continue;
+    if (!superuser() &&
+        (TRIGGER_FIRED_BY_INSERT(event) || TRIGGER_FIRED_BY_UPDATE(event)) &&
+        strcmp(RelationGetRelationName(rel), "modules") == 0 &&
+        RelationGetDescr(rel)->natts >= Amodule_bytecode &&
+        HeapTupleIsValid(newtuple)) {
+      bool isnull = true;
+
+      (void)heap_getattr(newtuple, Amodule_bytecode, RelationGetDescr(rel),
+                         &isnull);
+      if (!isnull) {
+        ereport(ERROR,
+                (errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+                 errmsg("must be superuser to write precompiled bytecode in pljs.modules")));
       }
 
-      Datum datum_array[Amodule_length];
-      bool is_null_array[Amodule_length];
-
-      memset(is_null_array, true, sizeof(is_null_array));
-      heap_deform_tuple(tuple, RelationGetDescr(rel), datum_array,
-                        is_null_array);
-
-      if (!is_null_array[Amodule_bytecode - 1]) {
-        forbidden_bytecode = true;
-        break;
-      }
-      if (!is_null_array[Amodule_is_trusted - 1] &&
-          !DatumGetBool(datum_array[Amodule_is_trusted - 1])) {
-        forbidden_untrusted = true;
-        break;
+      if (RelationGetDescr(rel)->natts >= Amodule_is_trusted) {
+        Datum trusted_datum = heap_getattr(newtuple, Amodule_is_trusted,
+                                           RelationGetDescr(rel), &isnull);
+        if (!isnull && !DatumGetBool(trusted_datum)) {
+          ereport(ERROR,
+                  (errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+                   errmsg("must be superuser to write untrusted modules in pljs.modules")));
+        }
       }
     }
 
-    systable_endscan(scan);
+    if (TRIGGER_FIRED_AFTER(event)) {
+      CacheInvalidateRelcache(rel);
+      return PointerGetDatum(NULL);
+    }
 
-    if (forbidden_bytecode) {
-      ereport(ERROR,
-              (errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-               errmsg("must be superuser to write precompiled bytecode in pljs.modules")));
-    }
-    if (forbidden_untrusted) {
-      ereport(ERROR,
-              (errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-               errmsg("must be superuser to write untrusted modules in pljs.modules")));
-    }
+    return PointerGetDatum(newtuple);
   }
 
   CacheInvalidateRelcache(rel);
@@ -411,7 +399,11 @@ static bool pljs_check_table_select_acl(Oid relid, bool is_packages) {
   Oid nspid = get_rel_namespace(relid);
 
   if (OidIsValid(nspid) &&
+#if PG_VERSION_NUM >= 160000
       object_aclcheck(NamespaceRelationId, nspid, userid, ACL_USAGE) !=
+#else
+      pg_namespace_aclcheck(nspid, userid, ACL_USAGE) !=
+#endif
           ACLCHECK_OK) {
     pljs_record_acl_failure(PLJS_ACL_DENIED_SCHEMA,
                             "permission denied for schema pljs");
