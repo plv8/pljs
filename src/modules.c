@@ -181,31 +181,63 @@ Datum pljs_modules_changed(PG_FUNCTION_ARGS) {
   TriggerEvent event = trigdata->tg_event;
 
   if (TRIGGER_FIRED_FOR_ROW(event)) {
-    HeapTuple newtuple = TRIGGER_FIRED_BY_UPDATE(event) ? trigdata->tg_newtuple
-                                                        : trigdata->tg_trigtuple;
+    HeapTuple oldtuple = NULL;
+    HeapTuple newtuple = NULL;
+
+    if (TRIGGER_FIRED_BY_UPDATE(event)) {
+      oldtuple = trigdata->tg_trigtuple;
+      newtuple = trigdata->tg_newtuple;
+    } else if (TRIGGER_FIRED_BY_DELETE(event)) {
+      oldtuple = trigdata->tg_trigtuple;
+    } else if (TRIGGER_FIRED_BY_INSERT(event)) {
+      newtuple = trigdata->tg_trigtuple;
+    }
 
     if (!superuser() &&
-        (TRIGGER_FIRED_BY_INSERT(event) || TRIGGER_FIRED_BY_UPDATE(event)) &&
         strcmp(RelationGetRelationName(rel), "modules") == 0 &&
-        RelationGetDescr(rel)->natts >= Amodule_bytecode &&
-        HeapTupleIsValid(newtuple)) {
-      bool isnull = true;
+        RelationGetDescr(rel)->natts >= Amodule_bytecode) {
+      
+      if (oldtuple && HeapTupleIsValid(oldtuple)) {
+        bool isnull = true;
 
-      (void)heap_getattr(newtuple, Amodule_bytecode, RelationGetDescr(rel),
-                         &isnull);
-      if (!isnull) {
-        ereport(ERROR,
-                (errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-                 errmsg("must be superuser to write precompiled bytecode in pljs.modules")));
-      }
-
-      if (RelationGetDescr(rel)->natts >= Amodule_is_trusted) {
-        Datum trusted_datum = heap_getattr(newtuple, Amodule_is_trusted,
-                                           RelationGetDescr(rel), &isnull);
-        if (!isnull && !DatumGetBool(trusted_datum)) {
+        (void)heap_getattr(oldtuple, Amodule_bytecode, RelationGetDescr(rel),
+                           &isnull);
+        if (!isnull) {
           ereport(ERROR,
                   (errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-                   errmsg("must be superuser to write untrusted modules in pljs.modules")));
+                   errmsg("must be superuser to modify or delete modules with precompiled bytecode")));
+        }
+
+        if (RelationGetDescr(rel)->natts >= Amodule_is_trusted) {
+          Datum trusted_datum = heap_getattr(oldtuple, Amodule_is_trusted,
+                                             RelationGetDescr(rel), &isnull);
+          if (!isnull && !DatumGetBool(trusted_datum)) {
+            ereport(ERROR,
+                    (errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+                     errmsg("must be superuser to modify or delete untrusted modules")));
+          }
+        }
+      }
+
+      if (newtuple && HeapTupleIsValid(newtuple)) {
+        bool isnull = true;
+
+        (void)heap_getattr(newtuple, Amodule_bytecode, RelationGetDescr(rel),
+                           &isnull);
+        if (!isnull) {
+          ereport(ERROR,
+                  (errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+                   errmsg("must be superuser to write precompiled bytecode in pljs.modules")));
+        }
+
+        if (RelationGetDescr(rel)->natts >= Amodule_is_trusted) {
+          Datum trusted_datum = heap_getattr(newtuple, Amodule_is_trusted,
+                                             RelationGetDescr(rel), &isnull);
+          if (!isnull && !DatumGetBool(trusted_datum)) {
+            ereport(ERROR,
+                    (errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+                     errmsg("must be superuser to write untrusted modules in pljs.modules")));
+          }
         }
       }
     }
@@ -215,7 +247,7 @@ Datum pljs_modules_changed(PG_FUNCTION_ARGS) {
       return PointerGetDatum(NULL);
     }
 
-    return PointerGetDatum(newtuple);
+    return PointerGetDatum(TRIGGER_FIRED_BY_DELETE(event) ? oldtuple : newtuple);
   }
 
   CacheInvalidateRelcache(rel);

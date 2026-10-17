@@ -1468,6 +1468,8 @@ static void pljs_run_with_storage(JSContext *ctx, pljs_func *function,
     current_storage = previous_storage;
   }
   PG_END_TRY();
+
+  pljs_cache_evict_excess(configuration.max_cached_contexts);
 }
 
 /**

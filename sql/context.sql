@@ -149,23 +149,31 @@ CREATE ROLE pljs_lru_3;
 GRANT USAGE, CREATE ON SCHEMA public TO pljs_lru_1, pljs_lru_2, pljs_lru_3;
 
 SET ROLE pljs_lru_1;
-CREATE FUNCTION lru_fn_1() RETURNS int AS $$ return 1; $$ LANGUAGE pljs;
+CREATE FUNCTION lru_fn_1() RETURNS int AS $$
+  const v = pljs.execute('SELECT lru_fn_2() AS v')[0].v;
+  return v + 100;
+$$ LANGUAGE pljs;
 RESET ROLE;
 
 SET ROLE pljs_lru_2;
-CREATE FUNCTION lru_fn_2() RETURNS int AS $$ return 2; $$ LANGUAGE pljs;
+CREATE FUNCTION lru_fn_2() RETURNS int AS $$
+  const v = pljs.execute('SELECT lru_fn_3() AS v')[0].v;
+  return v + 20;
+$$ LANGUAGE pljs;
 RESET ROLE;
 
 SET ROLE pljs_lru_3;
-CREATE FUNCTION lru_fn_3() RETURNS int AS $$ return 3; $$ LANGUAGE pljs;
+CREATE FUNCTION lru_fn_3() RETURNS int AS $$
+  const info = pljs.execute('SELECT pljs_info() AS i')[0].i;
+  pljs.elog(NOTICE, 'Deepest context count (active): ' + info.cached_contexts);
+  return 3;
+$$ LANGUAGE pljs;
 RESET ROLE;
 
--- Nested calls across multiple owner contexts while caller context is active on the stack
+-- Nested calls across multiple owner contexts.
 CREATE FUNCTION lru_active_caller() RETURNS int AS $$
   const r1 = pljs.execute('SELECT lru_fn_1() AS v')[0].v;
-  const r2 = pljs.execute('SELECT lru_fn_2() AS v')[0].v;
-  const r3 = pljs.execute('SELECT lru_fn_3() AS v')[0].v;
-  return r1 + r2 + r3;
+  return r1;
 $$ LANGUAGE pljs;
 
 SELECT lru_active_caller();

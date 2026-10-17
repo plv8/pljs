@@ -228,10 +228,36 @@ $$;
 SELECT test_pljs_native_static_import(6, 7);
 
 -- 10. Table ACLs, Row-Level Security (RLS), and non-superuser bytecode/untrusted restrictions
-GRANT SELECT, INSERT ON pljs.modules TO pljs_unpriv_tle_user;
+GRANT SELECT, INSERT, UPDATE, DELETE ON pljs.modules TO pljs_unpriv_tle_user;
+
+-- Pre-populate restricted modules as superuser to test restricted module and delete protection
+INSERT INTO pljs.modules (path, bytecode) VALUES ('restricted_bc', E'\\x0500');
+INSERT INTO pljs.modules (path, source, is_trusted) VALUES ('restricted_untrusted', 'export const x = 1;', false);
+
 SET ROLE pljs_unpriv_tle_user;
 DO $$
 BEGIN
+  -- Happy paths (Positive DML tests)
+  BEGIN
+    -- Unprivileged user can insert a standard text module
+    INSERT INTO pljs.modules (path, source, is_trusted) VALUES ('unpriv_standard', 'export const a = 2;', true);
+    -- Unprivileged user can update a standard text module
+    UPDATE pljs.modules SET source = 'export const a = 3;' WHERE path = 'unpriv_standard';
+    -- Unprivileged user can delete a standard text module
+    DELETE FROM pljs.modules WHERE path = 'unpriv_standard';
+  EXCEPTION WHEN OTHERS THEN
+    RAISE EXCEPTION 'Failed to execute allowed DML operations on standard module: %', SQLERRM;
+  END;
+
+  -- Verify packages table ACLs correctly prevent unauthorized inserts
+  BEGIN
+    INSERT INTO pljs.packages (name, version, entry_point) VALUES ('unpriv_pkg', '1.0.0', 'index.js');
+    RAISE EXCEPTION 'Expected packages INSERT privilege rejection';
+  EXCEPTION WHEN insufficient_privilege THEN
+    RAISE NOTICE 'Caught expected packages INSERT privilege rejection';
+  END;
+
+  -- Negative tests (Negative DML tests)
   BEGIN
     EXECUTE $q$DO LANGUAGE pljs $js$ pljs.compile_bytecode('export const x = 1;'); $js$ $q$;
     RAISE EXCEPTION 'Expected compile_bytecode privilege rejection';
@@ -250,16 +276,64 @@ BEGIN
   EXCEPTION WHEN insufficient_privilege THEN
     RAISE NOTICE 'Caught expected is_trusted=false INSERT privilege rejection';
   END;
+
+  -- Test updating the new row to restricted
   BEGIN
     UPDATE pljs.modules SET is_trusted = false WHERE path = 'pljs_native_esm';
     RAISE EXCEPTION 'Expected is_trusted=false UPDATE privilege rejection';
   EXCEPTION WHEN insufficient_privilege THEN
     RAISE NOTICE 'Caught expected is_trusted=false UPDATE privilege rejection';
   END;
+
+  -- Test Privilege Restrictions: Modifying an existing restricted module
+  BEGIN
+    UPDATE pljs.modules SET bytecode = NULL, source = 'export const x = "benign";' WHERE path = 'restricted_bc';
+    RAISE EXCEPTION 'Expected restricted UPDATE privilege rejection for bytecode';
+  EXCEPTION WHEN insufficient_privilege THEN
+    RAISE NOTICE 'Caught expected restricted UPDATE privilege rejection for bytecode';
+  END;
+
+  BEGIN
+    UPDATE pljs.modules SET is_trusted = true, source = 'export const x = "benign";' WHERE path = 'restricted_untrusted';
+    RAISE EXCEPTION 'Expected restricted UPDATE privilege rejection for untrusted';
+  EXCEPTION WHEN insufficient_privilege THEN
+    RAISE NOTICE 'Caught expected restricted UPDATE privilege rejection for untrusted';
+  END;
+
+  -- Test Privilege Restrictions: Deleting an existing restricted module
+  BEGIN
+    DELETE FROM pljs.modules WHERE path = 'restricted_bc';
+    RAISE EXCEPTION 'Expected DELETE privilege rejection for bytecode';
+  EXCEPTION WHEN insufficient_privilege THEN
+    RAISE NOTICE 'Caught expected DELETE privilege rejection for bytecode';
+  END;
+
+  BEGIN
+    DELETE FROM pljs.modules WHERE path = 'restricted_untrusted';
+    RAISE EXCEPTION 'Expected DELETE privilege rejection for untrusted';
+  EXCEPTION WHEN insufficient_privilege THEN
+    RAISE NOTICE 'Caught expected DELETE privilege rejection for untrusted';
+  END;
+
+  -- Test Multi-row UPDATE to ensure the transaction aborts when modifying a restricted row
+  BEGIN
+    UPDATE pljs.modules SET source = 'export const a = 4;' WHERE path IN ('unpriv_standard', 'restricted_untrusted');
+    RAISE EXCEPTION 'Expected multi-row UPDATE to fail because it hits a restricted module';
+  EXCEPTION WHEN insufficient_privilege THEN
+    RAISE NOTICE 'Caught expected multi-row UPDATE privilege rejection';
+  END;
+
+  -- Test Multi-row DELETE
+  BEGIN
+    DELETE FROM pljs.modules WHERE path IN ('unpriv_standard', 'restricted_bc');
+    RAISE EXCEPTION 'Expected multi-row DELETE to fail because it hits a restricted module';
+  EXCEPTION WHEN insufficient_privilege THEN
+    RAISE NOTICE 'Caught expected multi-row DELETE privilege rejection';
+  END;
 END;
 $$;
 RESET ROLE;
-REVOKE INSERT, UPDATE ON pljs.modules FROM pljs_unpriv_tle_user;
+REVOKE INSERT, UPDATE, DELETE ON pljs.modules FROM pljs_unpriv_tle_user;
 
 -- Revoking SELECT on pljs.modules from PUBLIC and unprivileged role blocks module loading
 REVOKE SELECT ON pljs.modules FROM PUBLIC, pljs_unpriv_tle_user;

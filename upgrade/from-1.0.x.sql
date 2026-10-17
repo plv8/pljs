@@ -73,7 +73,7 @@ CREATE OR REPLACE FUNCTION pljs_modules_changed() RETURNS trigger
  LANGUAGE C;
 
 CREATE TRIGGER pljs_modules_guard
-  BEFORE INSERT OR UPDATE ON pljs.modules
+  BEFORE INSERT OR UPDATE OR DELETE ON pljs.modules
   FOR EACH ROW EXECUTE FUNCTION pljs_modules_changed();
 ALTER TABLE pljs.modules ENABLE ALWAYS TRIGGER pljs_modules_guard;
 
