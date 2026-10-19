@@ -1,0 +1,162 @@
+-- ============================================================
+-- Upgrading from a 1.0.x release
+-- ============================================================
+-- It works in a database of its own, which it replaces the extension in, so
+-- what other tests leave behind does not matter.
+\set regression_db :DBNAME
+CREATE DATABASE pljs_upgrade_test;
+\connect pljs_upgrade_test
+-- There is a way to upgrade from each release that can be.
+SELECT source, path IS NOT NULL AS has_path
+  FROM pg_extension_update_paths('pljs')
+  WHERE source IN ('1.0.0', '1.0.1', '1.0.3', '1.0.4', '1.0.5')
+    AND target = (SELECT default_version FROM pg_available_extensions WHERE name = 'pljs')
+  ORDER BY source;
+ source | has_path 
+--------+----------
+ 1.0.0  | t
+ 1.0.1  | t
+ 1.0.3  | t
+ 1.0.4  | t
+ 1.0.5  | t
+(5 rows)
+
+-- Start from a real 1.0.5.
+CREATE EXTENSION pljs VERSION '1.0.5';
+SELECT extversion FROM pg_extension WHERE extname = 'pljs';
+ extversion 
+------------
+ 1.0.5
+(1 row)
+
+SELECT to_regnamespace('pljs') IS NULL AS no_module_schema,
+       to_regprocedure('pg_catalog.pljs_reset()') IS NULL AS no_reset;
+ no_module_schema | no_reset 
+------------------+----------
+ t                | t
+(1 row)
+
+-- A function written under 1.0.5.
+CREATE FUNCTION upgrade_survivor(n int) RETURNS int AS $$
+  return n * 2;
+$$ LANGUAGE pljs;
+SELECT upgrade_survivor(21);
+ upgrade_survivor 
+------------------
+               42
+(1 row)
+
+ALTER EXTENSION pljs UPDATE;
+SELECT extversion = (SELECT default_version FROM pg_available_extensions WHERE name = 'pljs') AS is_current
+  FROM pg_extension WHERE extname = 'pljs';
+ is_current 
+------------
+ t
+(1 row)
+
+-- What the upgrade left, described object by object.
+CREATE TEMP TABLE upgraded (what text);
+CREATE FUNCTION pg_temp.describe_install() RETURNS SETOF text AS $$
+  SELECT 'member ' || pg_describe_object(classid, objid, objsubid)
+    FROM pg_depend
+    WHERE refclassid = 'pg_extension'::regclass
+      AND refobjid = (SELECT oid FROM pg_extension WHERE extname = 'pljs')
+      AND deptype = 'e'
+  UNION ALL
+  SELECT 'column ' || table_name || '.' || column_name || ' ' || data_type || ' ' ||
+         is_nullable || ' ' || coalesce(column_default, '')
+    FROM information_schema.columns WHERE table_schema = 'pljs'
+  UNION ALL
+  SELECT 'index ' || indexdef FROM pg_indexes WHERE schemaname = 'pljs'
+  UNION ALL
+  SELECT 'constraint ' || conrelid::regclass::text || ' ' || pg_get_constraintdef(oid)
+    FROM pg_constraint WHERE connamespace = 'pljs'::regnamespace
+  UNION ALL
+  SELECT 'trigger ' || tgenabled::text || ' ' || pg_get_triggerdef(oid)
+    FROM pg_trigger WHERE tgrelid IN ('pljs.modules'::regclass, 'pljs.packages'::regclass)
+      AND NOT tgisinternal
+  UNION ALL
+  SELECT 'privileges ' || p.oid::regprocedure::text || ' ' || coalesce(p.proacl::text, 'default')
+    FROM pg_proc p JOIN pg_depend d ON d.objid = p.oid AND d.classid = 'pg_proc'::regclass
+    WHERE d.refobjid = (SELECT oid FROM pg_extension WHERE extname = 'pljs') AND d.deptype = 'e'
+  UNION ALL
+  SELECT 'dumped ' || u.relid::regclass::text || ' [' || coalesce(u.cond, '') || ']'
+    FROM pg_extension e, unnest(e.extconfig, e.extcondition) AS u(relid, cond)
+    WHERE e.extname = 'pljs'
+  UNION ALL
+  SELECT 'function ' || pg_get_functiondef(p.oid)
+    FROM pg_proc p JOIN pg_depend d ON d.objid = p.oid AND d.classid = 'pg_proc'::regclass
+    WHERE d.refobjid = (SELECT oid FROM pg_extension WHERE extname = 'pljs') AND d.deptype = 'e'
+$$ LANGUAGE sql;
+INSERT INTO upgraded SELECT * FROM pg_temp.describe_install();
+SELECT count(*) > 0 AS described FROM upgraded;
+ described 
+-----------
+ t
+(1 row)
+
+-- The function survived, and the new parts work.
+SELECT upgrade_survivor(21);
+ upgrade_survivor 
+------------------
+               42
+(1 row)
+
+INSERT INTO pljs.modules (path, source) VALUES ('upgrade/m', 'export const v = 1;');
+CREATE FUNCTION upgrade_imports() RETURNS int AS $$
+  import { v } from "upgrade/m";
+  return v;
+$$ LANGUAGE pljs;
+SELECT upgrade_imports();
+ upgrade_imports 
+-----------------
+               1
+(1 row)
+
+UPDATE pljs.modules SET source = 'export const v = 2;' WHERE path = 'upgrade/m';
+SELECT upgrade_imports();
+ upgrade_imports 
+-----------------
+               2
+(1 row)
+
+SELECT pljs_reset();
+ pljs_reset 
+------------
+ 
+(1 row)
+
+SELECT upgrade_imports();
+ upgrade_imports 
+-----------------
+               2
+(1 row)
+
+DROP FUNCTION upgrade_imports();
+DROP FUNCTION upgrade_survivor(int);
+-- A fresh install of the same version has exactly the same things.
+DROP EXTENSION pljs;
+CREATE EXTENSION pljs;
+CREATE TEMP TABLE fresh (what text);
+INSERT INTO fresh SELECT * FROM pg_temp.describe_install();
+-- (Both sides must hold something, or equal would mean nothing.)
+SELECT (SELECT count(*) FROM upgraded) > 0 AS upgraded_described,
+       (SELECT count(*) FROM fresh) > 0 AS fresh_described,
+       (SELECT count(*) FROM upgraded) = (SELECT count(*) FROM fresh) AS same_count;
+ upgraded_described | fresh_described | same_count 
+--------------------+-----------------+------------
+ t                  | t               | t
+(1 row)
+
+SELECT what AS only_after_upgrade FROM (SELECT what FROM upgraded EXCEPT SELECT what FROM fresh) d ORDER BY 1;
+ only_after_upgrade 
+--------------------
+(0 rows)
+
+SELECT what AS only_in_fresh_install FROM (SELECT what FROM fresh EXCEPT SELECT what FROM upgraded) d ORDER BY 1;
+ only_in_fresh_install 
+-----------------------
+(0 rows)
+
+\connect :regression_db
+DROP DATABASE pljs_upgrade_test;

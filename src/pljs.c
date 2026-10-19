@@ -23,6 +23,8 @@
 
 #include "pljs.h"
 
+#include <string.h>
+
 #if PG_VERSION_NUM >= 180000
 PG_MODULE_MAGIC_EXT(.name = "pljs", .version = PLJS_VERSION);
 #else
@@ -40,19 +42,19 @@ static Datum call_srf_function(PG_FUNCTION_ARGS, pljs_context *context,
 static Datum convert_result(FunctionCallInfo fcinfo, pljs_context *context,
                             Oid rettype, JSValue ret);
 
-static void pljs_source_to_utf8(StringInfoData *src);
-static void pljs_build_function_source(StringInfoData *src,
+static bool pljs_build_function_source(StringInfoData *src,
                                        pljs_context *context, bool is_trigger);
 static void call_anonymous_function(const char *, JSContext *);
 static Datum call_trigger(FunctionCallInfo fcinfo, pljs_context *context);
 static Datum dispatch_call(FunctionCallInfo fcinfo);
 static void run_inline(FunctionCallInfo fcinfo);
 static int interrupt_handler(JSRuntime *rt, void *opaque);
-static void setup_storage(pljs_storage *storage, pljs_func *function,
-                          FunctionCallInfo fcinfo);
+static void setup_storage(pljs_storage *storage, JSContext *ctx,
+                          pljs_func *function, FunctionCallInfo fcinfo);
 static JSValue js_throw_uncatchable(ErrorData *edata, JSContext *ctx);
-static void pljs_run_with_storage(pljs_func *function, FunctionCallInfo fcinfo,
-                                  bool own_spi, void (*run)(void *), void *arg);
+static void pljs_run_with_storage(JSContext *ctx, pljs_func *function,
+                                  FunctionCallInfo fcinfo, bool own_spi,
+                                  void (*run)(void *), void *arg);
 static void pljs_raise_if_ending(void);
 static bool pljs_argmode_is_input(char argmode);
 
@@ -79,6 +81,22 @@ JSClassID js_window_id;
  * -- or NULL outside of one; see pljs_current_storage().
  */
 static pljs_storage *current_storage = NULL;
+static JSContext *current_compiling_ctx = NULL;
+
+bool pljs_context_is_active(JSContext *ctx) {
+  if (ctx == NULL) {
+    return false;
+  }
+  if (ctx == current_compiling_ctx) {
+    return true;
+  }
+  for (pljs_storage *s = current_storage; s != NULL; s = s->previous) {
+    if (s->ctx == ctx) {
+      return true;
+    }
+  }
+  return false;
+}
 
 /*
  * The error the running call has to end with, or NULL; see
@@ -95,29 +113,13 @@ static ErrorData *pljs_fatal_error(void) {
 bool pljs_converting_result = false;
 
 /**
- * @brief PostgreSQL extension initialization function.
+ * @brief Creates and configures the QuickJS runtime.
  *
- * Initialize the extension, setting up the cache, GUCs, and QuickJS
- * runtime.
+ * Everything a runtime needs before any JSContext is created in it is set
+ * here, so the runtime pljs_reset() replaces is set up the same way as the
+ * one _PG_init() created.
  */
-void _PG_init(void) {
-  // NB: do NOT install our own signal() handlers here.  This runs inside a
-  // backend that has already set up PostgreSQL's own SIGINT/SIGTERM handlers
-  // (query cancel, fast shutdown); overwriting them process-wide broke
-  // statement_timeout / pg_cancel_backend / pg_terminate_backend for the whole
-  // backend for the rest of its life.  Instead, interrupt_handler() consults
-  // PostgreSQL's interrupt flags directly (see below).
-
-  // Initialize cache.
-  pljs_cache_init();
-
-  // Initialize what the type conversions keep for the life of the backend.
-  pljs_type_io_init();
-
-  // Initialize the GUCs.
-  pljs_guc_init();
-
-  // Set up the quickjs runtime.
+void pljs_runtime_init(void) {
   rt = JS_NewRuntime();
 
   /*
@@ -172,6 +174,84 @@ void _PG_init(void) {
   if (configuration.memory_limit) {
     JS_SetMemoryLimit(rt, configuration.memory_limit * 1024 * 1024);
   }
+
+  // Stored modules are loaded through QuickJS's module system.
+  JS_SetModuleLoaderFunc(rt, pljs_module_normalize, pljs_module_loader, NULL);
+
+  // Initialize hook JS classes.
+  pljs_hooks_init(rt);
+}
+
+/**
+ * @brief PostgreSQL extension initialization function.
+ *
+ * Initialize the extension, setting up the cache, GUCs, and QuickJS
+ * runtime.
+ */
+void _PG_init(void) {
+  // NB: do NOT install our own signal() handlers here.  This runs inside a
+  // backend that has already set up PostgreSQL's own SIGINT/SIGTERM handlers
+  // (query cancel, fast shutdown); overwriting them process-wide broke
+  // statement_timeout / pg_cancel_backend / pg_terminate_backend for the whole
+  // backend for the rest of its life.  Instead, interrupt_handler() consults
+  // PostgreSQL's interrupt flags directly (see below).
+
+  // Initialize cache.
+  pljs_cache_init();
+
+  // Initialize what the type conversions keep for the life of the backend.
+  pljs_type_io_init();
+
+  // Initialize the GUCs.
+  pljs_guc_init();
+
+  // Set up the quickjs runtime.
+  pljs_runtime_init();
+
+  // Notice changes to the module tables.
+  pljs_modules_init();
+
+  // Install hook callbacks.
+  pljs_hooks_install();
+}
+
+/**
+ * GUC check callbacks for hook-related GUCs.
+ *
+ * Without shared_preload_libraries, PGC_SUSET is not enforced for GUC
+ * placeholders set before the library loads. These check callbacks reject
+ * non-superuser attempts from interactive sources (SET command), closing
+ * the security gap where a non-superuser could set hook GUCs as
+ * placeholders that later take effect for superuser queries.
+ */
+static bool pljs_hook_bool_check(bool *newval, void **extra,
+                                 GucSource source) {
+  if (*newval && source >= PGC_S_INTERACTIVE && !superuser()) {
+    GUC_check_errmsg("permission denied to set hook parameter");
+    GUC_check_errhint("Must be superuser to enable PLJS hooks.");
+    return false;
+  }
+  return true;
+}
+
+static bool pljs_hook_int_check(int *newval, void **extra, GucSource source) {
+  if (source >= PGC_S_INTERACTIVE && !superuser()) {
+    GUC_check_errmsg("permission denied to set hook parameter");
+    GUC_check_errhint("Must be superuser to configure PLJS hooks.");
+    return false;
+  }
+  return true;
+}
+
+static bool pljs_hook_string_check(char **newval, void **extra,
+                                   GucSource source) {
+  if (*newval && (*newval)[0] != '\0' && source >= PGC_S_INTERACTIVE &&
+      !superuser()) {
+    GUC_check_errmsg("permission denied to set hook parameter");
+    GUC_check_errhint("Must be superuser to configure PLJS hooks.");
+    return false;
+  }
+  return true;
 }
 
 /**
@@ -188,6 +268,12 @@ void _PG_init(void) {
 static void pljs_assign_memory_limit(int newval, void *extra) {
   if (rt != NULL && newval > 0) {
     JS_SetMemoryLimit(rt, (size_t)newval * 1024 * 1024);
+  }
+}
+
+static void pljs_assign_max_cached_contexts(int newval, void *extra) {
+  if (newval > 0) {
+    pljs_cache_evict_excess(newval);
   }
 }
 
@@ -217,6 +303,127 @@ void pljs_guc_init(void) {
       "pljs.start_proc",
       gettext_noop("PLJS function to run once when PLJS is first used."), NULL,
       &configuration.start_proc, NULL, PGC_USERSET, 0, NULL, NULL, NULL);
+
+  DefineCustomBoolVariable(
+      "pljs.hooks_enabled",
+      gettext_noop("Enable PLJS executor hooks."),
+      gettext_noop("When enabled, PLJS will install executor hooks that allow "
+                   "JavaScript functions to intercept query execution. "
+                   "Requires superuser to enable."),
+      &configuration.hooks_enabled, false, PGC_SUSET, 0,
+      pljs_hook_bool_check, NULL, NULL);
+
+  DefineCustomIntVariable(
+      "pljs.hooks_max_depth",
+      gettext_noop("Maximum recursion depth for PLJS hooks."),
+      gettext_noop("Limits how deeply hooks can recurse when a hook "
+                   "function triggers the same hook via pljs.execute(). "
+                   "Requires superuser to change."),
+      &configuration.hooks_max_depth, 5, 1, 64, PGC_SUSET, 0,
+      pljs_hook_int_check, NULL, NULL);
+
+  DefineCustomIntVariable(
+      "pljs.max_module_depth",
+      gettext_noop("Maximum recursion depth for nested module imports."),
+      gettext_noop("Limits how deeply pljs.import()/pljs.require() calls "
+                   "can nest before an error is raised. Guards against "
+                   "runaway recursion via circular dependencies."),
+      &configuration.max_module_depth, 512, 1, 65536, PGC_USERSET, 0, NULL,
+      NULL, NULL);
+
+  DefineCustomIntVariable(
+      "pljs.max_cached_contexts",
+      gettext_noop("Maximum number of cached JavaScript contexts per backend."),
+      gettext_noop("When this limit is reached, the least-recently-used "
+                   "inactive context is evicted before a new one is cached."),
+      &configuration.max_cached_contexts, 64, 1, 1024, PGC_SUSET, 0, NULL,
+      pljs_assign_max_cached_contexts, NULL);
+
+  // Hook GUCs - each names a PLJS function to call for the given hook.
+  // All require superuser and pljs.hooks_enabled = true at runtime.
+  DefineCustomStringVariable(
+      "pljs.executor_start_hook",
+      gettext_noop("PLJS function to call on ExecutorStart."), NULL,
+      &configuration.hook_executor_start, NULL, PGC_SUSET, 0,
+      pljs_hook_string_check, NULL, NULL);
+
+  DefineCustomStringVariable(
+      "pljs.executor_run_hook",
+      gettext_noop("PLJS function to call on ExecutorRun."), NULL,
+      &configuration.hook_executor_run, NULL, PGC_SUSET, 0,
+      pljs_hook_string_check, NULL, NULL);
+
+  DefineCustomStringVariable(
+      "pljs.executor_end_hook",
+      gettext_noop("PLJS function to call on ExecutorEnd."), NULL,
+      &configuration.hook_executor_end, NULL, PGC_SUSET, 0,
+      pljs_hook_string_check, NULL, NULL);
+
+  DefineCustomStringVariable(
+      "pljs.planner_hook",
+      gettext_noop("PLJS function to call on planner."), NULL,
+      &configuration.hook_planner, NULL, PGC_SUSET, 0,
+      pljs_hook_string_check, NULL, NULL);
+
+  DefineCustomStringVariable(
+      "pljs.create_upper_paths_hook",
+      gettext_noop("PLJS function to call on create_upper_paths."), NULL,
+      &configuration.hook_create_upper_paths, NULL, PGC_SUSET, 0,
+      pljs_hook_string_check, NULL, NULL);
+
+  DefineCustomStringVariable(
+      "pljs.set_rel_pathlist_hook",
+      gettext_noop("PLJS function to call on set_rel_pathlist."), NULL,
+      &configuration.hook_set_rel_pathlist, NULL, PGC_SUSET, 0,
+      pljs_hook_string_check, NULL, NULL);
+
+  DefineCustomStringVariable(
+      "pljs.set_join_pathlist_hook",
+      gettext_noop("PLJS function to call on set_join_pathlist."), NULL,
+      &configuration.hook_set_join_pathlist, NULL, PGC_SUSET, 0,
+      pljs_hook_string_check, NULL, NULL);
+
+  DefineCustomStringVariable(
+      "pljs.join_search_hook",
+      gettext_noop("PLJS function to call on join_search."), NULL,
+      &configuration.hook_join_search, NULL, PGC_SUSET, 0,
+      pljs_hook_string_check, NULL, NULL);
+
+  DefineCustomStringVariable(
+      "pljs.get_relation_info_hook",
+      gettext_noop("PLJS function to call on get_relation_info."), NULL,
+      &configuration.hook_get_relation_info, NULL, PGC_SUSET, 0,
+      pljs_hook_string_check, NULL, NULL);
+
+  DefineCustomStringVariable(
+      "pljs.needs_fmgr_hook",
+      gettext_noop("PLJS function to call on needs_fmgr."), NULL,
+      &configuration.hook_needs_fmgr, NULL, PGC_SUSET, 0,
+      pljs_hook_string_check, NULL, NULL);
+
+  DefineCustomStringVariable(
+      "pljs.fmgr_hook",
+      gettext_noop("PLJS function to call on fmgr."), NULL,
+      &configuration.hook_fmgr, NULL, PGC_SUSET, 0,
+      pljs_hook_string_check, NULL, NULL);
+
+  DefineCustomStringVariable(
+      "pljs.object_access_hook",
+      gettext_noop("PLJS function to call on object_access."), NULL,
+      &configuration.hook_object_access, NULL, PGC_SUSET, 0,
+      pljs_hook_string_check, NULL, NULL);
+
+  DefineCustomStringVariable(
+      "pljs.object_access_hook_str",
+      gettext_noop("PLJS function to call on object_access_hook_str."), NULL,
+      &configuration.hook_object_access_str, NULL, PGC_SUSET, 0,
+      pljs_hook_string_check, NULL, NULL);
+
+  DefineCustomStringVariable(
+      "pljs.emit_log_hook",
+      gettext_noop("PLJS function to call on emit_log."), NULL,
+      &configuration.hook_emit_log, NULL, PGC_SUSET, 0,
+      pljs_hook_string_check, NULL, NULL);
 }
 
 /**
@@ -407,6 +614,20 @@ static char *dump_error(JSContext *ctx, char **message_out, char **detail_out,
   return ret;
 }
 
+/**
+ * @brief Extract the current JavaScript exception as an error string.
+ *
+ * The exported form of dump_error(), for hooks.c and for companion
+ * extensions, which have no use for the error's message, detail or SQLSTATE
+ * on their own.
+ *
+ * @param ctx #JSContext - Javascript context with the error
+ * @returns @c char * as an error message
+ */
+char *pljs_dump_error(JSContext *ctx) {
+  return dump_error(ctx, NULL, NULL, NULL);
+}
+
 /*
  * Report a JavaScript exception as a PostgreSQL error.
  *
@@ -559,11 +780,17 @@ static bool setup_function(FunctionCallInfo fcinfo, HeapTuple proctuple,
     return false;
   }
 
+  pljs_encoding_init();
+
   pljs_function = palloc0(sizeof(pljs_func));
 
-  // Make a copy of the source available for later compilation.
-  pljs_function->prosrc =
-      DatumGetCString(DirectFunctionCall1(textout, prosrcdatum));
+  // Make a UTF-8 copy of the source available for later transpilation and
+  // compilation.
+  char *prosrc = DatumGetCString(DirectFunctionCall1(textout, prosrcdatum));
+  pljs_function->prosrc = pljs_server_to_utf8(prosrc, strlen(prosrc));
+  if (pljs_function->prosrc != prosrc) {
+    pfree(prosrc);
+  }
 
   /*
    * Record which pg_proc tuple this was compiled from.  CREATE OR REPLACE
@@ -599,10 +826,14 @@ static bool setup_function(FunctionCallInfo fcinfo, HeapTuple proctuple,
     Oid argtype = argtypes[i];
     char argmode = argmodes ? argmodes[i] : PROARGMODE_IN;
 
-    // Get a copy of the arguments themselves, we use them for creating the
-    // function.
+    // Get a UTF-8 copy of the arguments themselves, we use them for creating
+    // the function.
     if (arguments && arguments[i]) {
-      context->arguments[i] = arguments[i];
+      char *argname = pljs_server_to_utf8(arguments[i], strlen(arguments[i]));
+      if (argname != arguments[i]) {
+        pfree(arguments[i]);
+      }
+      context->arguments[i] = argname;
     } else {
       context->arguments[i] = NULL;
     }
@@ -635,14 +866,15 @@ static bool setup_function(FunctionCallInfo fcinfo, HeapTuple proctuple,
 
   context->function = pljs_function;
 
-  // Functions are scoped to a user, in postgres this is a one-to-many
-  // relationship, but in the extension we assign it to a context, which
-  // is a single context per user.
+  // Functions are scoped to the effective user and function owner pair.
   context->function->user_id = GetUserId();
+  context->function->owner_id = pg_proc_entry->proowner;
 
   // If we have the function call info, we set the function OID.
   if (fcinfo) {
     context->function->fn_oid = fcinfo->flinfo->fn_oid;
+  } else {
+    context->function->fn_oid = pg_proc_entry->oid;
   }
 
   return true;
@@ -809,7 +1041,108 @@ static void setup_start_proc(JSContext *ctx) {
    * pljs.execute() after SET ROLE -- and the start_proc saw that call's
    * storage: its pljs.return_next() added rows to the other call's set.
    */
-  pljs_run_with_storage(NULL, NULL, true, run_start_proc, &run);
+  pljs_run_with_storage(ctx, NULL, NULL, true, run_start_proc, &run);
+}
+
+/* What pljs_run_with_storage() runs for pljs_hook_call(). */
+typedef struct pljs_hook_call_run {
+  JSContext *ctx;
+  JSValueConst func;
+  int argc;
+  JSValueConst *argv;
+  MemoryContext caller_context;
+  JSValue *result;
+  char **error;
+  bool ok;
+} pljs_hook_call_run;
+
+/**
+ * @brief Calls the hook's function; see pljs_hook_call().
+ *
+ * @param arg #pljs_hook_call_run - the call, and where its result goes
+ */
+static void run_hook_call(void *arg) {
+  pljs_hook_call_run *run = (pljs_hook_call_run *)arg;
+  JSValue ret =
+      JS_Call(run->ctx, run->func, JS_UNDEFINED, run->argc, run->argv);
+
+  if (JS_IsException(ret)) {
+    run->ok = false;
+
+    /*
+     * Extracted while the SPI connection is open, as call_function() does, and
+     * into the caller's context, which outlives SPI_finish().
+     */
+    if (run->error != NULL) {
+      MemoryContext old_context = MemoryContextSwitchTo(run->caller_context);
+
+      *run->error = pljs_dump_error(run->ctx);
+      MemoryContextSwitchTo(old_context);
+    } else {
+      JS_FreeValue(run->ctx, JS_GetException(run->ctx));
+    }
+  } else if (run->result != NULL) {
+    *run->result = ret;
+    return;
+  }
+
+  JS_FreeValue(run->ctx, ret);
+}
+
+/**
+ * @brief Calls a JavaScript function from a PostgreSQL hook.
+ *
+ * A hook runs outside of any pljs call, so the JavaScript it calls gets what a
+ * call would have given it: storage of its own, and a cache for converting
+ * types, without which pljs.execute() could not convert its parameters or its
+ * results.  The cache lasts for this call only.
+ *
+ * @param ctx #JSContext - the context the function belongs to
+ * @param func #JSValueConst - the function
+ * @param argc @c int - how many arguments there are
+ * @param argv #JSValueConst* - the arguments
+ * @param own_spi @c bool - whether to connect to SPI for the call
+ * @param result #JSValue* - set to what the function returned, which the
+ * caller frees, or NULL to discard it; left alone when the function throws
+ * @param error @c char** - set to the error when the function throws, or NULL
+ * to discard it
+ * @returns @c bool - false when the function threw
+ */
+bool pljs_hook_call(JSContext *ctx, JSValueConst func, int argc,
+                    JSValueConst *argv, bool own_spi, JSValue *result,
+                    char **error) {
+  pljs_hook_call_run run = {.ctx = ctx,
+                            .func = func,
+                            .argc = argc,
+                            .argv = argv,
+                            .caller_context = CurrentMemoryContext,
+                            .result = result,
+                            .error = error,
+                            .ok = true};
+  MemoryContext type_io_context = AllocSetContextCreate(
+      CurrentMemoryContext, "PLJS hook call", ALLOCSET_SMALL_SIZES);
+  FmgrInfo flinfo;
+  pljs_type_io_cache *types;
+
+  memset(&flinfo, 0, sizeof(flinfo));
+  flinfo.fn_oid = InvalidOid;
+  flinfo.fn_mcxt = type_io_context;
+
+  pljs_encoding_init();
+  types = pljs_type_io_enter(&flinfo);
+
+  PG_TRY();
+  {
+    pljs_run_with_storage(ctx, NULL, NULL, own_spi, run_hook_call, &run);
+  }
+  PG_FINALLY();
+  {
+    pljs_type_io_exit(types);
+    MemoryContextDelete(type_io_context);
+  }
+  PG_END_TRY();
+
+  return run.ok;
 }
 
 /**
@@ -823,14 +1156,15 @@ static void setup_start_proc(JSContext *ctx) {
  *
  * @returns #JSContext - the new context
  */
-static JSContext *pljs_create_context(void) {
-  /* Whose it is, before the start_proc can SET ROLE. */
-  Oid user_id = GetUserId();
+JSContext *pljs_create_context(Oid user_id, Oid owner_id) {
   JSContext *ctx = JS_NewContext(rt);
+  JSContext *prev_compiling_ctx = current_compiling_ctx;
 
   if (ctx == NULL) {
     elog(ERROR, "could not create a JavaScript context");
   }
+
+  current_compiling_ctx = ctx;
 
   PG_TRY();
   {
@@ -846,18 +1180,21 @@ static JSContext *pljs_create_context(void) {
     }
 
     /*
-     * Save the context in the cache for this user id.  Inside the PG_TRY: a
-     * start_proc that made a nested call as the same user cached a context of
-     * its own, and adding this one raised, and lost it.
+     * Save the context in the cache for this (user_id, owner_id).  Inside the
+     * PG_TRY: a start_proc that made a nested call as the same user/owner
+     * cached a context of its own, and adding this one raised, and lost it.
      */
-    pljs_cache_context_add(user_id, ctx);
+    pljs_cache_context_add(user_id, owner_id, ctx);
   }
   PG_CATCH();
   {
+    current_compiling_ctx = prev_compiling_ctx;
     JS_FreeContext(ctx);
     PG_RE_THROW();
   }
   PG_END_TRY();
+
+  current_compiling_ctx = prev_compiling_ctx;
 
   return ctx;
 }
@@ -1013,8 +1350,8 @@ pljs_storage *pljs_current_storage(void) { return current_storage; }
  * block or a start_proc
  * @param fcinfo #FunctionCalInfo - the call, or NULL for a start_proc
  */
-static void setup_storage(pljs_storage *storage, pljs_func *function,
-                          FunctionCallInfo fcinfo) {
+static void setup_storage(pljs_storage *storage, JSContext *ctx,
+                          pljs_func *function, FunctionCallInfo fcinfo) {
   WindowObject window_object = fcinfo != NULL ? PG_WINDOW_OBJECT() : NULL;
 
   memset(storage, 0, sizeof(pljs_storage));
@@ -1022,6 +1359,8 @@ static void setup_storage(pljs_storage *storage, pljs_func *function,
   storage->function = function;
   storage->execution_memory_context = CurrentMemoryContext;
   storage->fcinfo = fcinfo;
+  storage->ctx = ctx;
+  storage->previous = current_storage;
 
   /* fcinfo->context is a TriggerData or CallContext for other calls. */
   if (WindowObjectIsValid(window_object)) {
@@ -1046,14 +1385,14 @@ static void setup_storage(pljs_storage *storage, pljs_func *function,
  * @param run - runs the JavaScript
  * @param arg - @p run's argument
  */
-static void pljs_run_with_storage(pljs_func *function, FunctionCallInfo fcinfo,
-                                  bool own_spi, void (*run)(void *),
-                                  void *arg) {
+static void pljs_run_with_storage(JSContext *ctx, pljs_func *function,
+                                  FunctionCallInfo fcinfo, bool own_spi,
+                                  void (*run)(void *), void *arg) {
   pljs_storage storage;
   pljs_storage *previous_storage = current_storage;
   volatile bool connected = false;
 
-  setup_storage(&storage, function, fcinfo);
+  setup_storage(&storage, ctx, function, fcinfo);
   current_storage = &storage;
 
   PG_TRY();
@@ -1129,6 +1468,323 @@ static void pljs_run_with_storage(pljs_func *function, FunctionCallInfo fcinfo,
     current_storage = previous_storage;
   }
   PG_END_TRY();
+
+  pljs_cache_evict_excess(configuration.max_cached_contexts);
+}
+
+/**
+ * @brief Retrieves or creates the cached #JSContext for the given
+ * (user_id, owner_id) pair.
+ */
+static JSContext *pljs_get_context(Oid user_id, Oid owner_id) {
+  pljs_context_cache_value *entry = pljs_cache_context_find(user_id, owner_id);
+  return entry ? entry->ctx : pljs_create_context(user_id, owner_id);
+}
+
+/**
+ * @brief Retrieves or creates the cached #JSContext for the current user
+ * (when there is no separate function owner, such as a DO block).
+ */
+static JSContext *pljs_get_user_context(void) {
+  Oid user_id = GetUserId();
+  return pljs_get_context(user_id, user_id);
+}
+
+/**
+ * @brief Checks whether a language OID is `pljs` or a custom language whose
+ * handler chain resolves to `pljs`.
+ */
+static bool pljs_is_js_language(Oid prolang, bool *too_deep) {
+  Oid current_lang = prolang;
+
+  if (too_deep != NULL) {
+    *too_deep = false;
+  }
+
+  for (int depth = 0; depth < PLJS_MAX_LANG_HANDLER_DEPTH; depth++) {
+    CHECK_FOR_INTERRUPTS();
+
+    if (!OidIsValid(current_lang)) {
+      return false;
+    }
+
+    HeapTuple langtuple =
+        SearchSysCache(LANGOID, ObjectIdGetDatum(current_lang), 0, 0, 0);
+    if (!HeapTupleIsValid(langtuple)) {
+      return false;
+    }
+
+    Form_pg_language lang_entry = (Form_pg_language)GETSTRUCT(langtuple);
+    bool is_pljs = (strcmp(NameStr(lang_entry->lanname), "pljs") == 0);
+    Oid lanplcallfoid = lang_entry->lanplcallfoid;
+    ReleaseSysCache(langtuple);
+
+    if (is_pljs) {
+      return true;
+    }
+
+    if (!OidIsValid(lanplcallfoid)) {
+      return false;
+    }
+
+    HeapTuple proctuple =
+        SearchSysCache(PROCOID, ObjectIdGetDatum(lanplcallfoid), 0, 0, 0);
+    if (!HeapTupleIsValid(proctuple)) {
+      return false;
+    }
+
+    Form_pg_proc proc_entry = (Form_pg_proc)GETSTRUCT(proctuple);
+    current_lang = proc_entry->prolang;
+    ReleaseSysCache(proctuple);
+  }
+
+  if (too_deep != NULL) {
+    *too_deep = true;
+  }
+
+  return false;
+}
+
+/**
+ * @brief Records the chain of language handler functions (`fn_oid`, `fn_xmin`,
+ * `fn_tid`) that transpile `func`, so downstream cached functions can be
+ * invalidated automatically when any handler in the chain is replaced.
+ */
+static void pljs_record_language_handlers(Oid first_handler_oid,
+                                          pljs_func *func) {
+  Oid current_handler = first_handler_oid;
+  func->nhandlers = 0;
+
+  for (int depth = 0; depth < PLJS_MAX_LANG_HANDLER_DEPTH; depth++) {
+    CHECK_FOR_INTERRUPTS();
+
+    if (!OidIsValid(current_handler)) {
+      break;
+    }
+
+    HeapTuple proctuple =
+        SearchSysCache(PROCOID, ObjectIdGetDatum(current_handler), 0, 0, 0);
+    if (!HeapTupleIsValid(proctuple)) {
+      break;
+    }
+
+    func->handlers[func->nhandlers].fn_oid = current_handler;
+    func->handlers[func->nhandlers].fn_xmin =
+        HeapTupleHeaderGetRawXmin(proctuple->t_data);
+    func->handlers[func->nhandlers].fn_tid = proctuple->t_self;
+    func->nhandlers++;
+
+    Form_pg_proc proc_entry = (Form_pg_proc)GETSTRUCT(proctuple);
+    Oid next_lang = proc_entry->prolang;
+    ReleaseSysCache(proctuple);
+
+    if (!OidIsValid(next_lang)) {
+      break;
+    }
+
+    HeapTuple langtuple =
+        SearchSysCache(LANGOID, ObjectIdGetDatum(next_lang), 0, 0, 0);
+    if (!HeapTupleIsValid(langtuple)) {
+      break;
+    }
+
+    Form_pg_language lang_entry = (Form_pg_language)GETSTRUCT(langtuple);
+    bool is_pljs = (strcmp(NameStr(lang_entry->lanname), "pljs") == 0);
+    current_handler = lang_entry->lanplcallfoid;
+    ReleaseSysCache(langtuple);
+
+    if (is_pljs) {
+      break;
+    }
+  }
+}
+
+typedef struct pljs_transpile_run {
+  JSContext *ctx;
+  JSValue transpiler_func;
+  JSValue argv[1];
+  JSValue result;
+} pljs_transpile_run;
+
+static void transpile_run(void *arg) {
+  pljs_transpile_run *run = (pljs_transpile_run *)arg;
+
+  JS_SetInterruptHandler(JS_GetRuntime(run->ctx), interrupt_handler, NULL);
+  run->result =
+      JS_Call(run->ctx, run->transpiler_func, JS_UNDEFINED, 1, run->argv);
+}
+
+/**
+ * @brief If the function's language is a custom language handled by a JS
+ * function, transpile `context->function->prosrc` using the language handler.
+ */
+static bool pljs_transpile_if_needed(pljs_context *context, Oid lang_oid) {
+  check_stack_depth();
+  CHECK_FOR_INTERRUPTS();
+
+  Oid prolang = lang_oid;
+
+  if (!OidIsValid(prolang) && OidIsValid(context->function->fn_oid)) {
+    HeapTuple proctuple = SearchSysCache(
+        PROCOID, ObjectIdGetDatum(context->function->fn_oid), 0, 0, 0);
+    if (!HeapTupleIsValid(proctuple)) {
+      elog(ERROR, "cache lookup failed for function %u",
+           context->function->fn_oid);
+    }
+    Form_pg_proc proc_struct = (Form_pg_proc)GETSTRUCT(proctuple);
+    prolang = proc_struct->prolang;
+    ReleaseSysCache(proctuple);
+  }
+
+  if (!OidIsValid(prolang)) {
+    return true;
+  }
+
+  HeapTuple langtuple =
+      SearchSysCache(LANGOID, ObjectIdGetDatum(prolang), 0, 0, 0);
+  if (!HeapTupleIsValid(langtuple)) {
+    elog(ERROR, "cache lookup failed for language %u", prolang);
+  }
+
+  Form_pg_language lang_struct = (Form_pg_language)GETSTRUCT(langtuple);
+  bool lang_is_pljs = (strcmp(NameStr(lang_struct->lanname), "pljs") == 0);
+  Oid lanplcallfoid = lang_struct->lanplcallfoid;
+  char lanname[NAMEDATALEN];
+  memcpy(lanname, NameStr(lang_struct->lanname), NAMEDATALEN);
+  ReleaseSysCache(langtuple);
+
+  if (lang_is_pljs) {
+    return true;
+  }
+
+  ereport(DEBUG1,
+          (errmsg("pl/<any>: prolang %u, lanname [%s], lang_is_pljs: %d",
+                  prolang, lanname, lang_is_pljs)));
+
+  if (OidIsValid(context->function->fn_oid)) {
+    pljs_record_language_handlers(lanplcallfoid, context->function);
+  }
+
+  JSValue transpiler_func = pljs_find_js_function(lanplcallfoid, context->ctx);
+  if (JS_IsUndefined(transpiler_func)) {
+    /*
+     * A handler written in a language that is itself handled by a chain of
+     * more than PLJS_MAX_LANG_HANDLER_DEPTH handlers is not found either;
+     * say so, rather than blaming a handler that exists.
+     */
+    HeapTuple handler_tuple =
+        SearchSysCache(PROCOID, ObjectIdGetDatum(lanplcallfoid), 0, 0, 0);
+    if (HeapTupleIsValid(handler_tuple)) {
+      Oid handler_lang = ((Form_pg_proc)GETSTRUCT(handler_tuple))->prolang;
+      bool too_deep = false;
+
+      ReleaseSysCache(handler_tuple);
+      if (!pljs_is_js_language(handler_lang, &too_deep) && too_deep) {
+        ereport(ERROR,
+                (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+                 errmsg("language handler chain is deeper than %d levels",
+                        PLJS_MAX_LANG_HANDLER_DEPTH)));
+      }
+    }
+
+    elog(ERROR, "javascript language handler function %u is not found",
+         lanplcallfoid);
+  }
+
+  JSValue argv0 = JS_NewStringLen(context->ctx, context->function->prosrc,
+                                  strlen(context->function->prosrc));
+  if (JS_IsException(argv0)) {
+    char *message = NULL, *pg_detail = NULL, *sqlstate = NULL;
+    char *detail = dump_error(context->ctx, &message, &pg_detail, &sqlstate);
+    JS_FreeValue(context->ctx, argv0);
+    JS_FreeValue(context->ctx, transpiler_func);
+    pljs_ereport_js_error(message, pg_detail, detail, sqlstate,
+                          "language handler execution error");
+  }
+
+  pljs_func handler_func = {0};
+  handler_func.fn_oid = lanplcallfoid;
+  handler_func.user_id = GetUserId();
+  handler_func.owner_id =
+      context->function ? context->function->owner_id : GetUserId();
+
+  pljs_transpile_run run = {
+      .ctx = context->ctx,
+      .transpiler_func = transpiler_func,
+      .argv = {argv0},
+      .result = JS_UNDEFINED,
+  };
+
+  PG_TRY();
+  {
+    pljs_run_with_storage(context->ctx, &handler_func, NULL, true,
+                          transpile_run, &run);
+  }
+  PG_CATCH();
+  {
+    JS_FreeValue(context->ctx, run.result);
+    JS_FreeValue(context->ctx, argv0);
+    JS_FreeValue(context->ctx, transpiler_func);
+    PG_RE_THROW();
+  }
+  PG_END_TRY();
+
+  JS_FreeValue(context->ctx, argv0);
+  JS_FreeValue(context->ctx, transpiler_func);
+
+  if (JS_IsException(run.result)) {
+    char *message = NULL, *pg_detail = NULL, *sqlstate = NULL;
+    char *detail = dump_error(context->ctx, &message, &pg_detail, &sqlstate);
+
+    JS_FreeValue(context->ctx, run.result);
+
+    CHECK_FOR_INTERRUPTS();
+
+    pljs_ereport_js_error(message, pg_detail, detail, sqlstate,
+                          "language handler execution error");
+  }
+
+  if (JS_IsNull(run.result) || JS_IsUndefined(run.result)) {
+    JS_FreeValue(context->ctx, run.result);
+    elog(ERROR, "language handler returned null or undefined source code");
+  }
+
+  if (!JS_IsString(run.result)) {
+    JS_FreeValue(context->ctx, run.result);
+    ereport(ERROR,
+            (errcode(ERRCODE_DATATYPE_MISMATCH),
+             errmsg("language handler function %u did not return a string",
+                    lanplcallfoid)));
+  }
+
+  size_t transpiled_len = 0;
+  const char *transpiled =
+      JS_ToCStringLen(context->ctx, &transpiled_len, run.result);
+  if (transpiled == NULL) {
+    char *message = NULL, *pg_detail = NULL, *sqlstate = NULL;
+    char *detail = dump_error(context->ctx, &message, &pg_detail, &sqlstate);
+    JS_FreeValue(context->ctx, run.result);
+    pljs_ereport_js_error(message, pg_detail, detail, sqlstate,
+                          "language handler execution error");
+  }
+
+  char *volatile new_prosrc = NULL;
+  PG_TRY();
+  {
+    new_prosrc = pstrdup(transpiled);
+  }
+  PG_FINALLY();
+  {
+    JS_FreeCString(context->ctx, transpiled);
+    JS_FreeValue(context->ctx, run.result);
+  }
+  PG_END_TRY();
+
+  ereport(DEBUG1, (errmsg("pl/<any>: transpiled [%s] to [%s]",
+                          context->function->prosrc, new_prosrc)));
+
+  context->function->prosrc = new_prosrc;
+  return true;
 }
 
 /**
@@ -1212,49 +1868,73 @@ static Datum dispatch_call(FunctionCallInfo fcinfo) {
             errmsg("cache lookup failed for function %u", fn_oid));
   }
 
+  if (!is_trigger && fcinfo->nargs == 1 && !PG_ARGISNULL(0)) {
+    Form_pg_proc procStruct = (Form_pg_proc)GETSTRUCT(proctuple);
+    if (procStruct->pronargs == 1 &&
+        procStruct->proargtypes.values[0] == INTERNALOID &&
+        procStruct->prorettype == VOIDOID) {
+      Node *arg0 = (Node *)DatumGetPointer(PG_GETARG_DATUM(0));
+      if (arg0 != NULL && IsA(arg0, InlineCodeBlock)) {
+        ReleaseSysCache(proctuple);
+        run_inline(fcinfo);
+        PG_RETURN_VOID();
+      }
+    }
+  }
+
+  Form_pg_proc procStruct_initial = (Form_pg_proc)GETSTRUCT(proctuple);
+  Oid user_id = GetUserId();
+  Oid owner_id = procStruct_initial->proowner;
+  JSContext *prev_compiling_ctx = current_compiling_ctx;
+
   // First search for a cached copy of the context.
   pljs_function_cache_value *function_entry =
-      pljs_cache_function_find(GetUserId(), fn_oid, proctuple);
+      pljs_cache_function_find(user_id, owner_id, fn_oid, proctuple);
 
   if (function_entry) {
     // Make a copy of the function entry to the pljs context.
     pljs_function_cache_to_context(&context, function_entry);
+    current_compiling_ctx = context.ctx;
   } else {
-    // Check to see if a context exists in the cache for this user.
-    pljs_context_cache_value *entry = pljs_cache_context_find(GetUserId());
-
-    if (entry) {
-      ctx = entry->ctx;
-    } else {
-      ctx = pljs_create_context();
-    }
-
-    context.ctx = ctx;
-
-    // Set up a copy of all of the function data.
+    // Set up a copy of all of the function data and release the syscache pin
+    // before entering JavaScript (start_proc or language handler transpiler).
     setup_function(fcinfo, proctuple, &context);
+    ReleaseSysCache(proctuple);
+    proctuple = NULL;
 
-    // Compile the function.
-    context.js_function = pljs_compile_function(&context, is_trigger);
+    ctx = pljs_get_context(user_id, owner_id);
+    context.ctx = ctx;
+    current_compiling_ctx = ctx;
 
-    /*
-     * The source evaluates to the function it declares, unless its top-level
-     * code replaced that: `} f = undefined; function z() {`.  That returned
-     * void, a zero Datum not marked NULL, whatever the function's type, and
-     * the caller took it for a pointer to text and crashed the backend.
-     */
-    if (!JS_IsFunction(context.ctx, context.js_function)) {
-      JS_FreeValue(context.ctx, context.js_function);
-      ReleaseSysCache(proctuple);
+    PG_TRY();
+    {
+      // Compile the function.
+      context.js_function = pljs_compile_function(&context, is_trigger);
 
-      ereport(ERROR, (errcode(ERRCODE_INVALID_FUNCTION_DEFINITION),
-                      errmsg("the source of function %s does not evaluate to "
-                             "a function",
-                             context.function->proname)));
+      /*
+       * The source evaluates to the function it declares, unless its top-level
+       * code replaced that: `} f = undefined; function z() {`.  That returned
+       * void, a zero Datum not marked NULL, whatever the function's type, and
+       * the caller took it for a pointer to text and crashed the backend.
+       */
+      if (!JS_IsFunction(context.ctx, context.js_function)) {
+        JS_FreeValue(context.ctx, context.js_function);
+
+        ereport(ERROR, (errcode(ERRCODE_INVALID_FUNCTION_DEFINITION),
+                        errmsg("the source of function %s does not evaluate to "
+                               "a function",
+                               context.function->proname)));
+      }
+
+      // Create the cache entry for the function.
+      pljs_cache_function_add(&context);
     }
-
-    // Create the cache entry for the function.
-    pljs_cache_function_add(&context);
+    PG_CATCH();
+    {
+      current_compiling_ctx = prev_compiling_ctx;
+      PG_RE_THROW();
+    }
+    PG_END_TRY();
   }
 
   /*
@@ -1271,27 +1951,49 @@ static Datum dispatch_call(FunctionCallInfo fcinfo) {
    * long-running backend).  Release it at the last safe point instead: right
    * after the final read, before any JS is executed.
    */
-  if (is_trigger) {
-    // Call in the context of a trigger.
-    Form_pg_proc procStruct;
+  PG_TRY();
+  {
+    if (is_trigger) {
+      // Call in the context of a trigger.
+      if (proctuple != NULL) {
+        Form_pg_proc procStruct = (Form_pg_proc)GETSTRUCT(proctuple);
+        context.function->rettype = procStruct->prorettype;
+        ReleaseSysCache(proctuple);
+      }
+    } else {
+      // Call as a function.
+      int nargs;
 
-    procStruct = (Form_pg_proc)GETSTRUCT(proctuple);
+      if (proctuple == NULL) {
+        proctuple = SearchSysCache(PROCOID, ObjectIdGetDatum(fn_oid), 0, 0, 0);
+        if (!HeapTupleIsValid(proctuple)) {
+          ereport(ERROR, errcode(ERRCODE_INTERNAL_ERROR),
+                  errmsg("cache lookup failed for function %u", fn_oid));
+        }
+      }
 
-    context.function->rettype = procStruct->prorettype;
-  } else {
-    // Call as a function.
-    int nargs;
-
-    argv = convert_arguments_to_javascript(fcinfo, proctuple, &context, &nargs);
-    argc = nargs;
+      argv =
+          convert_arguments_to_javascript(fcinfo, proctuple, &context, &nargs);
+      argc = nargs;
+      ReleaseSysCache(proctuple);
+    }
   }
-
-  ReleaseSysCache(proctuple);
+  PG_FINALLY();
+  {
+    current_compiling_ctx = prev_compiling_ctx;
+  }
+  PG_END_TRY();
 
   pljs_dispatch_run run = {.fcinfo = fcinfo,
                            .context = &context,
                            .argv = argv,
                            .is_trigger = is_trigger};
+
+  /*
+   * Retain a local reference to context.js_function across execution in case
+   * the function cache entry is invalidated during a nested SPI call.
+   */
+  JS_DupValue(context.ctx, context.js_function);
 
   /*
    * The storage is restored even when the call raises; see
@@ -1318,13 +2020,15 @@ static Datum dispatch_call(FunctionCallInfo fcinfo) {
    */
   PG_TRY();
   {
-    pljs_run_with_storage(context.function, fcinfo, false, dispatch_run, &run);
+    pljs_run_with_storage(context.ctx, context.function, fcinfo, false,
+                          dispatch_run, &run);
   }
   PG_FINALLY();
   {
     for (int i = 0; i < argc; i++) {
       JS_FreeValue(context.ctx, argv[i]);
     }
+    JS_FreeValue(context.ctx, context.js_function);
   }
   PG_END_TRY();
 
@@ -1382,23 +2086,30 @@ static void inline_run(void *arg) {
 }
 
 static void run_inline(FunctionCallInfo fcinfo) {
-  pljs_context_cache_value *entry = pljs_cache_context_find(GetUserId());
-
   InlineCodeBlock *code_block =
       (InlineCodeBlock *)DatumGetPointer(PG_GETARG_DATUM(0));
-  char *sourcecode = code_block->source_text;
+  char *sourcecode = pljs_server_to_utf8(code_block->source_text,
+                                         strlen(code_block->source_text));
 
-  JSContext *ctx = NULL;
   bool nonatomic = fcinfo->context && IsA(fcinfo->context, CallContext) &&
                    !castNode(CallContext, fcinfo->context)->atomic;
 
-  // An inline handler is called separately, so there may not be a
-  // context created at this point.
-  if (entry) {
-    ctx = entry->ctx;
-  } else {
-    ctx = pljs_create_context();
+  JSContext *ctx = pljs_get_user_context();
+
+  pljs_func local_func = {0};
+  local_func.fn_oid = InvalidOid;
+  local_func.prosrc = sourcecode;
+  local_func.user_id = GetUserId();
+  local_func.owner_id = GetUserId();
+
+  pljs_context local_context = {0};
+  local_context.ctx = ctx;
+  local_context.function = &local_func;
+
+  if (!pljs_transpile_if_needed(&local_context, code_block->langOid)) {
+    elog(ERROR, "failed to transpile function source code");
   }
+  sourcecode = local_func.prosrc;
 
   if (SPI_connect_ext(nonatomic ? SPI_OPT_NONATOMIC : 0) != SPI_OK_CONNECT) {
     elog(ERROR, "could not connect to spi manager");
@@ -1412,7 +2123,7 @@ static void run_inline(FunctionCallInfo fcinfo) {
    */
   pljs_inline_run run = {.source = sourcecode, .ctx = ctx};
 
-  pljs_run_with_storage(NULL, fcinfo, false, inline_run, &run);
+  pljs_run_with_storage(ctx, NULL, fcinfo, false, inline_run, &run);
 
   SPI_finish();
 }
@@ -1448,10 +2159,11 @@ Datum pljs_call_validator(PG_FUNCTION_ARGS) {
    */
   Oid fn_oid = PG_GETARG_OID(0);
   HeapTuple proctuple;
-  JSContext *ctx;
+  Form_pg_proc functup;
+  JSContext *volatile ctx = NULL;
   pljs_context context = {0};
   StringInfoData src;
-  bool is_trigger;
+  volatile bool is_trigger = false;
 
   if (!CheckFunctionValidatorAccess(fcinfo->flinfo->fn_oid, fn_oid)) {
     PG_RETURN_VOID();
@@ -1461,6 +2173,7 @@ Datum pljs_call_validator(PG_FUNCTION_ARGS) {
 
   /* check_function_bodies = off means "create it, do not compile it". */
   if (!check_function_bodies) {
+    pljs_cache_function_remove(fn_oid);
     PG_RETURN_VOID();
   }
 
@@ -1470,7 +2183,35 @@ Datum pljs_call_validator(PG_FUNCTION_ARGS) {
     elog(ERROR, "cache lookup failed for function %u", fn_oid);
   }
 
-  is_trigger = ((Form_pg_proc)GETSTRUCT(proctuple))->prorettype == TRIGGEROID;
+  functup = (Form_pg_proc)GETSTRUCT(proctuple);
+
+  /*
+   * Check that return and argument types are not disallowed pseudo-types.
+   */
+  for (int i = -1; i < functup->proargtypes.dim1; i++) {
+    Oid typid =
+        (i == -1) ? functup->prorettype : functup->proargtypes.values[i];
+    char typtype = get_typtype(typid);
+
+    if (typtype == TYPTYPE_PSEUDO) {
+      if (i == -1 && (typid == TRIGGEROID
+#ifdef OPAQUEOID
+                      || (typid == OPAQUEOID && functup->pronargs == 0)
+#endif
+                          )) {
+        is_trigger = true;
+      } else if (typid != RECORDOID && typid != RECORDARRAYOID &&
+                 typid != VOIDOID && typid != INTERNALOID &&
+                 typid != LANGUAGE_HANDLEROID && !IsPolymorphicType(typid) &&
+                 !(i >= 0 && typid == ANYOID)) {
+        ReleaseSysCache(proctuple);
+        ereport(ERROR,
+                (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                 errmsg("PL/JS functions cannot %s type %s",
+                        i == -1 ? "return" : "accept", format_type_be(typid))));
+      }
+    }
+  }
 
   /*
    * Fills in proname, prosrc and the argument names, which the wrapper needs.
@@ -1484,20 +2225,58 @@ Datum pljs_call_validator(PG_FUNCTION_ARGS) {
     PG_RETURN_VOID();
   }
 
-  pljs_build_function_source(&src, &context, is_trigger);
-
+  Oid prolang = functup->prolang;
+  Oid owner_id = functup->proowner;
   ReleaseSysCache(proctuple);
 
-  ctx = JS_NewContext(rt);
+  HeapTuple langtuple =
+      SearchSysCache(LANGOID, ObjectIdGetDatum(prolang), 0, 0, 0);
+  if (!HeapTupleIsValid(langtuple)) {
+    elog(ERROR, "cache lookup failed for language %u", prolang);
+  }
+  bool lang_is_pljs =
+      (strcmp(NameStr(((Form_pg_language)GETSTRUCT(langtuple))->lanname),
+              "pljs") == 0);
+  ReleaseSysCache(langtuple);
 
-  if (ctx == NULL) {
-    elog(ERROR, "could not create a JavaScript context");
+  if (!lang_is_pljs) {
+    pljs_type_io_cache *types = pljs_type_io_enter(fcinfo->flinfo);
+    PG_TRY();
+    {
+      ctx = pljs_get_context(GetUserId(), owner_id);
+      context.ctx = ctx;
+      if (!pljs_transpile_if_needed(&context, prolang)) {
+        elog(ERROR, "failed to transpile function source code");
+      }
+    }
+    PG_FINALLY();
+    {
+      pljs_type_io_exit(types);
+    }
+    PG_END_TRY();
   }
 
+  bool is_module = pljs_build_function_source(&src, &context, is_trigger);
+
+  ctx = JS_NewContext(rt);
+  if (ctx == NULL) {
+    pfree(src.data);
+    elog(ERROR, "could not create a JavaScript context");
+  }
   context.ctx = ctx;
 
-  JSValue val = JS_Eval(ctx, src.data, strlen(src.data), "<function>",
-                        JS_EVAL_FLAG_COMPILE_ONLY);
+  /*
+   * Only the syntax is checked.  A function's imports are not loaded here, so
+   * a function can be created before the modules it uses are.  Always use a
+   * temporary JSContext so syntax_check_only stub modules are never registered
+   * in the user's persistent context.
+   */
+  JSValue val =
+      is_module
+          ? pljs_module_eval_source(ctx, src.data, strlen(src.data),
+                                    "<function>", true)
+          : JS_Eval(ctx, src.data, strlen(src.data), "<function>",
+                    JS_EVAL_FLAG_COMPILE_ONLY);
 
   pfree(src.data);
 
@@ -1537,27 +2316,6 @@ Datum pljs_call_validator(PG_FUNCTION_ARGS) {
 }
 
 /**
- * @brief Converts JavaScript source from the database's encoding to UTF-8.
- *
- * QuickJS reads its source as UTF-8, and a function's body, its name and its
- * arguments' names are in the database's encoding.  In a LATIN1 database a
- * string literal 'é' in a body became U+FFFD, and so did an accented letter
- * in a name.
- *
- * @param src #StringInfoData - the source, replaced by its conversion
- */
-static void pljs_source_to_utf8(StringInfoData *src) {
-  char *utf8 = pljs_server_to_utf8(src->data, src->len);
-
-  if (utf8 != src->data) {
-    pfree(src->data);
-    src->data = utf8;
-    src->len = strlen(utf8);
-    src->maxlen = src->len + 1;
-  }
-}
-
-/**
  * @brief Compile a javascript function and return a pointer to it.
  *
  * Sets up the arguments and code of a javascript function, compiles
@@ -1581,16 +2339,35 @@ static void pljs_source_to_utf8(StringInfoData *src) {
  * makes the two agree by construction rather than by two copies staying in
  * step.
  *
+ * A body that starts with `import` statements is built as a module instead:
+ * the imports go first, on the first line so that nothing after them moves,
+ * and the function is declared in the module, made a global as a script's
+ * would be, and exported as the default.
+ *
  * The returned StringInfo's data is palloc'd; the caller frees it.
+ *
+ * @returns @c bool - whether the source is a module
  */
-static void pljs_build_function_source(StringInfoData *src,
+static bool pljs_build_function_source(StringInfoData *src,
                                        pljs_context *context, bool is_trigger) {
   int i;
+  StringInfoData imports, body;
+  bool is_module;
+  char *proname = pljs_server_to_utf8(context->function->proname,
+                                      strlen(context->function->proname));
+
+  initStringInfo(&imports);
+  initStringInfo(&body);
+  is_module = pljs_extract_static_imports(context->function->prosrc, &imports,
+                                          &body);
 
   initStringInfo(src);
 
+  // the imports of a module come first
+  appendStringInfoString(src, imports.data);
+
   // generate the function as javascript with all of its arguments
-  appendStringInfo(src, "function %s (", context->function->proname);
+  appendStringInfo(src, "function %s (", proname);
 
   int inarg = 0;
   for (i = 0; i < context->function->nargs; i++) {
@@ -1629,10 +2406,23 @@ static void pljs_build_function_source(StringInfoData *src,
                           "TG_RELID, TG_TABLE_NAME, TG_TABLE_SCHEMA, TG_ARGV");
   }
 
-  appendStringInfo(src, ") {\n%s\n}\n %s;\n", context->function->prosrc,
-                   context->function->proname);
+  appendStringInfo(src, ") {\n%s\n}\n", body.data);
 
-  pljs_source_to_utf8(src);
+  if (is_module) {
+    appendStringInfo(src, "globalThis.%s = %s;\nexport default %s;\n",
+                     proname, proname, proname);
+  } else {
+    appendStringInfo(src, " %s;\n", proname);
+  }
+
+  pfree(imports.data);
+  pfree(body.data);
+
+  if (proname != context->function->proname) {
+    pfree(proname);
+  }
+
+  return is_module;
 }
 
 /**
@@ -1654,6 +2444,7 @@ static void pljs_build_function_source(StringInfoData *src,
 typedef struct pljs_compile_run {
   pljs_context *context;
   StringInfoData src;
+  bool is_module;
   JSValue val;
 } pljs_compile_run;
 
@@ -1666,8 +2457,28 @@ typedef struct pljs_compile_run {
 static void compile_run(void *arg) {
   pljs_compile_run *run = (pljs_compile_run *)arg;
   JSContext *ctx = run->context->ctx;
-  JSValue val =
-      JS_Eval(ctx, run->src.data, strlen(run->src.data), "<function>", 0);
+  JSValue val;
+
+  if (run->is_module) {
+    /*
+     * The modules it imports are bound now, so note which generation of them
+     * these are before loading any; see pljs_modules_generation().
+     */
+    run->context->function->module_generation = pljs_modules_generation();
+
+    JSValue ns = pljs_module_eval_source(ctx, run->src.data,
+                                         strlen(run->src.data), "<function>",
+                                         false);
+
+    if (JS_IsException(ns)) {
+      val = ns;
+    } else {
+      val = JS_GetPropertyStr(ctx, ns, "default");
+      JS_FreeValue(ctx, ns);
+    }
+  } else {
+    val = JS_Eval(ctx, run->src.data, strlen(run->src.data), "<function>", 0);
+  }
 
   pfree(run->src.data);
 
@@ -1694,8 +2505,13 @@ static void compile_run(void *arg) {
 JSValue pljs_compile_function(pljs_context *context, bool is_trigger) {
   pljs_compile_run run = {.context = context, .val = JS_UNDEFINED};
 
-  pljs_build_function_source(&run.src, context, is_trigger);
-  pljs_run_with_storage(NULL, NULL, true, compile_run, &run);
+  if (!pljs_transpile_if_needed(context, InvalidOid)) {
+    elog(ERROR, "failed to transpile function source code");
+  }
+
+  context->function->module_generation = 0;
+  run.is_module = pljs_build_function_source(&run.src, context, is_trigger);
+  pljs_run_with_storage(context->ctx, NULL, NULL, true, compile_run, &run);
 
   return run.val;
 }
@@ -1710,13 +2526,22 @@ JSValue pljs_compile_function(pljs_context *context, bool is_trigger) {
  * @param ctx #JSContext - the Javascript context to compile and execute in
  */
 static void call_anonymous_function(const char *source, JSContext *ctx) {
-  StringInfoData src;
+  StringInfoData src, imports, body;
 
   initStringInfo(&src);
+  initStringInfo(&imports);
+  initStringInfo(&body);
+
+  /*
+   * A block that starts with `import` statements is run as a module, with the
+   * imports first.
+   */
+  bool is_module = pljs_extract_static_imports(source, &imports, &body);
 
   // generate the function as javascript with all of its arguments
-  appendStringInfo(&src, "(function () {%s})();", source);
-  pljs_source_to_utf8(&src);
+  appendStringInfo(&src, "%s(function () {%s})();", imports.data, body.data);
+  pfree(imports.data);
+  pfree(body.data);
 
   /*
    * Re-anchor QuickJS's stack measurement here, at the C-stack depth this call
@@ -1729,9 +2554,17 @@ static void call_anonymous_function(const char *source, JSContext *ctx) {
    */
   JS_UpdateStackTop(JS_GetRuntime(ctx));
 
-  JSValue val = JS_Eval(ctx, src.data, strlen(src.data), "<function>", 0);
+  JSValue val;
+
+  if (is_module) {
+    val = pljs_module_eval_source(ctx, src.data, strlen(src.data), "<function>",
+                                  false);
+  } else {
+    val = JS_Eval(ctx, src.data, strlen(src.data), "<function>", 0);
+  }
 
   if (!JS_IsException(val)) {
+    JS_FreeValue(ctx, val);
     pfree(src.data);
   } else {
     /*
@@ -1917,8 +2750,16 @@ static Datum call_trigger(FunctionCallInfo fcinfo, pljs_context *context) {
    */
   JS_UpdateStackTop(JS_GetRuntime(context->ctx));
 
-  JSValue ret =
-      JS_Call(context->ctx, context->js_function, JS_UNDEFINED, 10, argv);
+  /*
+   * Hold a reference of our own for the call.  The cache owns the function and
+   * drops it when it goes stale -- a module it imports changed, say, seen by a
+   * nested call of the same function -- and a function that is running must
+   * not be freed under itself.
+   */
+  JSValue running = JS_DupValue(context->ctx, context->js_function);
+  JSValue ret = JS_Call(context->ctx, running, JS_UNDEFINED, 10, argv);
+
+  JS_FreeValue(context->ctx, running);
 
   /* JS_Call() took references of its own; see dispatch_call(). */
   for (int i = 0; i < 10; i++) {
@@ -2041,8 +2882,12 @@ static Datum call_function(FunctionCallInfo fcinfo, pljs_context *context,
    */
   JS_UpdateStackTop(JS_GetRuntime(context->ctx));
 
-  JSValue ret = JS_Call(context->ctx, context->js_function, JS_UNDEFINED,
+  // Held for the call; see call_trigger().
+  JSValue running = JS_DupValue(context->ctx, context->js_function);
+  JSValue ret = JS_Call(context->ctx, running, JS_UNDEFINED,
                         context->function->inargs, argv);
+
+  JS_FreeValue(context->ctx, running);
 
   if (JS_IsException(ret)) {
     char *message = NULL, *pg_detail = NULL, *sqlstate = NULL;
@@ -2420,8 +3265,12 @@ static Datum call_srf_function(FunctionCallInfo fcinfo, pljs_context *context,
    */
   JS_UpdateStackTop(JS_GetRuntime(context->ctx));
 
-  JSValue ret = JS_Call(context->ctx, context->js_function, JS_UNDEFINED,
+  // Held for the call; see call_trigger().
+  JSValue running = JS_DupValue(context->ctx, context->js_function);
+  JSValue ret = JS_Call(context->ctx, running, JS_UNDEFINED,
                         context->function->inargs, argv);
+
+  JS_FreeValue(context->ctx, running);
 
   if (JS_IsException(ret)) {
     char *message = NULL, *pg_detail = NULL, *sqlstate = NULL;
@@ -2794,9 +3643,11 @@ static JSValue pljs_compile_found_function(pljs_context *context) {
  * of `JS_UNDEFINED` if it does not
  */
 JSValue pljs_find_js_function(Oid fn_oid, JSContext *ctx) {
+  check_stack_depth();
+  CHECK_FOR_INTERRUPTS();
+
   Form_pg_proc proc;
   Oid prolang;
-  NameData langname = {.data = "pljs"};
   JSValue func = JS_UNDEFINED;
 
   HeapTuple functuple =
@@ -2807,6 +3658,7 @@ JSValue pljs_find_js_function(Oid fn_oid, JSContext *ctx) {
 
   proc = (Form_pg_proc)GETSTRUCT(functuple);
   prolang = proc->prolang;
+  Oid owner_id = proc->proowner;
 
   /* Should not happen? */
   if (!OidIsValid(prolang)) { // NOLINT
@@ -2814,32 +3666,12 @@ JSValue pljs_find_js_function(Oid fn_oid, JSContext *ctx) {
     return func;
   }
 
-  /* See if the function language is a compatible one */
-  HeapTuple langtuple =
-      SearchSysCache(LANGNAME, NameGetDatum(&langname), 0, 0, 0);
-  if (HeapTupleIsValid(langtuple)) {
-    /*
-     * This is a pg_language tuple, so it must be read through
-     * Form_pg_language.  It was previously cast to Form_pg_database, which
-     * happened to yield the right answer only because both catalogs begin with
-     * an `Oid oid` at the same offset -- any future field access, or a change
-     * to either catalog's layout, would have read the wrong bytes.
-     */
-    Form_pg_language langForm = (Form_pg_language)GETSTRUCT(langtuple);
-    Oid langtupoid = langForm->oid;
-
-    ReleaseSysCache(langtuple);
-
-    if (langtupoid != prolang) {
-      ReleaseSysCache(functuple);
-      return func;
-    }
-  }
-
   pljs_context context = {0};
 
   pljs_function_cache_value *function_entry =
-      pljs_cache_function_find(GetUserId(), fn_oid, functuple);
+      ctx != NULL
+          ? pljs_cache_function_find_by_ctx(ctx, fn_oid, functuple)
+          : pljs_cache_function_find(GetUserId(), owner_id, fn_oid, functuple);
 
   if (function_entry != NULL) {
     pljs_function_cache_to_context(&context, function_entry);
@@ -2866,25 +3698,31 @@ JSValue pljs_find_js_function(Oid fn_oid, JSContext *ctx) {
      */
     ReleaseSysCache(functuple);
   } else {
-    pljs_context_cache_value *context_entry =
-        pljs_cache_context_find(GetUserId());
+    setup_function(NULL, functuple, &context);
+    ReleaseSysCache(functuple);
+
+    if (!pljs_is_js_language(prolang, NULL)) {
+      return JS_UNDEFINED;
+    }
 
     if (ctx == NULL) {
-      context.ctx = context_entry->ctx;
+      context.ctx = pljs_get_context(GetUserId(), owner_id);
     } else {
       context.ctx = ctx;
     }
 
-    setup_function(NULL, functuple, &context);
-
-    /*
-     * Released before compiling, which runs any code at the top level of the
-     * source and can raise: pljs.find_function() catches that, and the pin
-     * was left, which COMMIT warned of.
-     */
-    ReleaseSysCache(functuple);
-
     func = pljs_compile_found_function(&context);
+    if (!JS_IsFunction(context.ctx, func)) {
+      JS_FreeValue(context.ctx, func);
+      return JS_UNDEFINED;
+    }
+
+    context.js_function = func;
+    pljs_context_cache_value *ce = pljs_cache_context_find_by_ctx(context.ctx);
+    if (ce != NULL && ce->ctx == context.ctx) {
+      pljs_cache_function_add(&context);
+      func = JS_DupValue(context.ctx, func);
+    }
   }
 
   // What is not a function is not found; see dispatch_call().

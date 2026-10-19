@@ -6,6 +6,7 @@
 #include "access/htup.h"
 #include "access/tupconvert.h"
 #include "access/tupdesc.h"
+#include "executor/executor.h"
 #include "executor/spi.h"
 #include "fmgr.h"
 #include "funcapi.h"
@@ -28,16 +29,87 @@
 #define pg_noreturn pg_attribute_noreturn()
 #endif
 
+#if PG_VERSION_NUM < 130000
+#undef PG_TRY
+#undef PG_CATCH
+#undef PG_END_TRY
+#define PG_TRY()                                                               \
+  do {                                                                         \
+    sigjmp_buf *_save_exception_stack = PG_exception_stack;                    \
+    ErrorContextCallback *_save_context_stack = error_context_stack;           \
+    sigjmp_buf _local_sigjmp_buf;                                              \
+    bool _do_rethrow = false;                                                  \
+    if (sigsetjmp(_local_sigjmp_buf, 0) == 0) {                                \
+      PG_exception_stack = &_local_sigjmp_buf
+
+#define PG_CATCH()                                                             \
+    } else {                                                                   \
+      PG_exception_stack = _save_exception_stack;                              \
+      error_context_stack = _save_context_stack
+
+#define PG_FINALLY()                                                           \
+    } else                                                                     \
+      _do_rethrow = true;                                                      \
+    {                                                                          \
+      PG_exception_stack = _save_exception_stack;                              \
+      error_context_stack = _save_context_stack
+
+#define PG_END_TRY()                                                           \
+    }                                                                          \
+    if (_do_rethrow)                                                           \
+      PG_RE_THROW();                                                           \
+    PG_exception_stack = _save_exception_stack;                                \
+    error_context_stack = _save_context_stack;                                 \
+  } while (0)
+
+#ifndef TYPALIGN_INT
+#define TYPALIGN_INT 'i'
+#endif
+#endif
+
+#if PG_VERSION_NUM < 140000
+#define message_level_is_interesting(elevel) (true)
+#endif
+
 #define STORAGE_HASH_LEN 32
+#define PLJS_MAX_LANG_HANDLER_DEPTH 32
 #ifndef PLJS_VERSION
 #define PLJS_VERSION "unknown"
 #endif
+
+// Snapshot of a language handler in a function's transpilation chain,
+// used to invalidate downstream cached functions when any handler changes.
+typedef struct pljs_handler_dep {
+  Oid fn_oid;
+  TransactionId fn_xmin;
+  ItemPointerData fn_tid;
+} pljs_handler_dep;
 
 // pljs current runtime configuration.
 typedef struct pljs_configuration {
   size_t memory_limit;
   char *start_proc;
   int execution_timeout;
+  bool hooks_enabled;
+  int hooks_max_depth;
+  int max_module_depth;
+  int max_cached_contexts;
+
+  // Hook function name GUCs.
+  char *hook_executor_start;
+  char *hook_executor_run;
+  char *hook_executor_end;
+  char *hook_planner;
+  char *hook_create_upper_paths;
+  char *hook_set_rel_pathlist;
+  char *hook_set_join_pathlist;
+  char *hook_join_search;
+  char *hook_get_relation_info;
+  char *hook_needs_fmgr;
+  char *hook_fmgr;
+  char *hook_object_access;
+  char *hook_object_access_str;
+  char *hook_emit_log;
 } pljs_configuration;
 
 // Global #pljs_configuration configuration.
@@ -46,12 +118,19 @@ extern pljs_configuration configuration;
 // quickjs runtime.
 extern JSRuntime *rt;
 
-// Cpntext cache value definition.
-typedef struct pljs_context_cache_value {
+// Composite key for JSContext cache: effective executing user + function owner.
+typedef struct pljs_context_key {
   Oid user_id;
+  Oid owner_id;
+} pljs_context_key;
+
+// Context cache value definition.
+typedef struct pljs_context_cache_value {
+  pljs_context_key key;
   JSContext *ctx;
   MemoryContext function_memory_context;
   HTAB *function_hash_table;
+  uint64 lru_tick;
 } pljs_context_cache_value;
 
 // Function cache value defition.
@@ -61,6 +140,7 @@ typedef struct pljs_function_cache_value {
   JSContext *ctx;
   bool trigger;
   Oid user_id;
+  Oid owner_id;
   int nargs;
   bool is_srf;
   char proname[NAMEDATALEN];
@@ -75,6 +155,20 @@ typedef struct pljs_function_cache_value {
    */
   TransactionId fn_xmin;
   ItemPointerData fn_tid;
+
+  /*
+   * The module generation it was compiled against, if it imports modules, or
+   * 0.  Its imports are bound when it is compiled, so it is stale once the
+   * modules have changed.
+   */
+  uint64 module_generation;
+
+  /*
+   * Chain of custom language handler functions (from immediate handler up to
+   * the base pljs handler) used when transpiling this function.
+   */
+  int nhandlers;
+  pljs_handler_dep handlers[PLJS_MAX_LANG_HANDLER_DEPTH];
 } pljs_function_cache_value;
 
 typedef struct pljs_param_state {
@@ -136,7 +230,15 @@ typedef struct pljs_func {
 
   TransactionId fn_xmin;
   ItemPointerData fn_tid;
-  Oid user_id; // the user id
+  Oid user_id;  // the effective executing user id
+  Oid owner_id; // the function owner id (proowner)
+
+  // The module generation it was compiled against, if it imports modules, or
+  // 0; see pljs_modules_generation().
+  uint64 module_generation;
+
+  int nhandlers;
+  pljs_handler_dep handlers[PLJS_MAX_LANG_HANDLER_DEPTH];
 
   bool trigger;
   bool is_srf;                  // are we a set returning function?
@@ -164,6 +266,8 @@ typedef struct pljs_storage {
   WindowObject window_object;
   MemoryContext execution_memory_context;
   ErrorData *fatal_error; // ends the call; see pljs_throw_fatal_error()
+  JSContext *ctx;
+  struct pljs_storage *previous;
 } pljs_storage;
 
 typedef struct pljs_window_storage {
@@ -188,7 +292,8 @@ Datum pljs_inline_handler(PG_FUNCTION_ARGS);
 void _PG_init(void);
 void pljs_guc_init(void);
 void pljs_cache_init(void);
-void pljs_setup_namespace(JSContext *ctx);
+void pljs_runtime_init(void);
+extern PGDLLEXPORT void pljs_setup_namespace(JSContext *ctx);
 // Registers runtime JS classes (e.g. the prepared-statement handle whose GC
 // finalizer reclaims the SPI plan).  Must run once, after the runtime exists
 // and before any JSContext is created.
@@ -238,6 +343,7 @@ void pljs_put_domain_row(pljs_return_state *state, JSValueConst row,
                          JSContext *ctx, const char *caller);
 bool pljs_has_permission_to_execute(const char *signature);
 pljs_storage *pljs_current_storage(void);
+bool pljs_context_is_active(JSContext *ctx);
 
 // Whether a function's result is being converted, anywhere up the stack
 extern bool pljs_converting_result;
@@ -245,13 +351,20 @@ extern bool pljs_converting_result;
 // cache.c
 
 // Contexts
-void pljs_cache_context_add(Oid, JSContext *);
-void pljs_cache_context_remove(Oid);
-pljs_context_cache_value *pljs_cache_context_find(Oid user_id);
+void pljs_cache_context_add(Oid user_id, Oid owner_id, JSContext *ctx);
+void pljs_cache_context_remove(Oid user_id, Oid owner_id);
+pljs_context_cache_value *pljs_cache_context_find(Oid user_id, Oid owner_id);
+pljs_context_cache_value *pljs_cache_context_find_by_ctx(JSContext *ctx);
+void pljs_cache_evict_excess(int max_contexts);
+long pljs_cache_context_count(void);
 
 // Functions
-pljs_function_cache_value *pljs_cache_function_find(Oid user_id, Oid fn_oid,
+pljs_function_cache_value *pljs_cache_function_find(Oid user_id, Oid owner_id,
+                                                    Oid fn_oid,
                                                     HeapTuple proctuple);
+pljs_function_cache_value *pljs_cache_function_find_by_ctx(JSContext *ctx,
+                                                           Oid fn_oid,
+                                                           HeapTuple proctuple);
 void pljs_cache_function_add(pljs_context *context);
 void pljs_cache_function_remove(Oid fn_oid);
 
@@ -262,12 +375,15 @@ void pljs_context_to_function_cache(pljs_function_cache_value *function_entry,
                                     pljs_context *context);
 // Utility
 void pljs_cache_reset(void);
+void pljs_cache_free_all(void);
 
 // type.c
 
 // To Javascript
-JSValue pljs_datum_to_jsvalue(Oid argtype, Datum arg, bool is_null,
-                              bool expand_composite, JSContext *ctx);
+extern PGDLLEXPORT JSValue pljs_datum_to_jsvalue(Oid argtype, Datum arg,
+                                                 bool is_null,
+                                                 bool expand_composite,
+                                                 JSContext *ctx);
 JSValue pljs_datum_to_array(pljs_type *type, Datum arg, JSContext *ctx);
 JSValue pljs_datum_to_object(pljs_type *type, Datum arg, JSContext *ctx);
 JSValue pljs_tuple_to_jsvalue(TupleDesc, HeapTuple, JSContext *ctx);
@@ -283,12 +399,12 @@ Datum pljs_jsvalue_to_datum_typmod_free(Oid typid, int32 typmod, JSValue val,
                                         bool *is_null, JSContext *ctx);
 Datum pljs_jsvalue_to_record(pljs_type *type, JSValue val, bool *is_null,
                              TupleDesc tupdesc, JSContext *ctx);
-Datum *pljs_jsvalue_to_datums(pljs_type *type, JSValue val, bool **is_null,
-                              TupleDesc tupdesc, JSContext *ctx,
-                              const char *caller);
+extern PGDLLEXPORT Datum *
+pljs_jsvalue_to_datums(pljs_type *type, JSValue val, bool **is_null,
+                       TupleDesc tupdesc, JSContext *ctx, const char *caller);
 
 // Utility
-int32_t pljs_js_array_length(JSValue, JSContext *);
+extern PGDLLEXPORT int32_t pljs_js_array_length(JSValue, JSContext *);
 void pljs_type_fill(pljs_type *, Oid);
 Oid pljs_type_base(Oid);
 bool pljs_type_may_check_domain(Oid);
@@ -331,3 +447,43 @@ JSValue pljs_values_to_array(JSValue *, int, int, JSContext *);
 void pljs_variable_param_setup(ParseState *, void *);
 ParamListInfo pljs_setup_variable_paramlist(pljs_param_state *, Datum *,
                                             char *);
+
+// modules.c
+void pljs_modules_init(void);
+uint64 pljs_modules_generation(void);
+bool pljs_extract_static_imports(const char *source, StringInfo imports,
+                                 StringInfo body);
+JSValue pljs_module_eval_source(JSContext *ctx, const char *source, size_t len,
+                                const char *name, bool check_only);
+char *pljs_module_normalize(JSContext *ctx, const char *base_name,
+                            const char *name, void *opaque);
+JSModuleDef *pljs_module_loader(JSContext *ctx, const char *name, void *opaque);
+JSValue pljs_module_import(JSContext *ctx, const char *module_name);
+extern PGDLLEXPORT JSValue pljs_module_require(JSContext *ctx,
+                                               const char *module_name);
+JSValue pljs_compile_bytecode_js(JSContext *ctx, JSValueConst this_val,
+                                 int argc, JSValueConst *argv);
+
+// hooks.c
+extern JSClassID js_querydesc_id;
+extern JSClassID js_list_id;
+
+void pljs_hooks_init(JSRuntime *runtime);
+void pljs_hooks_install(void);
+JSValue pljs_querydesc_start_to_jsvalue(JSContext *ctx, QueryDesc *queryDesc,
+                                        int eflags);
+#if PG_VERSION_NUM >= 180000
+JSValue pljs_querydesc_run_to_jsvalue(JSContext *ctx, QueryDesc *queryDesc,
+                                      ScanDirection direction, uint64 count);
+#else
+JSValue pljs_querydesc_run_to_jsvalue(JSContext *ctx, QueryDesc *queryDesc,
+                                      ScanDirection direction, uint64 count,
+                                      bool execute_once);
+#endif
+JSValue pljs_querydesc_to_jsvalue(JSContext *ctx, QueryDesc *queryDesc);
+// Shared utilities (pljs.c)
+extern PGDLLEXPORT char *pljs_dump_error(JSContext *ctx);
+JSContext *pljs_create_context(Oid user_id, Oid owner_id);
+bool pljs_hook_call(JSContext *ctx, JSValueConst func, int argc,
+                    JSValueConst *argv, bool own_spi, JSValue *result,
+                    char **error);

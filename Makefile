@@ -1,6 +1,6 @@
 .PHONY: lintcheck format cleansql docs clean test all
 
-PLJS_VERSION = 1.0.5
+PLJS_VERSION = 1.1.0-dev
 
 PG_CONFIG ?= pg_config
 PGXS := $(shell $(PG_CONFIG) --pgxs)
@@ -9,11 +9,18 @@ INCLUDEDIR_SERVER := ${shell $(PG_CONFIG) --includedir-server}
 
 
 CP = cp
-SRCS = src/pljs.c src/cache.c src/functions.c src/types.c src/params.c
-OBJS = src/pljs.o src/cache.o src/functions.o src/types.o src/params.o
+SRCS = src/pljs.c src/cache.c src/functions.c src/types.c src/params.c src/modules.c src/hooks.c src/semver.c
+OBJS = src/pljs.o src/cache.o src/functions.o src/types.o src/params.o src/modules.o src/hooks.o src/semver.o
 MODULE_big = pljs
 EXTENSION = pljs
-DATA = pljs.control pljs--$(PLJS_VERSION).sql
+
+# The releases that can be upgraded from.  Every 1.0.x release has the same SQL
+# objects, so one script (upgrade/from-1.0.x.sql) serves all of them.  The 1.0.5
+# install script is kept so that an upgrade can be tested from a real 1.0.5.
+UPGRADE_FROM = 1.0.0 1.0.1 1.0.3 1.0.4 1.0.5
+UPGRADE_SQL = $(foreach v,$(UPGRADE_FROM),pljs--$(v)--$(PLJS_VERSION).sql)
+EXTENSION_SQL = pljs--$(PLJS_VERSION).sql $(UPGRADE_SQL) pljs--1.0.5.sql
+DATA = pljs.control $(EXTENSION_SQL)
 PG_CFLAGS += -fPIC -Wall -Wextra -Wno-unused-parameter -Wno-declaration-after-statement \
     -Wno-cast-function-type -std=c11 -DPLJS_VERSION=\"$(PLJS_VERSION)\" -DEXPOSE_GC
 SHLIB_LINK = -Ldeps/quickjs -lquickjs
@@ -38,7 +45,7 @@ endif
 
 REGRESS = init-extension function json jsonb json_conv types bytea context \
 	cursor array_spread plv8_regressions memory_limits inline composites \
-	trigger procedure find_function start_proc window regressions \
+	trigger procedure find_function start_proc window modules packages static_import regressions \
 	pg_spi_freetuptable \
 	pg_prepared_plan_lifetime \
 	currentresource \
@@ -118,9 +125,16 @@ REGRESS = init-extension function json jsonb json_conv types bytea context \
 	pg_argument_positions \
 	pg_encoding_text \
 	pg_resource_cleanup \
-	pg_parallel_mode
+	pg_parallel_mode \
+	hooks \
+	privileges \
+	dump_restore \
+	upgrade \
+	language_handler \
+	language_handler_limits \
+	tle_modules
 
-all: deps/quickjs/quickjs.h deps/quickjs/libquickjs.a pljs--$(PLJS_VERSION).sql
+all: deps/quickjs/quickjs.h deps/quickjs/libquickjs.a $(EXTENSION_SQL)
 
 include $(PGXS)
 
@@ -136,20 +150,26 @@ deps/quickjs/libquickjs.a: deps/quickjs/quickjs.h
 	cd deps/quickjs && make
 
 format:
-	clang-format -i $(SRCS) src/pljs.h
+	clang-format -i $(SRCS) src/pljs.h src/semver.h
 
 pljs--$(PLJS_VERSION).sql: pljs.sql
 	$(CP) pljs.sql pljs--$(PLJS_VERSION).sql
 
+$(UPGRADE_SQL): upgrade/from-1.0.x.sql
+	$(CP) upgrade/from-1.0.x.sql $@
+
+pljs--1.0.5.sql: upgrade/pljs-1.0.5.sql
+	$(CP) upgrade/pljs-1.0.5.sql $@
+
 lintcheck:
 	clang-tidy $(SRCS) -- $(LINTFLAGS) -I$(INCLUDEDIR) -I$(INCLUDEDIR_SERVER) -I$(PWD) --std=c11
 
-all: deps/quickjs/quickjs.h deps/quickjs/libquickjs.a pljs--$(PLJS_VERSION).sql
+all: deps/quickjs/quickjs.h deps/quickjs/libquickjs.a $(EXTENSION_SQL)
 
 clean: cleansql
 
 cleansql:
-	$(RM) -f pljs--$(PLJS_VERSION).sql
+	$(RM) -f $(EXTENSION_SQL)
 
 docs:
 	doxygen src/Doxyfile

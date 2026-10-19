@@ -1,1 +1,20 @@
 CREATE EXTENSION pljs;
+-- pljs_version() and pljs_info()
+SELECT length(pljs_version()) > 0 AS has_version;
+ has_version 
+-------------
+ t
+(1 row)
+
+SELECT pljs_info() IS NOT NULL AS has_info;
+ has_info 
+----------
+ t
+(1 row)
+
+-- pljs.toString()
+DO $$
+  var s = pljs.toString();
+  pljs.elog(NOTICE, 'pljs.toString() = ' + s);
+$$ LANGUAGE pljs;
+NOTICE:  pljs.toString() = [object pljs]

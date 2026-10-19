@@ -61,6 +61,40 @@ var json_result = pljs.execute('SELECT * FROM tbl');
 var num_affected = pljs.execute('DELETE FROM tbl WHERE price > $1', [ 1000 ]);
 ```
 
+#### Transaction behavior
+
+Each `pljs.execute()` call wraps its statement in an internal subtransaction:
+
+- On success, the subtransaction is released and its effects are merged into
+  the outer (calling) transaction. The changes are visible to subsequent
+  statements in the same outer transaction even though the outer transaction
+  has not committed. Whether those changes *persist* depends on whether the
+  outer transaction eventually commits or rolls back.
+- On error, the subtransaction is rolled back and the error is converted
+  into a JavaScript exception that can be caught with `try/catch`. The
+  outer transaction is not affected and remains active.
+
+This means `pljs.execute()` is not an "all-or-nothing" unit across multiple
+calls — partial work from earlier successful `pljs.execute()` calls remains
+committed to the outer transaction even if a later call throws. To group
+multiple statements atomically, wrap them in `pljs.subtransaction()` (see
+below).
+
+### `pljs.commit` / `pljs.rollback`
+
+`pljs.commit()` and `pljs.rollback()` commit or roll back the **outer**
+transaction, then start a new one. These are only valid in contexts that
+allow transaction control — specifically, `CALL`ed procedures where the
+call site is not in an atomic context. They cannot be used inside a
+function called from a SQL statement, or inside a `pljs.subtransaction()`
+block.
+
+Because `pljs.execute()` runs in its own subtransaction, any successful
+`pljs.execute()` calls made before `pljs.commit()` are included in the
+commit. Conversely, `pljs.rollback()` discards all work done since the last
+commit, including every successful `pljs.execute()` in that span. Plan your
+commit boundaries accordingly.
+
 ### `pljs.return_next`
 
 `pljs.return_next(arg)`
@@ -225,17 +259,26 @@ PLJS provides a small number of stored procedures.
 
 `SELECT pljs_info();`
 
-Provides a view of memory usage and stack usage inside the JavaScript runtime. This is returned as a `JSON` object:
+Returns a `JSON` object describing the PLJS build and current configuration:
 
 ```json
 {
-  "malloc_count": 228,
-  "malloc_size": 14192,
-  "malloc_limit": 268435456,
-  "stack_size": 1048576,
-  "stack_limit": 6120837488
+  "version": "1.1.0-dev",
+  "memory_limit_mb": 512,
+  "hooks_enabled": false,
+  "hooks_max_depth": 5
 }
 ```
+
+Only superusers can call it, unless it has been granted to a role: `GRANT EXECUTE ON FUNCTION pljs_info() TO monitoring;`.
+
+### `pljs_reset`
+
+`SELECT pljs_reset();`
+
+Discards the JavaScript contexts cached in the session, for every user, along with the modules loaded in them, so that the next call starts afresh. Global state that functions have set is lost. It raises an error if it is called from inside PL/JS code -- a function, a trigger or a `DO` block, even through another language -- since that code is running in the contexts it would discard. Call it from a top-level SQL statement.
+
+Only superusers can call it, unless it has been granted to a role: `GRANT EXECUTE ON FUNCTION pljs_reset() TO maintenance;`.
 
 ### `pljs_version`
 

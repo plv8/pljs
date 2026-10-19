@@ -1,0 +1,197 @@
+-- Resource limits on custom language handlers: a runaway or memory-hungry
+-- transpiler must be stopped without damaging the backend, and a chain of
+-- handlers is bounded by PLJS_MAX_LANG_HANDLER_DEPTH (32).
+CREATE EXTENSION IF NOT EXISTS pljs;
+NOTICE:  extension "pljs" already exists, skipping
+CREATE FUNCTION ok_fn() RETURNS int AS $$ return 7; $$ LANGUAGE pljs;
+-- 1. A handler that never returns is cancelled by statement_timeout.
+CREATE FUNCTION loop_handler() RETURNS language_handler AS $$
+  while (true) {}
+$$ LANGUAGE pljs;
+CREATE TRUSTED LANGUAGE looplang
+  HANDLER loop_handler
+  INLINE pljs_inline_handler
+  VALIDATOR pljs_call_validator;
+-- During a call (the validator is skipped so the function can be created).
+SET check_function_bodies = off;
+CREATE FUNCTION loop_fn() RETURNS int AS $$ return 1; $$ LANGUAGE looplang;
+RESET check_function_bodies;
+SET statement_timeout = '500ms';
+SELECT loop_fn();
+ERROR:  canceling statement due to statement timeout
+-- The failed compilation is not cached; it is cancelled again.
+SELECT loop_fn();
+ERROR:  canceling statement due to statement timeout
+-- During CREATE FUNCTION validation.
+CREATE FUNCTION loop_fn2() RETURNS int AS $$ return 1; $$ LANGUAGE looplang;
+ERROR:  canceling statement due to statement timeout
+-- During an inline block.
+DO $$ return 1; $$ LANGUAGE looplang;
+ERROR:  canceling statement due to statement timeout
+RESET statement_timeout;
+-- The backend is still usable, and nothing was left behind.
+SELECT ok_fn();
+ ok_fn 
+-------
+     7
+(1 row)
+
+SELECT count(*) AS loop_fn2_exists FROM pg_proc WHERE proname = 'loop_fn2';
+ loop_fn2_exists 
+-----------------
+               0
+(1 row)
+
+-- 2. A handler that exhausts pljs.memory_limit is aborted.
+CREATE FUNCTION mem_handler() RETURNS language_handler AS $$
+  const s = [];
+  while (true) {
+    s.push(new ArrayBuffer(63));
+  }
+$$ LANGUAGE pljs;
+CREATE TRUSTED LANGUAGE memlang
+  HANDLER mem_handler
+  INLINE pljs_inline_handler
+  VALIDATOR pljs_call_validator;
+SET pljs.memory_limit = 64;
+SET check_function_bodies = off;
+CREATE FUNCTION mem_fn() RETURNS int AS $$ return 1; $$ LANGUAGE memlang;
+RESET check_function_bodies;
+SELECT mem_fn();
+ERROR:  out of memory
+DETAIL:  out of memory
+CREATE FUNCTION mem_fn2() RETURNS int AS $$ return 1; $$ LANGUAGE memlang;
+ERROR:  out of memory
+DETAIL:  out of memory
+RESET pljs.memory_limit;
+SELECT ok_fn();
+ ok_fn 
+-------
+     7
+(1 row)
+
+-- 3. Handler chains are bounded.  Handler k0 is written in pljs; handler kN is
+-- written in the language handled by k(N-1).
+SELECT format('CREATE FUNCTION k%s() RETURNS language_handler AS $q$ return arguments[0]; $q$ LANGUAGE %s',
+              i, CASE WHEN i = 0 THEN 'pljs' ELSE 'chain' || (i - 1) END),
+       format('CREATE TRUSTED LANGUAGE chain%s HANDLER k%s INLINE pljs_inline_handler VALIDATOR pljs_call_validator',
+              i, i)
+FROM generate_series(0, 32) AS i
+\gexec
+CREATE FUNCTION k0() RETURNS language_handler AS $q$ return arguments[0]; $q$ LANGUAGE pljs
+CREATE TRUSTED LANGUAGE chain0 HANDLER k0 INLINE pljs_inline_handler VALIDATOR pljs_call_validator
+CREATE FUNCTION k1() RETURNS language_handler AS $q$ return arguments[0]; $q$ LANGUAGE chain0
+CREATE TRUSTED LANGUAGE chain1 HANDLER k1 INLINE pljs_inline_handler VALIDATOR pljs_call_validator
+CREATE FUNCTION k2() RETURNS language_handler AS $q$ return arguments[0]; $q$ LANGUAGE chain1
+CREATE TRUSTED LANGUAGE chain2 HANDLER k2 INLINE pljs_inline_handler VALIDATOR pljs_call_validator
+CREATE FUNCTION k3() RETURNS language_handler AS $q$ return arguments[0]; $q$ LANGUAGE chain2
+CREATE TRUSTED LANGUAGE chain3 HANDLER k3 INLINE pljs_inline_handler VALIDATOR pljs_call_validator
+CREATE FUNCTION k4() RETURNS language_handler AS $q$ return arguments[0]; $q$ LANGUAGE chain3
+CREATE TRUSTED LANGUAGE chain4 HANDLER k4 INLINE pljs_inline_handler VALIDATOR pljs_call_validator
+CREATE FUNCTION k5() RETURNS language_handler AS $q$ return arguments[0]; $q$ LANGUAGE chain4
+CREATE TRUSTED LANGUAGE chain5 HANDLER k5 INLINE pljs_inline_handler VALIDATOR pljs_call_validator
+CREATE FUNCTION k6() RETURNS language_handler AS $q$ return arguments[0]; $q$ LANGUAGE chain5
+CREATE TRUSTED LANGUAGE chain6 HANDLER k6 INLINE pljs_inline_handler VALIDATOR pljs_call_validator
+CREATE FUNCTION k7() RETURNS language_handler AS $q$ return arguments[0]; $q$ LANGUAGE chain6
+CREATE TRUSTED LANGUAGE chain7 HANDLER k7 INLINE pljs_inline_handler VALIDATOR pljs_call_validator
+CREATE FUNCTION k8() RETURNS language_handler AS $q$ return arguments[0]; $q$ LANGUAGE chain7
+CREATE TRUSTED LANGUAGE chain8 HANDLER k8 INLINE pljs_inline_handler VALIDATOR pljs_call_validator
+CREATE FUNCTION k9() RETURNS language_handler AS $q$ return arguments[0]; $q$ LANGUAGE chain8
+CREATE TRUSTED LANGUAGE chain9 HANDLER k9 INLINE pljs_inline_handler VALIDATOR pljs_call_validator
+CREATE FUNCTION k10() RETURNS language_handler AS $q$ return arguments[0]; $q$ LANGUAGE chain9
+CREATE TRUSTED LANGUAGE chain10 HANDLER k10 INLINE pljs_inline_handler VALIDATOR pljs_call_validator
+CREATE FUNCTION k11() RETURNS language_handler AS $q$ return arguments[0]; $q$ LANGUAGE chain10
+CREATE TRUSTED LANGUAGE chain11 HANDLER k11 INLINE pljs_inline_handler VALIDATOR pljs_call_validator
+CREATE FUNCTION k12() RETURNS language_handler AS $q$ return arguments[0]; $q$ LANGUAGE chain11
+CREATE TRUSTED LANGUAGE chain12 HANDLER k12 INLINE pljs_inline_handler VALIDATOR pljs_call_validator
+CREATE FUNCTION k13() RETURNS language_handler AS $q$ return arguments[0]; $q$ LANGUAGE chain12
+CREATE TRUSTED LANGUAGE chain13 HANDLER k13 INLINE pljs_inline_handler VALIDATOR pljs_call_validator
+CREATE FUNCTION k14() RETURNS language_handler AS $q$ return arguments[0]; $q$ LANGUAGE chain13
+CREATE TRUSTED LANGUAGE chain14 HANDLER k14 INLINE pljs_inline_handler VALIDATOR pljs_call_validator
+CREATE FUNCTION k15() RETURNS language_handler AS $q$ return arguments[0]; $q$ LANGUAGE chain14
+CREATE TRUSTED LANGUAGE chain15 HANDLER k15 INLINE pljs_inline_handler VALIDATOR pljs_call_validator
+CREATE FUNCTION k16() RETURNS language_handler AS $q$ return arguments[0]; $q$ LANGUAGE chain15
+CREATE TRUSTED LANGUAGE chain16 HANDLER k16 INLINE pljs_inline_handler VALIDATOR pljs_call_validator
+CREATE FUNCTION k17() RETURNS language_handler AS $q$ return arguments[0]; $q$ LANGUAGE chain16
+CREATE TRUSTED LANGUAGE chain17 HANDLER k17 INLINE pljs_inline_handler VALIDATOR pljs_call_validator
+CREATE FUNCTION k18() RETURNS language_handler AS $q$ return arguments[0]; $q$ LANGUAGE chain17
+CREATE TRUSTED LANGUAGE chain18 HANDLER k18 INLINE pljs_inline_handler VALIDATOR pljs_call_validator
+CREATE FUNCTION k19() RETURNS language_handler AS $q$ return arguments[0]; $q$ LANGUAGE chain18
+CREATE TRUSTED LANGUAGE chain19 HANDLER k19 INLINE pljs_inline_handler VALIDATOR pljs_call_validator
+CREATE FUNCTION k20() RETURNS language_handler AS $q$ return arguments[0]; $q$ LANGUAGE chain19
+CREATE TRUSTED LANGUAGE chain20 HANDLER k20 INLINE pljs_inline_handler VALIDATOR pljs_call_validator
+CREATE FUNCTION k21() RETURNS language_handler AS $q$ return arguments[0]; $q$ LANGUAGE chain20
+CREATE TRUSTED LANGUAGE chain21 HANDLER k21 INLINE pljs_inline_handler VALIDATOR pljs_call_validator
+CREATE FUNCTION k22() RETURNS language_handler AS $q$ return arguments[0]; $q$ LANGUAGE chain21
+CREATE TRUSTED LANGUAGE chain22 HANDLER k22 INLINE pljs_inline_handler VALIDATOR pljs_call_validator
+CREATE FUNCTION k23() RETURNS language_handler AS $q$ return arguments[0]; $q$ LANGUAGE chain22
+CREATE TRUSTED LANGUAGE chain23 HANDLER k23 INLINE pljs_inline_handler VALIDATOR pljs_call_validator
+CREATE FUNCTION k24() RETURNS language_handler AS $q$ return arguments[0]; $q$ LANGUAGE chain23
+CREATE TRUSTED LANGUAGE chain24 HANDLER k24 INLINE pljs_inline_handler VALIDATOR pljs_call_validator
+CREATE FUNCTION k25() RETURNS language_handler AS $q$ return arguments[0]; $q$ LANGUAGE chain24
+CREATE TRUSTED LANGUAGE chain25 HANDLER k25 INLINE pljs_inline_handler VALIDATOR pljs_call_validator
+CREATE FUNCTION k26() RETURNS language_handler AS $q$ return arguments[0]; $q$ LANGUAGE chain25
+CREATE TRUSTED LANGUAGE chain26 HANDLER k26 INLINE pljs_inline_handler VALIDATOR pljs_call_validator
+CREATE FUNCTION k27() RETURNS language_handler AS $q$ return arguments[0]; $q$ LANGUAGE chain26
+CREATE TRUSTED LANGUAGE chain27 HANDLER k27 INLINE pljs_inline_handler VALIDATOR pljs_call_validator
+CREATE FUNCTION k28() RETURNS language_handler AS $q$ return arguments[0]; $q$ LANGUAGE chain27
+CREATE TRUSTED LANGUAGE chain28 HANDLER k28 INLINE pljs_inline_handler VALIDATOR pljs_call_validator
+CREATE FUNCTION k29() RETURNS language_handler AS $q$ return arguments[0]; $q$ LANGUAGE chain28
+CREATE TRUSTED LANGUAGE chain29 HANDLER k29 INLINE pljs_inline_handler VALIDATOR pljs_call_validator
+CREATE FUNCTION k30() RETURNS language_handler AS $q$ return arguments[0]; $q$ LANGUAGE chain29
+CREATE TRUSTED LANGUAGE chain30 HANDLER k30 INLINE pljs_inline_handler VALIDATOR pljs_call_validator
+CREATE FUNCTION k31() RETURNS language_handler AS $q$ return arguments[0]; $q$ LANGUAGE chain30
+CREATE TRUSTED LANGUAGE chain31 HANDLER k31 INLINE pljs_inline_handler VALIDATOR pljs_call_validator
+CREATE FUNCTION k32() RETURNS language_handler AS $q$ return arguments[0]; $q$ LANGUAGE chain31
+CREATE TRUSTED LANGUAGE chain32 HANDLER k32 INLINE pljs_inline_handler VALIDATOR pljs_call_validator
+-- 32 handlers deep (the limit) works.
+CREATE FUNCTION depth_ok() RETURNS int AS $$ return 32; $$ LANGUAGE chain31;
+SELECT depth_ok();
+ depth_ok 
+----------
+       32
+(1 row)
+
+DO $$ pljs.elog(NOTICE, "deepest inline block works"); $$ LANGUAGE chain31;
+NOTICE:  deepest inline block works
+-- One more is refused.
+DO $$
+BEGIN
+  CREATE FUNCTION depth_too_deep() RETURNS int AS 'return 33;' LANGUAGE chain32;
+  RAISE EXCEPTION 'expected the handler chain to be refused';
+EXCEPTION WHEN OTHERS THEN
+  RAISE NOTICE '%', SQLERRM;
+END $$;
+NOTICE:  language handler chain is deeper than 32 levels
+SELECT count(*) AS depth_too_deep_exists FROM pg_proc WHERE proname = 'depth_too_deep';
+ depth_too_deep_exists 
+-----------------------
+                     0
+(1 row)
+
+-- Shallower chains are unaffected.
+SELECT depth_ok();
+ depth_ok 
+----------
+       32
+(1 row)
+
+SELECT ok_fn();
+ ok_fn 
+-------
+     7
+(1 row)
+
+-- Cleanup
+DROP FUNCTION depth_ok();
+SET client_min_messages = warning;
+DROP LANGUAGE chain0 CASCADE;
+RESET client_min_messages;
+DROP FUNCTION k0();
+DROP FUNCTION IF EXISTS loop_fn();
+DROP LANGUAGE looplang;
+DROP FUNCTION loop_handler();
+DROP FUNCTION mem_fn();
+DROP LANGUAGE memlang;
+DROP FUNCTION mem_handler();
+DROP FUNCTION ok_fn();

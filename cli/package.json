@@ -1,0 +1,20 @@
+{
+  "name": "@plv8/pljs-cli",
+  "version": "0.1.0",
+  "description": "CLI tool for managing JavaScript modules in PostgreSQL via pljs",
+  "type": "module",
+  "bin": {
+    "pljs": "./bin/pljs.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "test": "node --test --experimental-test-module-mocks test/**/*.test.js test/**/**/*.test.js"
+  },
+  "dependencies": {
+    "acorn": "^8.14.0",
+    "pg": "^8.13.0"
+  },
+  "license": "PostgreSQL"
+}

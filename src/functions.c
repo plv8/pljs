@@ -84,12 +84,17 @@ static JSValue pljs_subtransaction(JSContext *, JSValueConst, int,
 static JSValue pljs_gc(JSContext *, JSValueConst, int, JSValueConst *);
 #endif
 
+static JSValue pljs_import(JSContext *, JSValueConst, int, JSValueConst *);
+static JSValue pljs_require(JSContext *, JSValueConst, int, JSValueConst *);
+
 // Set up any stored procedures we export to Postgres.
 PGDLLEXPORT Datum pljs_version(PG_FUNCTION_ARGS);
 PGDLLEXPORT Datum pljs_info(PG_FUNCTION_ARGS);
+PGDLLEXPORT Datum pljs_reset(PG_FUNCTION_ARGS);
 
 PG_FUNCTION_INFO_V1(pljs_version);
 PG_FUNCTION_INFO_V1(pljs_info);
+PG_FUNCTION_INFO_V1(pljs_reset);
 
 /**
  * @brief Takes the PostgreSQL error being handled off the error stack.
@@ -427,10 +432,23 @@ void pljs_setup_namespace(JSContext *ctx) {
   JS_SetPropertyStr(ctx, pljs, "gc", JS_NewCFunction(ctx, pljs_gc, "gc", 0));
 #endif
 
-  JS_SetPropertyStr(ctx, global_obj, "pljs", pljs);
-
   // Version.
   JS_SetPropertyStr(ctx, pljs, "version", JS_NewString(ctx, PLJS_VERSION));
+
+  JS_SetPropertyStr(ctx, pljs, "import",
+                    JS_NewCFunction(ctx, pljs_import, "import", 1));
+
+  JS_SetPropertyStr(ctx, pljs, "require",
+                    JS_NewCFunction(ctx, pljs_require, "require", 1));
+
+  JS_SetPropertyStr(ctx, pljs, "compile_bytecode",
+                    JS_NewCFunction(ctx, pljs_compile_bytecode_js,
+                                    "compile_bytecode", 2));
+
+  JS_SetPropertyStr(ctx, global_obj, "require",
+                    JS_NewCFunction(ctx, pljs_require, "require", 1));
+
+  JS_SetPropertyStr(ctx, global_obj, "pljs", pljs);
 
   // Set up logging levels in the context.
   JS_SetPropertyStr(ctx, global_obj, "DEBUG5", JS_NewInt32(ctx, DEBUG5));
@@ -487,7 +505,7 @@ static JSValue pljs_elog(JSContext *ctx, JSValueConst this_val, int argc,
 
     for (int i = 1; i < argc; i++) {
       if (i > 1) {
-        appendStringInfo(&msg, " ");
+        appendStringInfoChar(&msg, ' ');
       }
 
       JSValue str = JS_ToString(ctx, argv[i]);
@@ -501,7 +519,7 @@ static JSValue pljs_elog(JSContext *ctx, JSValueConst this_val, int argc,
         return JS_EXCEPTION;
       }
 
-      appendStringInfo(&msg, "%s", cstr);
+      appendStringInfoString(&msg, cstr);
 
       JS_FreeCString(ctx, cstr);
     }
@@ -3615,6 +3633,40 @@ static JSValue pljs_gc(JSContext *ctx, JSValueConst this_val, int argc,
 }
 #endif
 
+static JSValue pljs_import(JSContext *ctx, JSValueConst this_val, int argc,
+                           JSValueConst *argv) {
+  if (argc != 1) {
+    return js_throw("pljs.import() expects exactly one argument", ctx);
+  }
+
+  if (!JS_IsString(argv[0])) {
+    return js_throw("pljs.import() expects a string", ctx);
+  }
+
+  const char *path = JS_ToCString(ctx, argv[0]);
+  JSValue ret = pljs_module_import(ctx, path);
+  JS_FreeCString(ctx, path);
+
+  return ret;
+}
+
+static JSValue pljs_require(JSContext *ctx, JSValueConst this_val, int argc,
+                            JSValueConst *argv) {
+  if (argc != 1) {
+    return js_throw("pljs.require() expects exactly one argument", ctx);
+  }
+
+  if (!JS_IsString(argv[0])) {
+    return js_throw("pljs.require() expects a string", ctx);
+  }
+
+  const char *path = JS_ToCString(ctx, argv[0]);
+  JSValue ret = pljs_module_require(ctx, path);
+  JS_FreeCString(ctx, path);
+
+  return ret;
+}
+
 /**
  * @brief Returns the `PLJS_VERSION` to Postgres.
  *
@@ -3738,13 +3790,47 @@ Datum pljs_info(PG_FUNCTION_ARGS) {
   size_t malloc_limit = local_rt->malloc_state.malloc_limit;
   size_t stack_size = local_rt->stack_size;
   size_t stack_limit = local_rt->stack_limit;
+  StringInfoData buf;
 
-  char *ret = palloc0(512);
-  sprintf(
-      ret,
-      "{ \"malloc_count\": %ld, \"malloc_size\": %ld, \"malloc_limit\": %ld, "
-      "\"stack_size\": %ld, \"stack_limit\": %ld }",
-      malloc_count, malloc_size, malloc_limit, stack_size, stack_limit);
+  initStringInfo(&buf);
+  appendStringInfo(
+      &buf,
+      "{\"version\":\"%s\",\"memory_limit_mb\":%zu,"
+      "\"max_cached_contexts\":%d,\"cached_contexts\":%ld,"
+      "\"hooks_enabled\":%s,\"hooks_max_depth\":%d,"
+      "\"malloc_count\":%zu,\"malloc_size\":%zu,\"malloc_limit\":%zu,"
+      "\"stack_size\":%zu,\"stack_limit\":%zu}",
+      PLJS_VERSION, configuration.memory_limit,
+      configuration.max_cached_contexts, pljs_cache_context_count(),
+      configuration.hooks_enabled ? "true" : "false",
+      configuration.hooks_max_depth, malloc_count, malloc_size, malloc_limit,
+      stack_size, stack_limit);
 
-  return (Datum)CStringGetTextDatum(ret);
+  return CStringGetTextDatum(buf.data);
+}
+
+/**
+ * @brief Discards every cached JavaScript context and starts a new runtime.
+ *
+ * Refused while PL/JS code is running.  A function that reaches this through
+ * pljs.execute() is running in one of the contexts about to be freed: its
+ * stack and the objects it holds would be torn out from under it, which
+ * stops the backend at QuickJS's check that nothing is left in the runtime
+ * and, in a build without it, reads freed memory.
+ */
+Datum pljs_reset(PG_FUNCTION_ARGS) {
+  if (pljs_current_storage() != NULL) {
+    ereport(ERROR, (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+                    errmsg("pljs_reset() cannot be called while PL/JS code is "
+                           "running"),
+                    errhint("Call it from a top-level SQL statement, not from "
+                            "inside a PL/JS function, trigger or DO block.")));
+  }
+
+  pljs_cache_free_all();
+  JS_FreeRuntime(rt);
+
+  pljs_runtime_init();
+
+  PG_RETURN_VOID();
 }

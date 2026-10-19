@@ -1,0 +1,716 @@
+-- Basic module import
+INSERT INTO pljs.modules (path, source) VALUES
+  ('math_utils', 'export function add(a, b) { return a + b; } export function multiply(a, b) { return a * b; }');
+DO $$
+  const math = pljs.import('math_utils');
+  pljs.elog(INFO, math.add(2, 3));
+  pljs.elog(INFO, math.multiply(4, 5));
+$$ LANGUAGE pljs;
+INFO:  5
+INFO:  20
+-- Module with default-style export (named)
+INSERT INTO pljs.modules (path, source) VALUES
+  ('greeter', 'export function greet(name) { return "Hello, " + name + "!"; }');
+CREATE FUNCTION test_module_import() RETURNS text AS $$
+  const mod = pljs.import('greeter');
+  return mod.greet('world');
+$$ LANGUAGE pljs;
+SELECT test_module_import();
+ test_module_import 
+--------------------
+ Hello, world!
+(1 row)
+
+-- Module with path-like names
+INSERT INTO pljs.modules (path, source) VALUES
+  ('lib/strings', 'export function upper(s) { return s.toUpperCase(); } export function lower(s) { return s.toLowerCase(); }');
+DO $$
+  const strings = pljs.import('lib/strings');
+  pljs.elog(INFO, strings.upper('hello'));
+  pljs.elog(INFO, strings.lower('WORLD'));
+$$ LANGUAGE pljs;
+INFO:  HELLO
+INFO:  world
+-- Deeper path-like name
+INSERT INTO pljs.modules (path, source) VALUES
+  ('core/utils/format', 'export function wrap(s) { return "[" + s + "]"; }');
+DO $$
+  const fmt = pljs.import('core/utils/format');
+  pljs.elog(INFO, fmt.wrap('test'));
+$$ LANGUAGE pljs;
+INFO:  [test]
+-- Module with multiple exports and constants
+INSERT INTO pljs.modules (path, source) VALUES
+  ('constants', 'export const PI = 3.14159; export const E = 2.71828; export function circumference(r) { return 2 * PI * r; }');
+CREATE FUNCTION circle_info(r float8) RETURNS text AS $$
+  const c = pljs.import('constants');
+  return 'r=' + r + ' C=' + c.circumference(r).toFixed(2) + ' PI=' + c.PI;
+$$ LANGUAGE pljs;
+SELECT circle_info(10);
+       circle_info       
+-------------------------
+ r=10 C=62.83 PI=3.14159
+(1 row)
+
+-- Module that does not exist
+DO $$
+  try {
+    pljs.import('nonexistent_module');
+    pljs.elog(ERROR, 'should not reach here');
+  } catch (e) {
+    pljs.elog(INFO, e.message);
+  }
+$$ LANGUAGE pljs;
+INFO:  could not load module 'nonexistent_module'
+-- Using a module from a named function
+INSERT INTO pljs.modules (path, source) VALUES
+  ('validators', 'export function isPositive(n) { return n > 0; } export function isEven(n) { return n % 2 === 0; }');
+CREATE FUNCTION check_number(n integer) RETURNS text AS $$
+  const v = pljs.import('validators');
+  const parts = [];
+  if (v.isPositive(n)) parts.push('positive');
+  if (v.isEven(n)) parts.push('even');
+  return parts.length > 0 ? parts.join(', ') : 'negative and odd';
+$$ LANGUAGE pljs;
+SELECT check_number(4);
+  check_number  
+----------------
+ positive, even
+(1 row)
+
+SELECT check_number(-3);
+   check_number   
+------------------
+ negative and odd
+(1 row)
+
+-- Multiple imports in one block
+DO $$
+  const math = pljs.import('math_utils');
+  const v = pljs.import('validators');
+  const result = math.add(10, 20);
+  pljs.elog(INFO, 'sum=' + result + ' positive=' + v.isPositive(result));
+$$ LANGUAGE pljs;
+INFO:  sum=30 positive=true
+-- Module that imports another module via pljs.import()
+INSERT INTO pljs.modules (path, source) VALUES
+  ('base', 'export const BASE = 100; export function offset(n) { return BASE + n; }');
+INSERT INTO pljs.modules (path, source) VALUES
+  ('derived', 'const base = pljs.import("base"); export function compute(n) { return base.offset(n) * 2; } export const BASE = base.BASE;');
+DO $$
+  const derived = pljs.import('derived');
+  pljs.elog(INFO, 'BASE = ' + derived.BASE);
+  pljs.elog(INFO, 'compute(5) = ' + derived.compute(5));
+$$ LANGUAGE pljs;
+INFO:  BASE = 100
+INFO:  compute(5) = 210
+-- Module importing a module with a path-like name via pljs.import()
+INSERT INTO pljs.modules (path, source) VALUES
+  ('lib/format', 'const strings = pljs.import("lib/strings"); export function shout(s) { return strings.upper(s) + "!!!"; }');
+DO $$
+  const format = pljs.import('lib/format');
+  pljs.elog(INFO, format.shout('wow'));
+$$ LANGUAGE pljs;
+INFO:  WOW!!!
+-- Three levels of chained pljs.import()
+INSERT INTO pljs.modules (path, source) VALUES
+  ('core/calc', 'const c = pljs.import("constants"); export function circumference(r) { return 2 * c.PI * r; }');
+INSERT INTO pljs.modules (path, source) VALUES
+  ('app/geometry', 'const calc = pljs.import("core/calc"); const c = pljs.import("constants"); export function circleInfo(r) { return "r=" + r + " C=" + calc.circumference(r).toFixed(2) + " PI=" + c.PI; }');
+CREATE FUNCTION circle_info_chained(r float8) RETURNS text AS $$
+  const geo = pljs.import('app/geometry');
+  return geo.circleInfo(r);
+$$ LANGUAGE pljs;
+SELECT circle_info_chained(10);
+   circle_info_chained   
+-------------------------
+ r=10 C=62.83 PI=3.14159
+(1 row)
+
+-- Module that tries to import a nonexistent module
+INSERT INTO pljs.modules (path, source) VALUES
+  ('bad_import', 'const nope = pljs.import("does_not_exist"); export function go() { return "ok"; }');
+DO $$
+  try {
+    pljs.import('bad_import');
+    pljs.elog(ERROR, 'should not reach here');
+  } catch (e) {
+    pljs.elog(INFO, e.message);
+  }
+$$ LANGUAGE pljs;
+INFO:  could not load module 'does_not_exist'
+-- ============================================================
+-- pljs.require() - CommonJS modules
+-- ============================================================
+-- Basic require with module.exports
+INSERT INTO pljs.modules (path, source) VALUES
+  ('cjs/math', 'function add(a, b) { return a + b; } function multiply(a, b) { return a * b; } module.exports = { add, multiply };');
+DO $$
+  var math = pljs.require('cjs/math');
+  pljs.elog(INFO, math.add(2, 3));
+  pljs.elog(INFO, math.multiply(4, 5));
+$$ LANGUAGE pljs;
+INFO:  5
+INFO:  20
+-- Require with exports.prop assignment
+INSERT INTO pljs.modules (path, source) VALUES
+  ('cjs/greeter', 'function greet(name) { return "Hello, " + name + "!"; } exports.greet = greet;');
+CREATE FUNCTION test_module_require() RETURNS text AS $$
+  var mod = pljs.require('cjs/greeter');
+  return mod.greet('world');
+$$ LANGUAGE pljs;
+SELECT test_module_require();
+ test_module_require 
+---------------------
+ Hello, world!
+(1 row)
+
+-- Require with path-like names
+INSERT INTO pljs.modules (path, source) VALUES
+  ('cjs/lib/strings', 'exports.upper = function(s) { return s.toUpperCase(); }; exports.lower = function(s) { return s.toLowerCase(); };');
+DO $$
+  var strings = pljs.require('cjs/lib/strings');
+  pljs.elog(INFO, strings.upper('hello'));
+  pljs.elog(INFO, strings.lower('WORLD'));
+$$ LANGUAGE pljs;
+INFO:  HELLO
+INFO:  world
+-- Require with module.exports replacing the whole object
+INSERT INTO pljs.modules (path, source) VALUES
+  ('cjs/constants', 'var PI = 3.14159; var E = 2.71828; function circumference(r) { return 2 * PI * r; } module.exports = { PI: PI, E: E, circumference: circumference };');
+CREATE FUNCTION circle_info_cjs(r float8) RETURNS text AS $$
+  var c = pljs.require('cjs/constants');
+  return 'r=' + r + ' C=' + c.circumference(r).toFixed(2) + ' PI=' + c.PI;
+$$ LANGUAGE pljs;
+SELECT circle_info_cjs(10);
+     circle_info_cjs     
+-------------------------
+ r=10 C=62.83 PI=3.14159
+(1 row)
+
+-- Require a module that does not exist
+DO $$
+  try {
+    pljs.require('nonexistent_cjs_module');
+    pljs.elog(ERROR, 'should not reach here');
+  } catch (e) {
+    pljs.elog(INFO, e.message);
+  }
+$$ LANGUAGE pljs;
+INFO:  could not load module 'nonexistent_cjs_module'
+-- Using require from a named function
+INSERT INTO pljs.modules (path, source) VALUES
+  ('cjs/validators', 'exports.isPositive = function(n) { return n > 0; }; exports.isEven = function(n) { return n % 2 === 0; };');
+CREATE FUNCTION check_number_cjs(n integer) RETURNS text AS $$
+  var v = pljs.require('cjs/validators');
+  var parts = [];
+  if (v.isPositive(n)) parts.push('positive');
+  if (v.isEven(n)) parts.push('even');
+  return parts.length > 0 ? parts.join(', ') : 'negative and odd';
+$$ LANGUAGE pljs;
+SELECT check_number_cjs(4);
+ check_number_cjs 
+------------------
+ positive, even
+(1 row)
+
+SELECT check_number_cjs(-3);
+ check_number_cjs 
+------------------
+ negative and odd
+(1 row)
+
+-- Multiple requires in one block
+DO $$
+  var math = pljs.require('cjs/math');
+  var v = pljs.require('cjs/validators');
+  var result = math.add(10, 20);
+  pljs.elog(INFO, 'sum=' + result + ' positive=' + v.isPositive(result));
+$$ LANGUAGE pljs;
+INFO:  sum=30 positive=true
+-- Module exporting a single function via module.exports
+INSERT INTO pljs.modules (path, source) VALUES
+  ('cjs/single', 'module.exports = function(x) { return x * x; };');
+DO $$
+  var square = pljs.require('cjs/single');
+  pljs.elog(INFO, 'square(7) = ' + square(7));
+$$ LANGUAGE pljs;
+INFO:  square(7) = 49
+-- Module exporting a single value
+INSERT INTO pljs.modules (path, source) VALUES
+  ('cjs/version', 'module.exports = "1.0.0";');
+DO $$
+  var ver = pljs.require('cjs/version');
+  pljs.elog(INFO, 'version = ' + ver);
+$$ LANGUAGE pljs;
+INFO:  version = 1.0.0
+-- ============================================================
+-- Failures inside a module reach the caller with their real message
+-- ============================================================
+INSERT INTO pljs.modules (path, source) VALUES
+  ('esm/syntax_error', 'export function broken( { return 1; }'),
+  ('cjs/syntax_error', 'exports.broken = function( { return 1; };'),
+  ('cjs/throws', 'throw new Error("boom from module");'),
+  ('esm/throws', 'throw new Error("boom from esm module"); export const x = 1;');
+DO $$
+  try {
+    pljs.import('esm/syntax_error');
+    pljs.elog(ERROR, 'should not reach here');
+  } catch (e) {
+    pljs.elog(INFO, e.name);
+  }
+$$ LANGUAGE pljs;
+INFO:  SyntaxError
+DO $$
+  try {
+    pljs.require('cjs/syntax_error');
+    pljs.elog(ERROR, 'should not reach here');
+  } catch (e) {
+    pljs.elog(INFO, e.name);
+  }
+$$ LANGUAGE pljs;
+INFO:  SyntaxError
+DO $$
+  try {
+    pljs.require('cjs/throws');
+    pljs.elog(ERROR, 'should not reach here');
+  } catch (e) {
+    pljs.elog(INFO, e.message);
+  }
+$$ LANGUAGE pljs;
+INFO:  boom from module
+DO $$
+  try {
+    pljs.import('esm/throws');
+    pljs.elog(ERROR, 'should not reach here');
+  } catch (e) {
+    pljs.elog(INFO, e.message);
+  }
+$$ LANGUAGE pljs;
+INFO:  boom from esm module
+-- A failed import must not leave module state behind: a good import still works.
+DO $$
+  pljs.elog(INFO, pljs.import('constants').PI);
+$$ LANGUAGE pljs;
+INFO:  3.14159
+-- ============================================================
+-- CommonJS modules get their own module and exports
+-- ============================================================
+INSERT INTO pljs.modules (path, source) VALUES
+  ('cjs/inner', 'exports.inner = "inner"; var leaked = 1;'),
+  ('cjs/outer', 'var i = pljs.require("cjs/inner"); exports.outer = "outer"; exports.sawInner = i.inner; exports.innerGotOuter = i.outer === undefined ? "no" : "yes";'),
+  ('cjs/outer_reassign', 'var i = pljs.require("cjs/inner"); module.exports = { mine: true, inner: i.inner };');
+DO $$
+  var o = pljs.require('cjs/outer');
+  pljs.elog(INFO, JSON.stringify(o));
+  var r = pljs.require('cjs/outer_reassign');
+  pljs.elog(INFO, JSON.stringify(r));
+  // The requiring module's exports are not the inner module's.
+  var i = pljs.require('cjs/inner');
+  pljs.elog(INFO, JSON.stringify(i));
+  // Nothing leaks into the global scope.
+  pljs.elog(INFO, typeof module + ' ' + typeof exports + ' ' + typeof leaked);
+$$ LANGUAGE pljs;
+INFO:  {"outer":"outer","sawInner":"inner","innerGotOuter":"no"}
+INFO:  {"mine":true,"inner":"inner"}
+INFO:  {"inner":"inner"}
+INFO:  undefined undefined undefined
+-- ============================================================
+-- Circular imports are an error, not a hang
+-- ============================================================
+INSERT INTO pljs.modules (path, source) VALUES
+  ('circ/a', 'const b = pljs.import("circ/b"); export const a = 1;'),
+  ('circ/b', 'const a = pljs.import("circ/a"); export const b = 1;'),
+  ('circ/c', 'const c = pljs.require("circ/d"); exports.c = 1;'),
+  ('circ/d', 'const c = pljs.require("circ/c"); exports.d = 1;');
+DO $$
+  try {
+    pljs.import('circ/a');
+    pljs.elog(ERROR, 'should not reach here');
+  } catch (e) {
+    pljs.elog(INFO, e.message);
+  }
+$$ LANGUAGE pljs;
+INFO:  circular module dependency: 'circ/a' is loading
+DO $$
+  try {
+    pljs.require('circ/c');
+    pljs.elog(ERROR, 'should not reach here');
+  } catch (e) {
+    pljs.elog(INFO, e.message);
+  }
+$$ LANGUAGE pljs;
+INFO:  circular module dependency: 'circ/c' is loading
+-- ============================================================
+-- A chain deeper than pljs.max_module_depth stops
+-- ============================================================
+INSERT INTO pljs.modules (path, source)
+  SELECT 'chain/' || n, 'const next = pljs.import("chain/' || (n + 1) || '"); export const depth = next.depth + 1;'
+  FROM generate_series(0, 9) AS n;
+INSERT INTO pljs.modules (path, source) VALUES ('chain/10', 'export const depth = 0;');
+SET pljs.max_module_depth = 5;
+DO $$
+  try {
+    pljs.import('chain/0');
+    pljs.elog(ERROR, 'should not reach here');
+  } catch (e) {
+    pljs.elog(INFO, e.message);
+  }
+$$ LANGUAGE pljs;
+INFO:  module import depth exceeded (5): possible circular dependency
+RESET pljs.max_module_depth;
+-- The depth was unwound by the failure: the whole chain loads at the default.
+DO $$
+  pljs.elog(INFO, pljs.import('chain/0').depth);
+$$ LANGUAGE pljs;
+INFO:  10
+-- ============================================================
+-- A module that waits forever fails instead of hanging the backend
+-- ============================================================
+INSERT INTO pljs.modules (path, source) VALUES
+  ('hang', 'await new Promise(function () {}); export const x = 1;');
+DO $$
+  try {
+    pljs.import('hang');
+    pljs.elog(ERROR, 'should not reach here');
+  } catch (e) {
+    pljs.elog(INFO, e.message);
+  }
+$$ LANGUAGE pljs;
+INFO:  module did not finish loading: it is waiting on itself, or on an await that never completes
+-- ============================================================
+-- Standalone lookups agree with the index's collation
+-- ============================================================
+INSERT INTO pljs.modules (path, source)
+  SELECT p, 'exports.p = ' || quote_literal(p) || ';'
+  FROM unnest(ARRAY['alpha', 'Alpha', 'ALPHA', '_alpha', 'alpha-2', 'Zulu', 'zulu', 'beta', 'Beta', '9lives']) AS p;
+DO $$
+  var paths = ['alpha', 'Alpha', 'ALPHA', '_alpha', 'alpha-2', 'Zulu', 'zulu', 'beta', 'Beta', '9lives'];
+  var bad = paths.filter(function(p) { return pljs.require(p).p !== p; });
+  pljs.elog(INFO, 'mismatches: ' + bad.length);
+$$ LANGUAGE pljs;
+INFO:  mismatches: 0
+-- ============================================================
+-- A module row with no source is not a module
+-- ============================================================
+INSERT INTO pljs.modules (path, source) VALUES ('no_source', NULL);
+DO $$
+  try {
+    pljs.import('no_source');
+    pljs.elog(ERROR, 'should not reach here');
+  } catch (e) {
+    pljs.elog(INFO, e.message);
+  }
+$$ LANGUAGE pljs;
+INFO:  could not load module 'no_source'
+-- Non-ASCII source survives the round trip.
+INSERT INTO pljs.modules (path, source) VALUES
+  ('cjs/unicode', 'exports.word = "caf\u00e9 \u65e5\u672c\u8a9e"; exports.raw = "café 日本語";');
+DO $$
+  var u = pljs.require('cjs/unicode');
+  pljs.elog(INFO, u.raw + ' ' + u.raw.length + ' ' + (u.raw === u.word));
+$$ LANGUAGE pljs;
+INFO:  café 日本語 8 true
+-- ============================================================
+-- A module is evaluated once and shared
+-- ============================================================
+INSERT INTO pljs.modules (path, source) VALUES
+  ('once/counter', 'globalThis.__evaluations = (globalThis.__evaluations || 0) + 1; export const state = { n: 0 };'),
+  ('once/a', 'import { state } from "once/counter"; export function bump() { return ++state.n; }'),
+  ('once/b', 'import { state } from "once/counter"; export function read() { return state.n; }');
+DO $$
+  var a = pljs.import('once/a');
+  var b = pljs.import('once/b');
+  a.bump(); a.bump();
+  pljs.elog(INFO, 'b sees ' + b.read());
+  pljs.elog(INFO, 'same namespace: ' + (pljs.import('once/a') === a));
+  pljs.elog(INFO, 'evaluated ' + globalThis.__evaluations + ' time');
+$$ LANGUAGE pljs;
+INFO:  b sees 2
+INFO:  same namespace: true
+INFO:  evaluated 1 time
+-- Remembered across calls of a function, too.
+CREATE FUNCTION use_once() RETURNS int AS $$
+  return pljs.import('once/a').bump();
+$$ LANGUAGE pljs;
+SELECT use_once(), use_once(), use_once();
+ use_once | use_once | use_once 
+----------+----------+----------
+        3 |        4 |        5
+(1 row)
+
+DROP FUNCTION use_once();
+-- ============================================================
+-- Static import inside stored modules
+-- ============================================================
+INSERT INTO pljs.modules (path, source) VALUES
+  ('static/base', 'export const BASE = 100; export default function triple(n) { return n * 3; }'),
+  ('static/lib/util', 'import triple, { BASE } from "../base"; export const scaled = triple(2) + BASE;'),
+  ('static/lib/sibling', 'import { scaled } from "./util"; export const doubled = scaled * 2;'),
+  ('static/cjs_dep', 'exports.answer = 42;'),
+  ('static/uses_cjs', 'import dep from "static/cjs_dep"; export const answer = dep.answer;'),
+  ('static/esm_for_cjs', 'export const v = "from esm";'),
+  ('static/cjs_uses_esm', 'var esm = pljs.require("static/esm_for_cjs"); exports.v = esm.v;'),
+  ('static/up', 'import x from "../../../nowhere"; export default x;');
+DO $$
+  pljs.elog(INFO, pljs.import('static/lib/sibling').doubled);
+  pljs.elog(INFO, pljs.import('static/uses_cjs').answer);
+  pljs.elog(INFO, pljs.require('static/cjs_uses_esm').v);
+  pljs.elog(INFO, pljs.require('static/cjs_dep').answer + ' ' + Object.keys(pljs.import('static/cjs_dep')).join());
+$$ LANGUAGE pljs;
+INFO:  212
+INFO:  42
+INFO:  from esm
+INFO:  42 default
+DO $$
+  try {
+    pljs.import('static/up');
+    pljs.elog(ERROR, 'should not reach here');
+  } catch (e) {
+    pljs.elog(INFO, e.message);
+  }
+$$ LANGUAGE pljs;
+INFO:  relative module specifier '../../../nowhere' goes above the module root
+-- A relative specifier means nothing outside a stored module.
+DO $$
+  try {
+    pljs.import('./base');
+    pljs.elog(ERROR, 'should not reach here');
+  } catch (e) {
+    pljs.elog(INFO, e.message);
+  }
+$$ LANGUAGE pljs;
+INFO:  could not load module './base'
+-- ============================================================
+-- Changing a module invalidates it
+-- ============================================================
+INSERT INTO pljs.modules (path, source) VALUES
+  ('inv/leaf', 'export const v = 1;'),
+  ('inv/mid', 'import { v } from "inv/leaf"; export const mid = v + 10;'),
+  ('inv/cjs', 'exports.v = "one";');
+CREATE FUNCTION inv_value() RETURNS text AS $$
+  return pljs.import('inv/mid').mid + ' ' + pljs.require('inv/cjs').v;
+$$ LANGUAGE pljs;
+SELECT inv_value();
+ inv_value 
+-----------
+ 11 one
+(1 row)
+
+SELECT inv_value();
+ inv_value 
+-----------
+ 11 one
+(1 row)
+
+-- UPDATE: a dependency changes, and so does what depends on it.
+UPDATE pljs.modules SET source = 'export const v = 2;' WHERE path = 'inv/leaf';
+UPDATE pljs.modules SET source = 'exports.v = "two";' WHERE path = 'inv/cjs';
+SELECT inv_value();
+ inv_value 
+-----------
+ 12 two
+(1 row)
+
+-- Inside one transaction, and undone by a rollback.
+BEGIN;
+UPDATE pljs.modules SET source = 'export const v = 3;' WHERE path = 'inv/leaf';
+SELECT inv_value();
+ inv_value 
+-----------
+ 13 two
+(1 row)
+
+ROLLBACK;
+SELECT inv_value();
+ inv_value 
+-----------
+ 12 two
+(1 row)
+
+-- DELETE: the module is gone, and the error says so.
+DELETE FROM pljs.modules WHERE path = 'inv/leaf';
+DO $$
+  try {
+    pljs.import('inv/mid');
+    pljs.elog(ERROR, 'should not reach here');
+  } catch (e) {
+    pljs.elog(INFO, e.message);
+  }
+$$ LANGUAGE pljs;
+INFO:  could not load module 'inv/leaf'
+-- INSERT: and it is back.
+INSERT INTO pljs.modules (path, source) VALUES ('inv/leaf', 'export const v = 4;');
+SELECT inv_value();
+ inv_value 
+-----------
+ 14 two
+(1 row)
+
+-- A module whose evaluation failed is tried again once it is fixed.
+INSERT INTO pljs.modules (path, source) VALUES ('inv/broken', 'throw new Error("not yet"); export const ok = 1;');
+DO $$
+  try { pljs.import('inv/broken'); } catch (e) { pljs.elog(INFO, e.message); }
+  try { pljs.import('inv/broken'); } catch (e) { pljs.elog(INFO, 'again: ' + e.message); }
+$$ LANGUAGE pljs;
+INFO:  not yet
+INFO:  again: not yet
+UPDATE pljs.modules SET source = 'export const ok = "fixed";' WHERE path = 'inv/broken';
+DO $$
+  pljs.elog(INFO, pljs.import('inv/broken').ok);
+$$ LANGUAGE pljs;
+INFO:  fixed
+-- TRUNCATE empties the table and invalidates too.
+SELECT inv_value();
+ inv_value 
+-----------
+ 14 two
+(1 row)
+
+TRUNCATE pljs.modules;
+DO $$
+  try {
+    pljs.import('inv/mid');
+    pljs.elog(ERROR, 'should not reach here');
+  } catch (e) {
+    pljs.elog(INFO, e.message);
+  }
+$$ LANGUAGE pljs;
+INFO:  could not load module 'inv/mid'
+-- Another session changes a module while this one has it loaded.
+INSERT INTO pljs.modules (path, source) VALUES ('inv/shared', 'export const who = "first";');
+DO $$ pljs.elog(INFO, pljs.import('inv/shared').who); $$ LANGUAGE pljs;
+INFO:  first
+\! psql -X -q -d contrib_regression -o /dev/null -c "UPDATE pljs.modules SET source = 'export const who = \"second\";' WHERE path = 'inv/shared'"
+DO $$ pljs.elog(INFO, pljs.import('inv/shared').who); $$ LANGUAGE pljs;
+INFO:  second
+DROP FUNCTION inv_value();
+DELETE FROM pljs.modules;
+-- ============================================================
+-- Resetting drops the loaded modules with their contexts
+-- ============================================================
+INSERT INTO pljs.modules (path, source) VALUES
+  ('reset/dep', 'export const v = "dep";'),
+  ('reset/top', 'import { v } from "reset/dep"; export const t = v + "!";'),
+  ('reset/cjs', 'exports.c = pljs.import("reset/top").t;');
+DO $$ pljs.elog(INFO, pljs.require('reset/cjs').c); $$ LANGUAGE pljs;
+INFO:  dep!
+SELECT pljs_reset();
+ pljs_reset 
+------------
+ 
+(1 row)
+
+DO $$ pljs.elog(INFO, pljs.require('reset/cjs').c); $$ LANGUAGE pljs;
+INFO:  dep!
+SELECT pljs_reset();
+ pljs_reset 
+------------
+ 
+(1 row)
+
+DELETE FROM pljs.modules;
+-- ============================================================
+-- A repeatable-read transaction reads the modules as it began, and what it
+-- loaded is not kept past it
+-- ============================================================
+INSERT INTO pljs.modules (path, source) VALUES ('rr/m', 'export const v = 1;');
+BEGIN ISOLATION LEVEL REPEATABLE READ;
+SELECT count(*) FROM pljs.modules WHERE path = 'rr/m';
+ count 
+-------
+     1
+(1 row)
+
+\! psql -X -q -d contrib_regression -o /dev/null -c "UPDATE pljs.modules SET source = 'export const v = 2;' WHERE path = 'rr/m'"
+DO $$ pljs.elog(INFO, 'in the transaction: ' + pljs.import('rr/m').v); $$ LANGUAGE pljs;
+INFO:  in the transaction: 1
+COMMIT;
+DO $$ pljs.elog(INFO, 'after it: ' + pljs.import('rr/m').v); $$ LANGUAGE pljs;
+INFO:  after it: 2
+DELETE FROM pljs.modules;
+-- ============================================================
+-- Sloppy mode, for CommonJS modules that ask for it
+-- ============================================================
+INSERT INTO pljs.modules (path, source) VALUES
+  ('sl/implicit', 'implicit_global = 5; exports.v = implicit_global;'),
+  ('sl/toggle', 'toggle_global = 7; exports.v = toggle_global;'),
+  ('sl/with', 'var o = { a: 1 }; with (o) { exports.v = a; }'),
+  ('sl/octal', 'exports.v = 010;');
+INSERT INTO pljs.modules (path, source, sloppy) VALUES
+  ('sl/implicit_ok', 'implicit_global = 5; exports.v = implicit_global;', true),
+  ('sl/with_ok', 'var o = { a: 1 }; with (o) { exports.v = a; }', true),
+  ('sl/octal_ok', 'exports.v = 010;', true),
+  ('sl/q"uote\back', 'exports.name = "quoted"; exports.self = typeof module + typeof exports + typeof require; exports.thisIsExports = this === exports;', true),
+  ('sl/esm', 'export const strict = (function () { return this === undefined; })();', true);
+-- Strict unless asked otherwise.
+DO $$
+  ['sl/implicit', 'sl/with', 'sl/octal'].forEach(function (m) {
+    try {
+      pljs.require(m);
+      pljs.elog(ERROR, m + ' should not load');
+    } catch (e) {
+      pljs.elog(INFO, m + ': ' + e.name);
+    }
+  });
+$$ LANGUAGE pljs;
+INFO:  sl/implicit: ReferenceError
+INFO:  sl/with: SyntaxError
+INFO:  sl/octal: SyntaxError
+DO $$
+  pljs.elog(INFO, pljs.require('sl/implicit_ok').v);
+  pljs.elog(INFO, pljs.require('sl/with_ok').v);
+  pljs.elog(INFO, pljs.require('sl/octal_ok').v);
+  var q = pljs.require('sl/q"uote\\back');
+  pljs.elog(INFO, q.name + ' ' + q.self + ' ' + q.thisIsExports);
+$$ LANGUAGE pljs;
+INFO:  5
+INFO:  1
+INFO:  8
+INFO:  quoted objectobjectfunction true
+-- It imports like any other CommonJS module, and is still a module of its own.
+INSERT INTO pljs.modules (path, source) VALUES
+  ('sl/importer', 'import m from "sl/with_ok"; export const v = m.v + 1;');
+DO $$ pljs.elog(INFO, pljs.import('sl/importer').v); $$ LANGUAGE pljs;
+INFO:  2
+-- An ES module is strict whatever it asks.
+DO $$ pljs.elog(INFO, 'esm strict: ' + pljs.import('sl/esm').strict); $$ LANGUAGE pljs;
+INFO:  esm strict: true
+-- Turning it on, or off, takes effect without a reload.
+UPDATE pljs.modules SET sloppy = true WHERE path = 'sl/toggle';
+DO $$ pljs.elog(INFO, pljs.require('sl/toggle').v); $$ LANGUAGE pljs;
+INFO:  7
+UPDATE pljs.modules SET sloppy = false WHERE path = 'sl/toggle';
+DO $$
+  // The sloppy run made a global of its own; take it away, so that strict mode
+  // has something to refuse.
+  delete globalThis.toggle_global;
+  try {
+    pljs.require('sl/toggle');
+    pljs.elog(ERROR, 'should not reach here');
+  } catch (e) {
+    pljs.elog(INFO, 'strict again: ' + e.name);
+  }
+$$ LANGUAGE pljs;
+INFO:  strict again: ReferenceError
+-- Errors in a sloppy module still point into its own source.
+INSERT INTO pljs.modules (path, source, sloppy) VALUES
+  ('sl/throws', E'var a = 1;\nthrow new Error("sloppy failure");', true);
+DO $$
+  try {
+    pljs.require('sl/throws');
+  } catch (e) {
+    pljs.elog(INFO, e.message + ' ' + e.stack.split('\n')[0].replace(/#[0-9]+/, '#N').trim());
+  }
+$$ LANGUAGE pljs;
+INFO:  sloppy failure at <anonymous> (pljs:sl/throws#N:2:16)
+DELETE FROM pljs.modules;
+-- Cleanup
+DROP FUNCTION circle_info_chained(float8);
+DROP FUNCTION test_module_import();
+DROP FUNCTION circle_info(float8);
+DROP FUNCTION check_number(integer);
+DROP FUNCTION test_module_require();
+DROP FUNCTION circle_info_cjs(float8);
+DROP FUNCTION check_number_cjs(integer);
+DELETE FROM pljs.modules;

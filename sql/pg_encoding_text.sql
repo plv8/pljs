@@ -154,5 +154,27 @@ BEGIN
 END $$;
 INSERT INTO et_table VALUES (1);
 
+-- 6) A custom language handler in a LATIN1 database: source and argument
+-- names are converted from LATIN1 to UTF-8 once before transpilation, and
+-- transpiled UTF-8 code (including characters outside LATIN1 such as U+2713)
+-- is passed directly to QuickJS without round-tripping through LATIN1.
+CREATE FUNCTION et_lang_handler() RETURNS language_handler LANGUAGE pljs AS $$
+  return '/* \u2713 */ ' +
+         arguments[0].replace(/RET_ET/g, "if ('\u2713'.length !== 1) throw new Error('bad utf8'); return");
+$$;
+CREATE TRUSTED LANGUAGE et_lang
+  HANDLER et_lang_handler
+  INLINE pljs_inline_handler
+  VALIDATOR pljs_call_validator;
+DO $$
+BEGIN
+  EXECUTE format('CREATE FUNCTION et_transpiled(%I int4) RETURNS text '
+                 'LANGUAGE et_lang AS %L', 'n' || chr(241),
+                 'RET_ET ''' || chr(233) || ''' + n' || chr(241) || ';');
+  EXECUTE format('DO %L LANGUAGE et_lang',
+                 'pljs.elog(NOTICE, ''inline: '' + (''' || chr(233) || ''' === ''\u00e9'')); RET_ET 0;');
+END $$;
+SELECT et_transpiled(1) = chr(233) || '1' AS transpiled;
+
 \c :et_regress_db
 DROP DATABASE pljs_et_latin1;

@@ -1,0 +1,290 @@
+-- ============================================================
+-- import statements at the top of a function or DO block
+-- ============================================================
+INSERT INTO pljs.modules (path, source) VALUES
+  ('si/math', 'export const add = (a, b) => a + b; export const PI = 3; export default function twice(n) { return n * 2; }'),
+  ('si/cjs', 'exports.name = "commonjs"; exports.count = 3;'),
+  ('si/state', 'export const state = { calls: 0 }; export function tick() { return ++state.calls; }'),
+  ('si/side_effect', 'globalThis.__side_effects = (globalThis.__side_effects || 0) + 1;');
+
+-- Named, default and namespace imports.
+CREATE FUNCTION si_named(a int, b int) RETURNS int AS $$
+  import { add } from "si/math";
+  return add(a, b);
+$$ LANGUAGE pljs;
+
+CREATE FUNCTION si_default(n int) RETURNS int AS $$
+  import twice from "si/math";
+  return twice(n);
+$$ LANGUAGE pljs;
+
+CREATE FUNCTION si_namespace() RETURNS text AS $$
+  import * as math from "si/math";
+  return Object.keys(math).sort().join(',');
+$$ LANGUAGE pljs;
+
+SELECT si_named(2, 3), si_default(21), si_namespace();
+
+-- Several imports, comments around them, a multi-line one, no semicolons, a
+-- CommonJS module, and one imported for its side effect alone.
+CREATE FUNCTION si_many(n int) RETURNS text AS $$
+  // the imports
+  import twice, { add,
+    PI /* the constant */ } from 'si/math'  // from a comment: "x"; import
+  import cjs from "si/cjs";
+  /* more */ import "si/side_effect";
+  return [twice(n), add(n, PI), cjs.name, cjs.count].join(' ');
+$$ LANGUAGE pljs;
+
+SELECT si_many(10);
+
+-- Only imports at the very start are imports.
+CREATE FUNCTION si_late() RETURNS int AS $$
+  var x = 1;
+  import { add } from "si/math";
+  return add(x, 1);
+$$ LANGUAGE pljs;
+
+-- ============================================================
+-- A module is shared by every function that imports it
+-- ============================================================
+CREATE FUNCTION si_tick_a() RETURNS int AS $$
+  import { tick } from "si/state";
+  return tick();
+$$ LANGUAGE pljs;
+
+CREATE FUNCTION si_tick_b() RETURNS int AS $$
+  import { state } from "si/state";
+  return state.calls;
+$$ LANGUAGE pljs;
+
+SELECT si_tick_a(), si_tick_a(), si_tick_b();
+
+-- It is also the instance pljs.import() gives.
+DO $$
+  pljs.elog(INFO, pljs.import('si/state').state.calls);
+$$ LANGUAGE pljs;
+
+-- ============================================================
+-- DO blocks, triggers, set-returning functions, procedures
+-- ============================================================
+DO $$
+  import { add } from "si/math";
+  pljs.elog(INFO, 'do block: ' + add(20, 22));
+$$ LANGUAGE pljs;
+
+CREATE TABLE si_t (id int, doubled int);
+CREATE FUNCTION si_trigger() RETURNS trigger AS $$
+  import twice from "si/math";
+  NEW.doubled = twice(NEW.id);
+  return NEW;
+$$ LANGUAGE pljs;
+CREATE TRIGGER si_trigger BEFORE INSERT ON si_t
+  FOR EACH ROW EXECUTE FUNCTION si_trigger();
+INSERT INTO si_t (id) VALUES (1), (2), (3);
+SELECT * FROM si_t ORDER BY id;
+
+CREATE FUNCTION si_series(n int) RETURNS SETOF int AS $$
+  import { add } from "si/math";
+  for (var i = 1; i <= n; i++) {
+    pljs.return_next(add(i, 100));
+  }
+$$ LANGUAGE pljs;
+SELECT * FROM si_series(3);
+
+CREATE PROCEDURE si_proc() AS $$
+  import { PI } from "si/math";
+  pljs.elog(INFO, 'procedure: ' + PI);
+$$ LANGUAGE pljs;
+CALL si_proc();
+
+-- ============================================================
+-- Functions that import are still globals, and are modules (so strict)
+-- ============================================================
+CREATE FUNCTION si_calls_other() RETURNS int AS $$
+  return si_default(5) + 1;
+$$ LANGUAGE pljs;
+SELECT si_calls_other();
+
+CREATE FUNCTION si_strict() RETURNS int AS $$
+  import { PI } from "si/math";
+  undeclared_variable = PI;
+  return undeclared_variable;
+$$ LANGUAGE pljs;
+SELECT si_strict();
+
+-- ============================================================
+-- Errors
+-- ============================================================
+-- Created before the module exists; failing when called, and working once it does.
+CREATE FUNCTION si_early() RETURNS text AS $$
+  import { late } from "si/not_yet";
+  return late;
+$$ LANGUAGE pljs;
+SELECT si_early();
+INSERT INTO pljs.modules (path, source) VALUES ('si/not_yet', 'export const late = "arrived";');
+SELECT si_early();
+
+-- A syntax error in the body or in an import is found when the function is created.
+CREATE FUNCTION si_bad_body() RETURNS int AS $$
+  import { add } from "si/math";
+  return ( ;
+$$ LANGUAGE pljs;
+CREATE FUNCTION si_bad_import() RETURNS int AS $$
+  import { from "si/math";
+  return 1;
+$$ LANGUAGE pljs;
+
+-- A name the module does not export.
+CREATE FUNCTION si_missing_name() RETURNS int AS $$
+  import { nothing } from "si/math";
+  return nothing;
+$$ LANGUAGE pljs;
+-- (The message names the module as the loader knows it, with a generation
+-- that changes; it is hidden here.)
+DO $$
+  try {
+    pljs.execute('SELECT si_missing_name()');
+    pljs.elog(ERROR, 'should not reach here');
+  } catch (e) {
+    pljs.elog(INFO, e.message.replace(/#[0-9]+/, '#N'));
+  }
+$$ LANGUAGE pljs;
+
+-- A relative path has no module to be relative to.
+CREATE FUNCTION si_relative() RETURNS int AS $$
+  import { add } from "./math";
+  return add(1, 1);
+$$ LANGUAGE pljs;
+SELECT si_relative();
+
+-- A module that throws while it is evaluated.
+INSERT INTO pljs.modules (path, source) VALUES ('si/throws', 'throw new Error("module failed"); export const x = 1;');
+CREATE FUNCTION si_throwing_module() RETURNS int AS $$
+  import { x } from "si/throws";
+  return x;
+$$ LANGUAGE pljs;
+DO $$
+  try {
+    pljs.execute('SELECT si_throwing_module()');
+    pljs.elog(ERROR, 'should not reach here');
+  } catch (e) {
+    pljs.elog(INFO, e.message);
+  }
+$$ LANGUAGE pljs;
+-- Fixed, and it works without a restart.
+UPDATE pljs.modules SET source = 'export const x = 99;' WHERE path = 'si/throws';
+SELECT si_throwing_module();
+
+-- Errors point at the function's own lines, as they do without imports.
+CREATE FUNCTION si_line() RETURNS int AS $$
+  import { add } from "si/math";
+
+  throw new Error("on the fourth line");
+$$ LANGUAGE pljs;
+SELECT si_line();
+
+CREATE FUNCTION si_line_plain() RETURNS int AS $$
+
+  throw new Error("on the third line");
+$$ LANGUAGE pljs;
+SELECT si_line_plain();
+
+-- ============================================================
+-- A function that imports follows its modules when they change
+-- ============================================================
+INSERT INTO pljs.modules (path, source) VALUES
+  ('si/leaf', 'export const v = 1;'),
+  ('si/mid', 'import { v } from "si/leaf"; export const mid = v * 10;');
+
+CREATE FUNCTION si_value() RETURNS int AS $$
+  import { mid } from "si/mid";
+  return mid;
+$$ LANGUAGE pljs;
+
+SELECT si_value();
+SELECT si_value();
+
+-- UPDATE of the function's module, and of a module that module imports.
+UPDATE pljs.modules SET source = 'import { v } from "si/leaf"; export const mid = v * 20;' WHERE path = 'si/mid';
+SELECT si_value();
+UPDATE pljs.modules SET source = 'export const v = 3;' WHERE path = 'si/leaf';
+SELECT si_value();
+
+-- Inside a transaction, and undone by a rollback.
+BEGIN;
+UPDATE pljs.modules SET source = 'export const v = 4;' WHERE path = 'si/leaf';
+SELECT si_value();
+ROLLBACK;
+SELECT si_value();
+
+-- DELETE, then INSERT.
+DELETE FROM pljs.modules WHERE path = 'si/leaf';
+SELECT si_value();
+INSERT INTO pljs.modules (path, source) VALUES ('si/leaf', 'export const v = 5;');
+SELECT si_value();
+
+-- Another session changes a module while this one has the function cached.
+\! psql -X -q -d contrib_regression -o /dev/null -c "UPDATE pljs.modules SET source = 'export const v = 6;' WHERE path = 'si/leaf'"
+SELECT si_value();
+
+-- The function itself replaced: new body, new imports.
+CREATE OR REPLACE FUNCTION si_value() RETURNS int AS $$
+  import { v } from "si/leaf";
+  return v + 1000;
+$$ LANGUAGE pljs;
+SELECT si_value();
+
+-- Replaced by one with no imports at all.
+CREATE OR REPLACE FUNCTION si_value() RETURNS int AS $$ return -1; $$ LANGUAGE pljs;
+SELECT si_value();
+UPDATE pljs.modules SET source = 'export const v = 7;' WHERE path = 'si/leaf';
+SELECT si_value();
+
+-- A function that is running when its modules change: the nested call finds it
+-- stale and compiles it again, which must not free the call that is running.
+INSERT INTO pljs.modules (path, source) VALUES ('si/rec', 'export const v = 1;');
+CREATE FUNCTION si_recurse(n int) RETURNS text AS $$
+  import { v } from "si/rec";
+  var before = v;
+  var inner = "";
+  if (n > 0) {
+    pljs.execute("UPDATE pljs.modules SET source = 'export const v = " + (v + 1) + ";' WHERE path = 'si/rec'");
+    inner = pljs.execute("SELECT si_recurse($1) AS r", [n - 1])[0].r;
+  }
+  return before + "(" + inner + ")";
+$$ LANGUAGE pljs;
+SELECT si_recurse(3);
+SELECT si_recurse(0);
+
+-- A package, and a dependency range, through a static import.
+INSERT INTO pljs.packages (name, version, entry_point) VALUES ('SiPkg', '1.0.0', 'index'), ('SiPkg', '1.2.0', 'index');
+INSERT INTO pljs.modules (path, source, package_name, package_version) VALUES
+  ('index', 'export const which = "1.0.0";', 'SiPkg', '1.0.0'),
+  ('index', 'import { helper } from "./lib/helper"; export const which = "1.2.0 " + helper;', 'SiPkg', '1.2.0'),
+  ('lib/helper', 'export const helper = "helped";', 'SiPkg', '1.2.0');
+CREATE FUNCTION si_pkg() RETURNS text AS $$
+  import { which } from "SiPkg";
+  return which;
+$$ LANGUAGE pljs;
+SELECT si_pkg();
+INSERT INTO pljs.packages (name, version, entry_point) VALUES ('SiPkg', '1.3.0', 'index');
+INSERT INTO pljs.modules (path, source, package_name, package_version) VALUES
+  ('index', 'export const which = "1.3.0";', 'SiPkg', '1.3.0');
+SELECT si_pkg();
+
+-- ============================================================
+-- Resetting
+-- ============================================================
+SELECT pljs_reset();
+SELECT si_named(1, 2), si_value(), si_pkg();
+
+-- Cleanup
+DROP FUNCTION si_named(int, int), si_default(int), si_namespace(), si_many(int),
+  si_tick_a(), si_tick_b(), si_series(int),
+  si_calls_other(), si_strict(), si_early(), si_missing_name(), si_relative(),
+  si_throwing_module(), si_recurse(int), si_line(), si_line_plain(), si_value(), si_pkg(), si_trigger() CASCADE;
+DROP PROCEDURE si_proc();
+DROP TABLE si_t;
+DELETE FROM pljs.modules;
+DELETE FROM pljs.packages;
