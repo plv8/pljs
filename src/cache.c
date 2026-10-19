@@ -89,6 +89,9 @@ void pljs_cache_init(void) {
  */
 static void pljs_cleanup_context(pljs_context_cache_value *cache_entry) {
   JSContext *ctx = cache_entry->ctx;
+  JSRuntime *runtime = JS_GetRuntime(ctx);
+  JSValue global_obj = JS_GetGlobalObject(ctx);
+  JSValue pljs = JS_GetPropertyStr(ctx, global_obj, "pljs");
 
   /* Free all cached function JSValues for this context. */
   if (cache_entry->function_hash_table != NULL) {
@@ -106,7 +109,43 @@ static void pljs_cleanup_context(pljs_context_cache_value *cache_entry) {
     }
   }
 
+  /*
+   * Overwrite all own properties on pljs and globalThis with undefined so
+   * user-attached closures and functions release their realm references
+   * immediately.
+   */
+  JSPropertyEnum *tab;
+  uint32_t len;
+  if (!JS_IsUndefined(pljs) && !JS_IsNull(pljs) &&
+      JS_GetOwnPropertyNames(ctx, &tab, &len, pljs,
+                             JS_GPN_STRING_MASK | JS_GPN_SYMBOL_MASK) == 0) {
+    for (uint32_t i = 0; i < len; i++) {
+      if (JS_SetProperty(ctx, pljs, tab[i].atom, JS_UNDEFINED) < 0) {
+        JS_FreeValue(ctx, JS_GetException(ctx));
+      }
+      JS_FreeAtom(ctx, tab[i].atom);
+    }
+    js_free(ctx, tab);
+  }
+
+  if (JS_GetOwnPropertyNames(ctx, &tab, &len, global_obj,
+                             JS_GPN_STRING_MASK | JS_GPN_SYMBOL_MASK) == 0) {
+    for (uint32_t i = 0; i < len; i++) {
+      if (JS_SetProperty(ctx, global_obj, tab[i].atom, JS_UNDEFINED) < 0) {
+        JS_FreeValue(ctx, JS_GetException(ctx));
+      }
+      JS_FreeAtom(ctx, tab[i].atom);
+    }
+    js_free(ctx, tab);
+  }
+
+  JS_FreeValue(ctx, pljs);
+  JS_FreeValue(ctx, global_obj);
+
   JS_FreeContext(ctx);
+  if (runtime != NULL) {
+    JS_RunGC(runtime);
+  }
 }
 
 /**
@@ -398,16 +437,19 @@ void pljs_cache_context_add(Oid user_id, Oid owner_id, JSContext *ctx) {
  */
 void pljs_cache_context_remove(Oid user_id, Oid owner_id) {
   pljs_context_key key;
-  bool found;
 
   pljs_make_context_key(&key, user_id, owner_id);
 
   pljs_context_cache_value *hvalue = (pljs_context_cache_value *)hash_search(
-      pljs_context_HashTable, (void *)&key, HASH_REMOVE, &found);
+      pljs_context_HashTable, (void *)&key, HASH_FIND, NULL);
 
   if (hvalue) {
-    // Destroys the cache and its #MemoryContext in the process.
-    hash_destroy(hvalue->function_hash_table);
+    HTAB *function_hash_table = hvalue->function_hash_table;
+    MemoryContext function_memory_context = hvalue->function_memory_context;
+
+    hash_search(pljs_context_HashTable, (void *)&key, HASH_REMOVE, NULL);
+    hash_destroy(function_hash_table);
+    MemoryContextDelete(function_memory_context);
   }
 }
 

@@ -437,6 +437,132 @@ RESET ROLE;
 DROP POLICY pljs_modules_rls_pol ON pljs.modules;
 ALTER TABLE pljs.modules DISABLE ROW LEVEL SECURITY;
 DROP FUNCTION test_rls_hidden();
+-- 11. Bytecode fallback to source on invalid/incompatible bytecode, automatic
+--     clearing of stale bytecode when source is updated, and relative import
+--     resolution when bytecode was compiled with a different module name
+INSERT INTO pljs.modules (path, source, bytecode) VALUES
+  ('bc_fallback_hdr', 'export function fbHdr() { return 101; }', E'\\x00'),
+  ('bc_fallback_ver', 'export function fbVer() { return 202; }', E'\\xff0100'),
+  ('bc_no_source_bad', NULL, E'\\xff0100');
+CREATE OR REPLACE FUNCTION test_bc_fallback() RETURNS int[] LANGUAGE pljs AS $$
+  import { fbHdr } from 'bc_fallback_hdr';
+  import { fbVer } from 'bc_fallback_ver';
+  return [fbHdr(), fbVer()];
+$$;
+SELECT test_bc_fallback();
+ test_bc_fallback 
+------------------
+ {101,202}
+(1 row)
+
+-- When source IS NULL, invalid bytecode still fails
+DO $$
+BEGIN
+  BEGIN
+    CREATE OR REPLACE FUNCTION test_bc_no_src() RETURNS int LANGUAGE pljs AS $fn$
+      import { x } from 'bc_no_source_bad';
+      return x;
+    $fn$;
+    PERFORM test_bc_no_src();
+    RAISE EXCEPTION 'Expected invalid bytecode without source to fail';
+  EXCEPTION WHEN OTHERS THEN
+    RAISE NOTICE 'Caught expected invalid bytecode error when source is NULL';
+  END;
+END;
+$$;
+NOTICE:  Caught expected invalid bytecode error when source is NULL
+DROP FUNCTION IF EXISTS test_bc_no_src();
+NOTICE:  function test_bc_no_src() does not exist, skipping
+-- Updating source without specifying bytecode clears stale bytecode automatically
+DO LANGUAGE pljs $$
+  const src = 'export function staleCheck() { return 10; }';
+  const bc = pljs.compile_bytecode(src, 'stale_bc_mod');
+  pljs.execute(
+    'INSERT INTO pljs.modules (path, source, bytecode) VALUES ($1, $2, $3)',
+    ['stale_bc_mod', src, bc]
+  );
+$$;
+CREATE OR REPLACE FUNCTION test_stale_bc() RETURNS int LANGUAGE pljs AS $$
+  import { staleCheck } from 'stale_bc_mod';
+  return staleCheck();
+$$;
+SELECT test_stale_bc();
+ test_stale_bc 
+---------------
+            10
+(1 row)
+
+UPDATE pljs.modules
+SET source = 'export function staleCheck() { return 20; }'
+WHERE path = 'stale_bc_mod';
+SELECT bytecode IS NULL AS bytecode_cleared FROM pljs.modules WHERE path = 'stale_bc_mod';
+ bytecode_cleared 
+------------------
+ t
+(1 row)
+
+SELECT test_stale_bc();
+ test_stale_bc 
+---------------
+            20
+(1 row)
+
+-- Also verify INSERT ... ON CONFLICT DO UPDATE SET source = EXCLUDED.source clears stale bytecode
+DO LANGUAGE pljs $$
+  const src = 'export function staleCheck() { return 25; }';
+  const bc = pljs.compile_bytecode(src, 'stale_bc_mod');
+  pljs.execute(
+    'UPDATE pljs.modules SET source = $1, bytecode = $2 WHERE path = $3',
+    [src, bc, 'stale_bc_mod']
+  );
+$$;
+SELECT test_stale_bc();
+ test_stale_bc 
+---------------
+            25
+(1 row)
+
+INSERT INTO pljs.modules (path, source)
+VALUES ('stale_bc_mod', 'export function staleCheck() { return 30; }')
+ON CONFLICT (path) WHERE package_name IS NULL
+DO UPDATE SET source = EXCLUDED.source;
+SELECT bytecode IS NULL AS upsert_bytecode_cleared FROM pljs.modules WHERE path = 'stale_bc_mod';
+ upsert_bytecode_cleared 
+-------------------------
+ t
+(1 row)
+
+SELECT test_stale_bc();
+ test_stale_bc 
+---------------
+            30
+(1 row)
+
+DROP FUNCTION test_stale_bc();
+-- Bytecode compiled with a mismatched module name resolves relative imports and
+-- requires against its actual storage location in pljs.modules
+DO LANGUAGE pljs $$
+  const bc = pljs.compile_bytecode(
+    'import { doubleLeaf } from "../helper.js"; export function fromRelBc(x) { const h = require("../helper.js"); return doubleLeaf(x) + h.doubleLeaf(x); }',
+    'wrong/other/dir/mod.js'
+  );
+  pljs.execute(
+    'INSERT INTO pljs.modules (path, bytecode, requires, is_trusted) VALUES ($1, $2, $3, true)',
+    ['pkg/sub/rel_bc.js', bc, ['pkg/helper.js']]
+  );
+$$;
+CREATE OR REPLACE FUNCTION test_relocated_bc(x int) RETURNS int LANGUAGE pljs AS $$
+  import { fromRelBc } from 'pkg/sub/rel_bc.js';
+  return fromRelBc(x);
+$$;
+SELECT test_relocated_bc(5);
+ test_relocated_bc 
+-------------------
+                42
+(1 row)
+
+DROP FUNCTION test_relocated_bc(int);
+DROP FUNCTION test_bc_fallback();
 DROP FUNCTION test_pljs_native_static_import(int, int);
 DROP FUNCTION test_esm_singleton();
 DROP FUNCTION test_untrusted_tle();

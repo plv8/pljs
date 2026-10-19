@@ -183,6 +183,9 @@ Datum pljs_modules_changed(PG_FUNCTION_ARGS) {
   if (TRIGGER_FIRED_FOR_ROW(event)) {
     HeapTuple oldtuple = NULL;
     HeapTuple newtuple = NULL;
+    TupleDesc tupdesc = RelationGetDescr(rel);
+    bool is_modules_rel = (strcmp(RelationGetRelationName(rel), "modules") == 0 &&
+                           tupdesc->natts >= Amodule_bytecode);
 
     if (TRIGGER_FIRED_BY_UPDATE(event)) {
       oldtuple = trigdata->tg_trigtuple;
@@ -193,24 +196,20 @@ Datum pljs_modules_changed(PG_FUNCTION_ARGS) {
       newtuple = trigdata->tg_trigtuple;
     }
 
-    if (!superuser() &&
-        strcmp(RelationGetRelationName(rel), "modules") == 0 &&
-        RelationGetDescr(rel)->natts >= Amodule_bytecode) {
-      
+    if (!superuser() && is_modules_rel) {
       if (oldtuple && HeapTupleIsValid(oldtuple)) {
         bool isnull = true;
 
-        (void)heap_getattr(oldtuple, Amodule_bytecode, RelationGetDescr(rel),
-                           &isnull);
+        (void)heap_getattr(oldtuple, Amodule_bytecode, tupdesc, &isnull);
         if (!isnull) {
           ereport(ERROR,
                   (errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
                    errmsg("must be superuser to modify or delete modules with precompiled bytecode")));
         }
 
-        if (RelationGetDescr(rel)->natts >= Amodule_is_trusted) {
-          Datum trusted_datum = heap_getattr(oldtuple, Amodule_is_trusted,
-                                             RelationGetDescr(rel), &isnull);
+        if (tupdesc->natts >= Amodule_is_trusted) {
+          Datum trusted_datum =
+              heap_getattr(oldtuple, Amodule_is_trusted, tupdesc, &isnull);
           if (!isnull && !DatumGetBool(trusted_datum)) {
             ereport(ERROR,
                     (errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
@@ -222,21 +221,96 @@ Datum pljs_modules_changed(PG_FUNCTION_ARGS) {
       if (newtuple && HeapTupleIsValid(newtuple)) {
         bool isnull = true;
 
-        (void)heap_getattr(newtuple, Amodule_bytecode, RelationGetDescr(rel),
-                           &isnull);
+        (void)heap_getattr(newtuple, Amodule_bytecode, tupdesc, &isnull);
         if (!isnull) {
           ereport(ERROR,
                   (errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
                    errmsg("must be superuser to write precompiled bytecode in pljs.modules")));
         }
 
-        if (RelationGetDescr(rel)->natts >= Amodule_is_trusted) {
-          Datum trusted_datum = heap_getattr(newtuple, Amodule_is_trusted,
-                                             RelationGetDescr(rel), &isnull);
+        if (tupdesc->natts >= Amodule_is_trusted) {
+          Datum trusted_datum =
+              heap_getattr(newtuple, Amodule_is_trusted, tupdesc, &isnull);
           if (!isnull && !DatumGetBool(trusted_datum)) {
             ereport(ERROR,
                     (errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
                      errmsg("must be superuser to write untrusted modules in pljs.modules")));
+          }
+        }
+      }
+    }
+
+    /*
+     * If source is updated on a row that has precompiled bytecode and the
+     * UPDATE did not also supply new bytecode, clear the stale bytecode so the
+     * updated source is compiled instead of silently executing the old
+     * bytecode.
+     */
+    if (TRIGGER_FIRED_BEFORE(event) && TRIGGER_FIRED_BY_UPDATE(event) &&
+        is_modules_rel && oldtuple && HeapTupleIsValid(oldtuple) && newtuple &&
+        HeapTupleIsValid(newtuple)) {
+      bool old_bc_null = true;
+      bool new_bc_null = true;
+      Datum old_bc_datum =
+          heap_getattr(oldtuple, Amodule_bytecode, tupdesc, &old_bc_null);
+      Datum new_bc_datum =
+          heap_getattr(newtuple, Amodule_bytecode, tupdesc, &new_bc_null);
+
+      if (!old_bc_null && !new_bc_null) {
+        bytea *old_bc = DatumGetByteaPP(old_bc_datum);
+        bytea *new_bc = DatumGetByteaPP(new_bc_datum);
+        size_t old_bc_len = VARSIZE_ANY_EXHDR(old_bc);
+        size_t new_bc_len = VARSIZE_ANY_EXHDR(new_bc);
+        bool bc_unchanged =
+            (old_bc_len == new_bc_len &&
+             memcmp(VARDATA_ANY(old_bc), VARDATA_ANY(new_bc), old_bc_len) == 0);
+
+        if ((Pointer)old_bc != DatumGetPointer(old_bc_datum)) {
+          pfree(old_bc);
+        }
+        if ((Pointer)new_bc != DatumGetPointer(new_bc_datum)) {
+          pfree(new_bc);
+        }
+
+        if (bc_unchanged) {
+          bool old_src_null = true;
+          bool new_src_null = true;
+          Datum old_src_datum =
+              heap_getattr(oldtuple, Amodule_source, tupdesc, &old_src_null);
+          Datum new_src_datum =
+              heap_getattr(newtuple, Amodule_source, tupdesc, &new_src_null);
+          bool src_changed = false;
+
+          if (!new_src_null) {
+            if (old_src_null) {
+              src_changed = true;
+            } else {
+              text *old_src = DatumGetTextPP(old_src_datum);
+              text *new_src = DatumGetTextPP(new_src_datum);
+              size_t old_src_len = VARSIZE_ANY_EXHDR(old_src);
+              size_t new_src_len = VARSIZE_ANY_EXHDR(new_src);
+
+              src_changed = (old_src_len != new_src_len ||
+                             memcmp(VARDATA_ANY(old_src), VARDATA_ANY(new_src),
+                                    old_src_len) != 0);
+
+              if ((Pointer)old_src != DatumGetPointer(old_src_datum)) {
+                pfree(old_src);
+              }
+              if ((Pointer)new_src != DatumGetPointer(new_src_datum)) {
+                pfree(new_src);
+              }
+            }
+          }
+
+          if (src_changed) {
+            int repl_cols[1] = {Amodule_bytecode};
+            Datum repl_vals[1] = {(Datum)0};
+            bool repl_isnull[1] = {true};
+
+            newtuple = heap_modify_tuple_by_cols(newtuple, tupdesc, 1,
+                                                 repl_cols, repl_vals,
+                                                 repl_isnull);
           }
         }
       }
@@ -1566,10 +1640,6 @@ static bool pljs_running_module(JSContext *ctx, int level,
   return ok;
 }
 
-// Active canonical module name during JS_ResolveModule of a bytecode module,
-// used when bytecode was compiled with 1-arg pljs.compile_bytecode(source).
-static const char *resolving_bytecode_module_name = NULL;
-
 /**
  * @brief QuickJS module normalizer: the canonical name of what a module's
  * `import` asked for.
@@ -1593,10 +1663,6 @@ char *pljs_module_normalize(JSContext *ctx, const char *base_name,
   pljs_clear_acl_failure();
 
   has_importer = pljs_module_id_parse(base_name, &importer);
-  if (!has_importer && resolving_bytecode_module_name != NULL) {
-    has_importer =
-        pljs_module_id_parse(resolving_bytecode_module_name, &importer);
-  }
 
   pljs_resolve_result result =
       pljs_resolve_spec(name, has_importer ? &importer : NULL, &id);
@@ -1800,6 +1866,111 @@ static JSValue pljs_compile_sloppy_commonjs(JSContext *ctx, const char *name,
 }
 
 /**
+ * @brief Relocate Atom 0 (the module's own name and debug filename) in a
+ * serialized QuickJS module bytecode buffer to the canonical storage name
+ * @p name.
+ *
+ * In QuickJS bytecode (`JS_WriteModule` + `JS_WriteObjectAtoms`), `m->module_name`
+ * (and `b->debug.filename` for the module body and inner functions) is always
+ * written as the very first user atom (`idx_to_atom[0]`) immediately following
+ * the 1-byte `BC_VERSION` and LEB128 `idx_to_atom_count`.  Replacing Atom 0
+ * with @p name ensures that static `import`, dynamic `import()`,
+ * `pljs.import()`, `require()`, `requires` checks, and `ctx->loaded_modules`
+ * singleton lookups always use the module's actual storage location in
+ * `pljs.modules` regardless of what module name was passed when compiling the
+ * bytecode.
+ */
+static uint8_t *pljs_relocate_bytecode_module_name(JSContext *ctx,
+                                                   const uint8_t *buf,
+                                                   size_t buf_len,
+                                                   const char *name,
+                                                   size_t *out_len) {
+  *out_len = 0;
+  if (buf_len < 3) {
+    return NULL;
+  }
+
+  size_t pos = 1;
+  uint32_t atom_count = 0;
+  int shift = 0;
+  while (pos < buf_len) {
+    uint8_t byte = buf[pos++];
+    atom_count |= (uint32_t)(byte & 0x7f) << shift;
+    if ((byte & 0x80) == 0) {
+      break;
+    }
+    shift += 7;
+    if (shift >= 32) {
+      return NULL;
+    }
+  }
+  if (atom_count == 0 || pos >= buf_len) {
+    return NULL;
+  }
+
+  size_t atom0_start = pos;
+  uint32_t str_hdr = 0;
+  shift = 0;
+  while (pos < buf_len) {
+    uint8_t byte = buf[pos++];
+    str_hdr |= (uint32_t)(byte & 0x7f) << shift;
+    if ((byte & 0x80) == 0) {
+      break;
+    }
+    shift += 7;
+    if (shift >= 32) {
+      return NULL;
+    }
+  }
+
+  uint32_t str_len = str_hdr >> 1;
+  uint32_t is_wide = str_hdr & 1;
+  size_t str_bytes = (size_t)str_len << is_wide;
+  if (str_bytes > buf_len - pos) {
+    return NULL;
+  }
+  size_t atom0_end = pos + str_bytes;
+
+  JSValue name_val = JS_NewString(ctx, name);
+  if (JS_IsException(name_val)) {
+    JS_FreeValue(ctx, JS_GetException(ctx));
+    return NULL;
+  }
+
+  size_t name_obj_len = 0;
+  uint8_t *name_obj_buf = JS_WriteObject(ctx, &name_obj_len, name_val, 0);
+  JS_FreeValue(ctx, name_val);
+  if (name_obj_buf == NULL || name_obj_len < 4) {
+    if (name_obj_buf != NULL) {
+      js_free(ctx, name_obj_buf);
+    }
+    JS_FreeValue(ctx, JS_GetException(ctx));
+    return NULL;
+  }
+
+  /*
+   * JS_WriteObject on a string writes:
+   *   [0]: BC_VERSION
+   *   [1]: 0 (atom count)
+   *   [2]: BC_TAG_STRING
+   *   [3..name_obj_len): JS_WriteString encoding (leb128(len<<1|wide) + bytes)
+   */
+  const uint8_t *enc_str = name_obj_buf + 3;
+  size_t enc_str_len = name_obj_len - 3;
+  size_t tail_len = buf_len - atom0_end;
+  size_t new_len = atom0_start + enc_str_len + tail_len;
+
+  uint8_t *reloc = (uint8_t *)palloc(new_len);
+  memcpy(reloc, buf, atom0_start);
+  memcpy(reloc + atom0_start, enc_str, enc_str_len);
+  memcpy(reloc + atom0_start + enc_str_len, buf + atom0_end, tail_len);
+
+  js_free(ctx, name_obj_buf);
+  *out_len = new_len;
+  return reloc;
+}
+
+/**
  * @brief QuickJS module loader: compiles the stored module a canonical name
  * names.
  *
@@ -1807,7 +1978,8 @@ static JSValue pljs_compile_sloppy_commonjs(JSContext *ctx, const char *name,
  * `module.exports`, so the two kinds import each other.  The wrapper starts on
  * the source's first line, so errors still point into the stored source.
  * Precompiled QuickJS bytecode (`bytecode BYTEA`) is deserialized directly via
- * `JS_ReadObject`.
+ * `JS_ReadObject`, falling back to `source` when `source` is also present and
+ * the bytecode cannot be loaded (e.g. after a QuickJS version upgrade).
  */
 JSModuleDef *pljs_module_loader(JSContext *ctx, const char *name,
                                 void *opaque) {
@@ -1873,61 +2045,70 @@ JSModuleDef *pljs_module_loader(JSContext *ctx, const char *name,
     size_t buf_len = VARSIZE_ANY_EXHDR(bytecode);
     if (buf_len < 2 || buf[0] == 0) {
       pfree(bytecode);
-      if (source) {
-        pfree(source);
+      if (source == NULL) {
+        module_load_failed = true;
+        JS_ThrowSyntaxError(ctx, "invalid QuickJS bytecode header for '%s'",
+                            name);
+        return NULL;
       }
-      module_load_failed = true;
-      JS_ThrowSyntaxError(ctx, "invalid QuickJS bytecode header for '%s'",
-                          name);
-      return NULL;
+    } else {
+      size_t reloc_len = 0;
+      uint8_t *reloc_buf = pljs_relocate_bytecode_module_name(
+          ctx, buf, buf_len, name, &reloc_len);
+      JSValue func_val =
+          JS_ReadObject(ctx, reloc_buf ? reloc_buf : buf,
+                        reloc_buf ? reloc_len : buf_len, JS_READ_OBJ_BYTECODE);
+      if (reloc_buf) {
+        pfree(reloc_buf);
+      }
+      pfree(bytecode);
+
+      if (JS_IsException(func_val)) {
+        if (source == NULL) {
+          module_load_failed = true;
+          return NULL;
+        }
+        JS_FreeValue(ctx, JS_GetException(ctx));
+      } else if (JS_VALUE_GET_TAG(func_val) != JS_TAG_MODULE) {
+        JS_FreeValue(ctx, func_val);
+        if (source == NULL) {
+          module_load_failed = true;
+          JS_ThrowTypeError(ctx, "bytecode for '%s' is not a compiled module",
+                            name);
+          return NULL;
+        }
+      } else {
+        bool has_source = (source != NULL && source_len > 0);
+        bool commonjs =
+            has_source &&
+            pljs_source_is_commonjs(ctx, (char *)source, source_len);
+        if (source) {
+          pfree(source);
+        }
+
+        int resolve_rc = JS_ResolveModule(ctx, func_val);
+        if (resolve_rc < 0) {
+          JS_FreeValue(ctx, func_val);
+          module_load_failed = true;
+          return NULL;
+        }
+
+        m = (JSModuleDef *)JS_VALUE_GET_PTR(func_val);
+        JS_FreeValue(ctx, func_val);
+
+        if (commonjs || !has_source) {
+          JSValue state = pljs_module_state(ctx);
+          JSValue kinds = JS_GetPropertyStr(ctx, state, "kinds");
+
+          JS_SetPropertyStr(ctx, kinds, name,
+                            commonjs ? JS_TRUE : JS_NewInt32(ctx, 2));
+          JS_FreeValue(ctx, kinds);
+          JS_FreeValue(ctx, state);
+        }
+
+        return m;
+      }
     }
-
-    JSValue func_val = JS_ReadObject(ctx, buf, buf_len, JS_READ_OBJ_BYTECODE);
-    bool has_source = (source != NULL && source_len > 0);
-    bool commonjs =
-        has_source && pljs_source_is_commonjs(ctx, (char *)source, source_len);
-    pfree(bytecode);
-    if (source) {
-      pfree(source);
-    }
-
-    if (JS_IsException(func_val)) {
-      module_load_failed = true;
-      return NULL;
-    }
-
-    if (JS_VALUE_GET_TAG(func_val) != JS_TAG_MODULE) {
-      JS_FreeValue(ctx, func_val);
-      module_load_failed = true;
-      JS_ThrowTypeError(ctx, "bytecode for '%s' is not a compiled module",
-                        name);
-      return NULL;
-    }
-
-    const char *prev_resolving = resolving_bytecode_module_name;
-    resolving_bytecode_module_name = name;
-    int resolve_rc = JS_ResolveModule(ctx, func_val);
-    resolving_bytecode_module_name = prev_resolving;
-    if (resolve_rc < 0) {
-      JS_FreeValue(ctx, func_val);
-      module_load_failed = true;
-      return NULL;
-    }
-
-    m = (JSModuleDef *)JS_VALUE_GET_PTR(func_val);
-    JS_FreeValue(ctx, func_val);
-
-    if (commonjs || !has_source) {
-      JSValue state = pljs_module_state(ctx);
-      JSValue kinds = JS_GetPropertyStr(ctx, state, "kinds");
-
-      JS_SetPropertyStr(ctx, kinds, name,
-                        commonjs ? JS_TRUE : JS_NewInt32(ctx, 2));
-      JS_FreeValue(ctx, kinds);
-      JS_FreeValue(ctx, state);
-    }
-
-    return m;
   }
 
   bool commonjs = pljs_source_is_commonjs(ctx, (char *)source, source_len);
@@ -2303,7 +2484,6 @@ static JSValue pljs_module_load(JSContext *ctx, const char *spec,
   {
     module_depth = saved_depth;
     syntax_check_only = false;
-    resolving_bytecode_module_name = NULL;
 
     JSValue state = pljs_module_state(ctx);
 
@@ -2368,48 +2548,21 @@ JSValue pljs_compile_bytecode_js(JSContext *ctx, JSValueConst this_val,
     return JS_EXCEPTION;
   }
 
-  const char *raw_mod_name = NULL;
-  char *norm_mod_name = NULL;
-  const char *mod_name = "<bytecode_module>";
-  if (argc >= 2 && JS_IsString(argv[1])) {
-    raw_mod_name = JS_ToCString(ctx, argv[1]);
-    if (raw_mod_name && raw_mod_name[0] != '\0') {
-      if (strncmp(raw_mod_name, PLJS_PACKAGE_PREFIX,
-                  strlen(PLJS_PACKAGE_PREFIX)) == 0 ||
-          strncmp(raw_mod_name, PLJS_STANDALONE_PREFIX,
-                  strlen(PLJS_STANDALONE_PREFIX)) == 0) {
-        mod_name = raw_mod_name;
-      } else {
-        const char *clean = pljs_strip_spec_prefix(raw_mod_name);
-        if (strncmp(clean, "plv8-pkg:", 9) == 0) {
-          clean += 9;
-        } else if (strncmp(clean, "plv8:", 5) == 0) {
-          clean += 5;
-        }
-        const char *at = strchr(clean + (clean[0] == '@' ? 1 : 0), '@');
-        if (at != NULL) {
-          const char *slash = strchr(at, '/');
-          if (slash != NULL) {
-            norm_mod_name = psprintf(PLJS_PACKAGE_PREFIX "%s", clean);
-          } else {
-            norm_mod_name = psprintf(PLJS_PACKAGE_PREFIX "%s/index.js", clean);
-          }
-        } else {
-          norm_mod_name = psprintf(PLJS_STANDALONE_PREFIX "%s", clean);
-        }
-        mod_name = norm_mod_name;
-      }
-    }
+  if (argc >= 2 && !JS_IsUndefined(argv[1]) && !JS_IsNull(argv[1]) &&
+      !JS_IsString(argv[1])) {
+    JS_FreeCString(ctx, src);
+    return JS_ThrowTypeError(ctx, "module_name must be a string");
   }
+
+  /*
+   * Use an internal sentinel module name as Atom 0 so it never collides with
+   * user identifiers or string literals in the module body; pljs_module_loader()
+   * relocates Atom 0 to the row's canonical storage name when loading.
+   */
+  const char *mod_name = "\x01pljs_bytecode_module\x01";
 
   JSContext *comp_ctx = JS_NewContext(JS_GetRuntime(ctx));
   if (comp_ctx == NULL) {
-    if (norm_mod_name) {
-      pfree(norm_mod_name);
-    }
-    if (raw_mod_name) {
-      JS_FreeCString(ctx, raw_mod_name);
-    }
     JS_FreeCString(ctx, src);
     return JS_ThrowInternalError(ctx, "could not create a JavaScript context");
   }
@@ -2440,12 +2593,6 @@ JSValue pljs_compile_bytecode_js(JSContext *ctx, JSValueConst this_val,
   }
   syntax_check_only = false;
 
-  if (norm_mod_name) {
-    pfree(norm_mod_name);
-  }
-  if (raw_mod_name) {
-    JS_FreeCString(ctx, raw_mod_name);
-  }
   JS_FreeCString(ctx, src);
 
   if (JS_IsException(obj)) {

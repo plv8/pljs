@@ -179,7 +179,77 @@ $$ LANGUAGE pljs;
 SELECT lru_active_caller();
 SELECT (pljs_info()->>'cached_contexts')::int <= 2 AS bounded_after_nested;
 
+-- Tight eviction loop: verify neither PostgreSQL PLJS Function Cache Contexts
+-- nor QuickJS heap grow unboundedly when contexts with closures on globalThis
+-- and pljs are repeatedly created and evicted.
+SET ROLE pljs_lru_1;
+CREATE OR REPLACE FUNCTION lru_closure_1(n int) RETURNS int AS $$
+  globalThis.held_closure = function(x) { return x + n; };
+  pljs.held_closure = globalThis.held_closure;
+  return pljs.held_closure(1);
+$$ LANGUAGE pljs;
+RESET ROLE;
+
+SET ROLE pljs_lru_2;
+CREATE OR REPLACE FUNCTION lru_closure_2(n int) RETURNS int AS $$
+  globalThis.held_closure = function(x) { return x + n * 2; };
+  pljs.held_closure = globalThis.held_closure;
+  return pljs.held_closure(2);
+$$ LANGUAGE pljs;
+RESET ROLE;
+
+SET ROLE pljs_lru_3;
+CREATE OR REPLACE FUNCTION lru_closure_3(n int) RETURNS int AS $$
+  globalThis.held_closure = function(x) { return x + n * 3; };
+  pljs.held_closure = globalThis.held_closure;
+  return pljs.held_closure(3);
+$$ LANGUAGE pljs;
+RESET ROLE;
+
+DO $$
+DECLARE
+  baseline_malloc bigint;
+  after_malloc bigint;
+  fn_ctx_count bigint;
+BEGIN
+  -- Warm up 5 rounds so initial allocator pools settle.
+  FOR i IN 1..5 LOOP
+    PERFORM lru_closure_1(i);
+    PERFORM lru_closure_2(i);
+    PERFORM lru_closure_3(i);
+  END LOOP;
+
+  baseline_malloc := (pljs_info()->>'malloc_size')::bigint;
+
+  -- Run 100 rounds (300 context creations/evictions against max_cached_contexts = 2).
+  FOR i IN 1..100 LOOP
+    PERFORM lru_closure_1(i);
+    PERFORM lru_closure_2(i);
+    PERFORM lru_closure_3(i);
+  END LOOP;
+
+  after_malloc := (pljs_info()->>'malloc_size')::bigint;
+
+  SELECT count(*) INTO fn_ctx_count
+    FROM pg_backend_memory_contexts
+    WHERE name = 'PLJS Function Cache Context';
+
+  IF fn_ctx_count > 2 THEN
+    RAISE EXCEPTION 'Leaked PLJS Function Cache Contexts: expected <= 2, got %', fn_ctx_count;
+  END IF;
+
+  IF after_malloc - baseline_malloc > 4096 THEN
+    RAISE EXCEPTION 'QuickJS malloc_size grew across evictions: baseline %, after %', baseline_malloc, after_malloc;
+  END IF;
+
+  RAISE NOTICE 'Eviction loop clean: fn_ctx_count=%, malloc_bounded=%', fn_ctx_count, (after_malloc - baseline_malloc) <= 4096;
+END;
+$$;
+
 RESET pljs.max_cached_contexts;
+DROP FUNCTION lru_closure_1(int);
+DROP FUNCTION lru_closure_2(int);
+DROP FUNCTION lru_closure_3(int);
 DROP FUNCTION lru_active_caller();
 DROP FUNCTION lru_fn_1();
 DROP FUNCTION lru_fn_2();

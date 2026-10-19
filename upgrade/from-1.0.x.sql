@@ -86,3 +86,7 @@ CREATE TRIGGER pljs_modules_changed
   AFTER INSERT OR UPDATE OR DELETE OR TRUNCATE ON pljs.packages
   FOR EACH STATEMENT EXECUTE FUNCTION pljs_modules_changed();
 ALTER TABLE pljs.packages ENABLE ALWAYS TRIGGER pljs_modules_changed;
+
+-- Clear any precompiled QuickJS bytecode that may be incompatible across
+-- QuickJS / pljs upgrades so modules fall back to compiling from source.
+UPDATE pljs.modules SET bytecode = NULL WHERE bytecode IS NOT NULL;
