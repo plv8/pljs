@@ -1494,8 +1494,12 @@ static JSContext *pljs_get_user_context(void) {
  * @brief Checks whether a language OID is `pljs` or a custom language whose
  * handler chain resolves to `pljs`.
  */
-static bool pljs_is_js_language(Oid prolang) {
+static bool pljs_is_js_language(Oid prolang, bool *too_deep) {
   Oid current_lang = prolang;
+
+  if (too_deep != NULL) {
+    *too_deep = false;
+  }
 
   for (int depth = 0; depth < PLJS_MAX_LANG_HANDLER_DEPTH; depth++) {
     CHECK_FOR_INTERRUPTS();
@@ -1532,6 +1536,10 @@ static bool pljs_is_js_language(Oid prolang) {
     Form_pg_proc proc_entry = (Form_pg_proc)GETSTRUCT(proctuple);
     current_lang = proc_entry->prolang;
     ReleaseSysCache(proctuple);
+  }
+
+  if (too_deep != NULL) {
+    *too_deep = true;
   }
 
   return false;
@@ -1659,6 +1667,26 @@ static bool pljs_transpile_if_needed(pljs_context *context, Oid lang_oid) {
 
   JSValue transpiler_func = pljs_find_js_function(lanplcallfoid, context->ctx);
   if (JS_IsUndefined(transpiler_func)) {
+    /*
+     * A handler written in a language that is itself handled by a chain of
+     * more than PLJS_MAX_LANG_HANDLER_DEPTH handlers is not found either;
+     * say so, rather than blaming a handler that exists.
+     */
+    HeapTuple handler_tuple =
+        SearchSysCache(PROCOID, ObjectIdGetDatum(lanplcallfoid), 0, 0, 0);
+    if (HeapTupleIsValid(handler_tuple)) {
+      Oid handler_lang = ((Form_pg_proc)GETSTRUCT(handler_tuple))->prolang;
+      bool too_deep = false;
+
+      ReleaseSysCache(handler_tuple);
+      if (!pljs_is_js_language(handler_lang, &too_deep) && too_deep) {
+        ereport(ERROR,
+                (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+                 errmsg("language handler chain is deeper than %d levels",
+                        PLJS_MAX_LANG_HANDLER_DEPTH)));
+      }
+    }
+
     elog(ERROR, "javascript language handler function %u is not found",
          lanplcallfoid);
   }
@@ -3673,7 +3701,7 @@ JSValue pljs_find_js_function(Oid fn_oid, JSContext *ctx) {
     setup_function(NULL, functuple, &context);
     ReleaseSysCache(functuple);
 
-    if (!pljs_is_js_language(prolang)) {
+    if (!pljs_is_js_language(prolang, NULL)) {
       return JS_UNDEFINED;
     }
 

@@ -131,6 +131,7 @@ REGRESS = init-extension function json jsonb json_conv types bytea context \
 	dump_restore \
 	upgrade \
 	language_handler \
+	language_handler_limits \
 	tle_modules
 
 all: deps/quickjs/quickjs.h deps/quickjs/libquickjs.a $(EXTENSION_SQL)
