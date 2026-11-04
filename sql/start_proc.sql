@@ -18,9 +18,8 @@ DO $$ pljs.elog(NOTICE, pljs.current_scope.name); $$ language pljs;
 -- a missing start proc should cause an error
 -- force the creation of a new context
 CREATE ROLE new_context;
-SET ROLE new_context;
-
 SET pljs.start_proc = 'end';
+SET ROLE new_context;
 DO $$ pljs.elog(NOTICE, pljs.current_scope.name); $$ language pljs;
 
 RESET ROLE;
