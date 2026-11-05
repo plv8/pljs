@@ -299,10 +299,15 @@ void pljs_guc_init(void) {
                           (int *)&configuration.memory_limit, 512, 64, 3096,
                           PGC_SUSET, 0, NULL, pljs_assign_memory_limit, NULL);
 
+  /*
+   * The start proc runs as whoever creates the context, so a value planted by
+   * a less privileged role (ALTER DATABASE ... SET, or SET before calling a
+   * SECURITY DEFINER function) would run that role's code as a superuser.
+   */
   DefineCustomStringVariable(
       "pljs.start_proc",
       gettext_noop("PLJS function to run once when PLJS is first used."), NULL,
-      &configuration.start_proc, NULL, PGC_USERSET, 0, NULL, NULL, NULL);
+      &configuration.start_proc, NULL, PGC_SUSET, 0, NULL, NULL, NULL);
 
   DefineCustomBoolVariable(
       "pljs.hooks_enabled",

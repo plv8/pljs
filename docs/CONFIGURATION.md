@@ -8,7 +8,7 @@ PLJS provides configuration options that are available either with the `SET` com
 | ------------------------ | ----------------------------------------------------------------------------- | ------------------------------ |
 | `pljs.execution_timeout` | Execution timeout in seconds before the JavaScript runtime is interrupted     | `300` (Range of `1`-`65536`)   |
 | `pljs.memory_limit`      | Memory limit of the JavaScript engine in `MB`                                 | `512` (Range of `64`-`3096`)   |
-| `pljs.start_proc`        | A function name to be called when the JavaScript engine is first initialized  |                                |
+| `pljs.start_proc`        | A function name to be called when the JavaScript engine is first initialized. Only a superuser can set it. |                                |
 | `pljs.max_module_depth`  | Maximum recursion depth for nested `pljs.import()` / `pljs.require()` calls   | `512` (Range of `1`-`65536`)   |
 
 ## Hook Options
