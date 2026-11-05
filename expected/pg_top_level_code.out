@@ -50,8 +50,8 @@ CREATE FUNCTION tlc_spin_start() RETURNS void LANGUAGE pljs AS $$
   while (true) {}
 $$;
 CREATE ROLE tlc_role;
-SET ROLE tlc_role;
 SET pljs.start_proc = 'tlc_spin_start';
+SET ROLE tlc_role;
 SET statement_timeout = '300ms';
 DO $outer$
 BEGIN
@@ -61,8 +61,8 @@ EXCEPTION WHEN query_canceled THEN
 END $outer$;
 NOTICE:  start_proc: canceling statement due to statement timeout
 RESET statement_timeout;
-SET pljs.start_proc = '';
 RESET ROLE;
+SET pljs.start_proc = '';
 DROP ROLE tlc_role;
 -- 4) A start_proc whose top-level code times out, in a new role's context.
 -- Every error compiling it was taken for a failure to find it: the timeout
@@ -73,14 +73,14 @@ CREATE FUNCTION tlc_start_top() RETURNS void LANGUAGE pljs AS $$
 } { const end = Date.now() + 5000; while (Date.now() < end) {} } function tlc_unused() {
 $$;
 CREATE ROLE tlc_role;
-SET ROLE tlc_role;
 SET pljs.start_proc = 'tlc_start_top';
+SET ROLE tlc_role;
 SET statement_timeout = '300ms';
 DO $$ pljs.elog(NOTICE, 'the timeout was swallowed'); $$ LANGUAGE pljs;
 ERROR:  canceling statement due to statement timeout
 RESET statement_timeout;
-SET pljs.start_proc = '';
 RESET ROLE;
+SET pljs.start_proc = '';
 DROP ROLE tlc_role;
 -- The context a start_proc failed in is freed, not lost: a function that
 -- failed because of its user's start_proc left a whole context behind on

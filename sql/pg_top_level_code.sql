@@ -51,8 +51,8 @@ CREATE FUNCTION tlc_spin_start() RETURNS void LANGUAGE pljs AS $$
 $$;
 
 CREATE ROLE tlc_role;
-SET ROLE tlc_role;
 SET pljs.start_proc = 'tlc_spin_start';
+SET ROLE tlc_role;
 SET statement_timeout = '300ms';
 
 DO $outer$
@@ -63,8 +63,8 @@ EXCEPTION WHEN query_canceled THEN
 END $outer$;
 
 RESET statement_timeout;
-SET pljs.start_proc = '';
 RESET ROLE;
+SET pljs.start_proc = '';
 DROP ROLE tlc_role;
 
 -- 4) A start_proc whose top-level code times out, in a new role's context.
@@ -77,13 +77,13 @@ CREATE FUNCTION tlc_start_top() RETURNS void LANGUAGE pljs AS $$
 $$;
 
 CREATE ROLE tlc_role;
-SET ROLE tlc_role;
 SET pljs.start_proc = 'tlc_start_top';
+SET ROLE tlc_role;
 SET statement_timeout = '300ms';
 DO $$ pljs.elog(NOTICE, 'the timeout was swallowed'); $$ LANGUAGE pljs;
 RESET statement_timeout;
-SET pljs.start_proc = '';
 RESET ROLE;
+SET pljs.start_proc = '';
 DROP ROLE tlc_role;
 
 -- The context a start_proc failed in is freed, not lost: a function that

@@ -144,13 +144,13 @@ CREATE FUNCTION cs_as_role() RETURNS int4 LANGUAGE pljs AS $$ return 1; $$;
 GRANT EXECUTE ON FUNCTION cs_start(), cs_as_role() TO cs_start_role;
 CREATE FUNCTION cs_srf_start() RETURNS SETOF int4 LANGUAGE pljs AS $$
   pljs.return_next(1);
-  pljs.execute('SET ROLE cs_start_role');
   pljs.execute("SET pljs.start_proc = 'cs_start'");
+  pljs.execute('SET ROLE cs_start_role');
   try {
     pljs.execute('SELECT cs_as_role()');
   } finally {
-    pljs.execute('RESET pljs.start_proc');
     pljs.execute('RESET ROLE');
+    pljs.execute('RESET pljs.start_proc');
   }
   pljs.return_next(2);
 $$;
